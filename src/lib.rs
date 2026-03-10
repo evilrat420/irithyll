@@ -39,6 +39,12 @@ pub mod metrics;
 
 pub mod serde_support;
 
+#[cfg(feature = "arrow")]
+pub mod arrow_support;
+
+#[cfg(feature = "onnx")]
+pub mod onnx_export;
+
 // Re-exports — core types
 pub use error::IrithyllError;
 pub use sample::Sample;

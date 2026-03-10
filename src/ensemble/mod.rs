@@ -212,6 +212,51 @@ impl SGBT {
         &self.config
     }
 
+    /// Immutable access to the boosting steps.
+    ///
+    /// Useful for model inspection and export (e.g., ONNX serialization).
+    pub fn steps(&self) -> &[BoostingStep] {
+        &self.steps
+    }
+
+    /// Train on a single sample given raw feature slice and target.
+    ///
+    /// Unlike [`train_one`](Self::train_one) which takes a [`Sample`], this
+    /// accepts a feature slice and target directly — avoiding allocation when
+    /// features are already available as a contiguous slice (e.g., from Arrow
+    /// `Float64Array::values()`).
+    pub fn train_one_slice(&mut self, features: &[f64], target: f64, loss: &dyn Loss) {
+        self.samples_seen += 1;
+
+        // Initialize base prediction from first few targets.
+        if !self.base_initialized {
+            self.initial_targets.push(target);
+            if self.initial_targets.len() >= self.initial_target_count {
+                self.base_prediction = loss.initial_prediction(&self.initial_targets);
+                self.base_initialized = true;
+                self.initial_targets.clear();
+                self.initial_targets.shrink_to_fit();
+            }
+        }
+
+        let mut current_pred = self.base_prediction;
+
+        for step in &mut self.steps {
+            let gradient = loss.gradient(target, current_pred);
+            let hessian = loss.hessian(target, current_pred);
+            let train_count = self.config.variant.train_count(hessian, &mut self.rng_state);
+
+            let step_pred = step.train_and_predict(
+                features,
+                gradient,
+                hessian,
+                train_count,
+            );
+
+            current_pred += self.config.learning_rate * step_pred;
+        }
+    }
+
     /// Feature importances based on accumulated split gains across all trees.
     ///
     /// Returns normalized importances (sum to 1.0) indexed by feature.

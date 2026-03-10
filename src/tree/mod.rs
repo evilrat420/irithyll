@@ -10,6 +10,9 @@ pub mod hoeffding;
 pub mod builder;
 pub mod predict;
 
+#[cfg(feature = "neural-leaves")]
+pub mod leaf_model;
+
 /// A streaming decision tree that trains incrementally.
 pub trait StreamingTree: Send + Sync {
     /// Train on a single gradient/hessian pair at the given feature vector.

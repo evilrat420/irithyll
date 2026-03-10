@@ -8,6 +8,8 @@ pub mod quantile;
 pub mod kmeans;
 pub mod uniform;
 pub mod bins;
+#[cfg(feature = "simd")]
+pub mod simd;
 
 /// Bin edge boundaries computed by a binning strategy.
 #[derive(Debug, Clone)]

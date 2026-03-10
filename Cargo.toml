@@ -23,6 +23,13 @@ tracing = "0.1"
 rayon = { version = "1.10", optional = true }
 dashmap = { version = "6.1", optional = true }
 
+# Arrow/Parquet ecosystem
+arrow = { version = "54", optional = true, default-features = false, features = ["prettyprint"] }
+parquet = { version = "54", optional = true, features = ["arrow"] }
+
+# ONNX export
+prost = { version = "0.13", optional = true }
+
 [dev-dependencies]
 proptest = "1.5"
 approx = "0.5"
@@ -36,7 +43,11 @@ serde-bincode = ["dep:bincode"]
 kmeans-binning = []
 simd = []
 parallel = ["dep:rayon", "dep:dashmap"]
-full = ["serde-json", "serde-bincode", "kmeans-binning", "parallel"]
+arrow = ["dep:arrow"]
+parquet = ["dep:parquet", "arrow"]
+onnx = ["dep:prost"]
+neural-leaves = []
+full = ["serde-json", "serde-bincode", "kmeans-binning", "parallel", "arrow", "parquet", "onnx", "neural-leaves", "simd"]
 
 [[bench]]
 name = "histogram_bench"

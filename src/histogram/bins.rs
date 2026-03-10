@@ -47,12 +47,26 @@ impl FeatureHistogram {
 
     /// Sum of all gradient accumulators across bins.
     pub fn total_gradient(&self) -> f64 {
-        self.grad_sums.iter().sum()
+        #[cfg(feature = "simd")]
+        {
+            crate::histogram::simd::sum_f64(&self.grad_sums)
+        }
+        #[cfg(not(feature = "simd"))]
+        {
+            self.grad_sums.iter().sum()
+        }
     }
 
     /// Sum of all hessian accumulators across bins.
     pub fn total_hessian(&self) -> f64 {
-        self.hess_sums.iter().sum()
+        #[cfg(feature = "simd")]
+        {
+            crate::histogram::simd::sum_f64(&self.hess_sums)
+        }
+        #[cfg(not(feature = "simd"))]
+        {
+            self.hess_sums.iter().sum()
+        }
     }
 
     /// Total sample count across all bins.
@@ -88,22 +102,41 @@ impl FeatureHistogram {
             "cannot subtract histograms with different bin counts"
         );
         let n = self.n_bins();
-        let mut grad_sums = Vec::with_capacity(n);
-        let mut hess_sums = Vec::with_capacity(n);
-        let mut counts = Vec::with_capacity(n);
 
-        for i in 0..n {
-            grad_sums.push(self.grad_sums[i] - child.grad_sums[i]);
-            hess_sums.push(self.hess_sums[i] - child.hess_sums[i]);
-            // Counts are unsigned; parent should always >= child per bin.
-            counts.push(self.counts[i].saturating_sub(child.counts[i]));
+        #[cfg(feature = "simd")]
+        {
+            let mut grad_sums = vec![0.0; n];
+            let mut hess_sums = vec![0.0; n];
+            let mut counts = vec![0u64; n];
+            crate::histogram::simd::subtract_f64(&self.grad_sums, &child.grad_sums, &mut grad_sums);
+            crate::histogram::simd::subtract_f64(&self.hess_sums, &child.hess_sums, &mut hess_sums);
+            crate::histogram::simd::subtract_u64(&self.counts, &child.counts, &mut counts);
+            FeatureHistogram {
+                grad_sums,
+                hess_sums,
+                counts,
+                edges: self.edges.clone(),
+            }
         }
 
-        FeatureHistogram {
-            grad_sums,
-            hess_sums,
-            counts,
-            edges: self.edges.clone(),
+        #[cfg(not(feature = "simd"))]
+        {
+            let mut grad_sums = Vec::with_capacity(n);
+            let mut hess_sums = Vec::with_capacity(n);
+            let mut counts = Vec::with_capacity(n);
+
+            for i in 0..n {
+                grad_sums.push(self.grad_sums[i] - child.grad_sums[i]);
+                hess_sums.push(self.hess_sums[i] - child.hess_sums[i]);
+                counts.push(self.counts[i].saturating_sub(child.counts[i]));
+            }
+
+            FeatureHistogram {
+                grad_sums,
+                hess_sums,
+                counts,
+                edges: self.edges.clone(),
+            }
         }
     }
 }
