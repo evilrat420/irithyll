@@ -162,6 +162,10 @@ pub struct HoeffdingTree {
 
     /// xorshift64 RNG state for feature subsampling.
     rng_state: u64,
+
+    /// Accumulated split gains per feature for importance tracking.
+    /// Indexed by feature index; grows lazily when n_features is learned.
+    split_gains: Vec<f64>,
 }
 
 impl HoeffdingTree {
@@ -188,6 +192,7 @@ impl HoeffdingTree {
             },
         );
 
+        let seed = config.seed;
         Self {
             arena,
             root,
@@ -197,8 +202,89 @@ impl HoeffdingTree {
             samples_seen: 0,
             split_criterion: XGBoostGain::default(),
             feature_mask: Vec::new(),
-            rng_state: 42,
+            rng_state: seed,
+            split_gains: Vec::new(),
         }
+    }
+
+    /// Reconstruct a `HoeffdingTree` from a pre-built arena.
+    ///
+    /// Used during model deserialization. The tree is restored with node
+    /// topology and leaf values intact, but histogram accumulators are empty
+    /// (they will rebuild naturally from continued training).
+    ///
+    /// The root is assumed to be `NodeId(0)`. Leaf states are created empty
+    /// for all current leaf nodes in the arena.
+    pub fn from_arena(config: TreeConfig, arena: TreeArena, n_features: Option<usize>, samples_seen: u64, rng_state: u64) -> Self {
+        let root = if arena.n_nodes() > 0 {
+            NodeId(0)
+        } else {
+            // Empty arena — add a root leaf (shouldn't normally happen in restore).
+            let mut arena_mut = arena;
+            let root = arena_mut.add_leaf(0);
+            return Self {
+                arena: arena_mut,
+                root,
+                config: config.clone(),
+                leaf_states: {
+                    let mut m = HashMap::new();
+                    m.insert(root.0, LeafState::new(n_features.unwrap_or(0)));
+                    m
+                },
+                n_features,
+                samples_seen,
+                split_criterion: XGBoostGain::default(),
+                feature_mask: Vec::new(),
+                rng_state,
+                split_gains: vec![0.0; n_features.unwrap_or(0)],
+            };
+        };
+
+        // Build leaf states for every leaf in the arena.
+        let nf = n_features.unwrap_or(0);
+        let mut leaf_states = HashMap::new();
+        for i in 0..arena.n_nodes() {
+            if arena.is_leaf[i] {
+                leaf_states.insert(i as u32, LeafState::new(nf));
+            }
+        }
+
+        Self {
+            arena,
+            root,
+            config,
+            leaf_states,
+            n_features,
+            samples_seen,
+            split_criterion: XGBoostGain::default(),
+            feature_mask: Vec::new(),
+            rng_state,
+            split_gains: vec![0.0; nf],
+        }
+    }
+
+    /// Immutable access to the underlying arena.
+    #[inline]
+    pub fn arena(&self) -> &TreeArena {
+        &self.arena
+    }
+
+    /// Immutable access to the tree configuration.
+    #[inline]
+    pub fn tree_config(&self) -> &TreeConfig {
+        &self.config
+    }
+
+    /// Number of features (learned from the first sample, `None` before any training).
+    #[inline]
+    pub fn n_features(&self) -> Option<usize> {
+        self.n_features
+    }
+
+    /// Current RNG state (for deterministic checkpoint/restore).
+    #[inline]
+    pub fn rng_state(&self) -> u64 {
+        self.rng_state
     }
 
     /// Route a feature vector from the root down to a leaf, returning the leaf's NodeId.
@@ -344,6 +430,12 @@ impl HoeffdingTree {
 
         // --- Execute the split ---
         let (best_feat_idx, best_candidate) = candidates[0];
+
+        // Track split gain for feature importance.
+        if best_feat_idx < self.split_gains.len() {
+            self.split_gains[best_feat_idx] += best_candidate.gain;
+        }
+
         let best_hist = &histograms.histograms[best_feat_idx];
 
         // Determine the threshold from the bin edge.
@@ -476,6 +568,7 @@ impl StreamingTree for HoeffdingTree {
         } else {
             let n = features.len();
             self.n_features = Some(n);
+            self.split_gains.resize(n, 0.0);
 
             // Re-initialize the root's leaf state now that we know n_features.
             if let Some(state) = self.leaf_states.get_mut(&self.root.0) {
@@ -610,7 +703,12 @@ impl StreamingTree for HoeffdingTree {
 
         self.samples_seen = 0;
         self.feature_mask.clear();
-        self.rng_state = 42;
+        self.rng_state = self.config.seed;
+        self.split_gains.iter_mut().for_each(|g| *g = 0.0);
+    }
+
+    fn split_gains(&self) -> &[f64] {
+        &self.split_gains
     }
 }
 

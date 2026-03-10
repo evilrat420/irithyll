@@ -51,6 +51,13 @@ impl BoostingStep {
         }
     }
 
+    /// Reconstruct a boosting step from a pre-built tree slot.
+    ///
+    /// Used during model deserialization.
+    pub fn from_slot(slot: TreeSlot) -> Self {
+        Self { slot }
+    }
+
     /// Train on a single sample with variant-aware repetition.
     ///
     /// # Arguments

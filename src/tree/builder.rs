@@ -56,6 +56,12 @@ pub struct TreeConfig {
     /// all features are evaluated; smaller values introduce randomness
     /// (similar to random forest feature bagging). Default: 1.0.
     pub feature_subsample_rate: f64,
+
+    /// Random seed for feature subsampling. Default: 42.
+    ///
+    /// Set by the ensemble orchestrator to ensure deterministic, diverse
+    /// behavior across trees (typically `config.seed ^ step_index`).
+    pub seed: u64,
 }
 
 impl Default for TreeConfig {
@@ -68,6 +74,7 @@ impl Default for TreeConfig {
             grace_period: 200,
             delta: 1e-7,
             feature_subsample_rate: 1.0,
+            seed: 42,
         }
     }
 }
@@ -127,6 +134,13 @@ impl TreeConfig {
     #[inline]
     pub fn feature_subsample_rate(mut self, rate: f64) -> Self {
         self.feature_subsample_rate = rate.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set the random seed for feature subsampling.
+    #[inline]
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
         self
     }
 }

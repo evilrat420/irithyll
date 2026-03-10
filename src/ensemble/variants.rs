@@ -13,7 +13,7 @@
 /// Controls how many times a given boosting step trains its tree on each
 /// incoming instance. The default is [`Standard`](SGBTVariant::Standard),
 /// which processes every instance exactly once.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum SGBTVariant {
     /// Standard SGBT: train each tree on every instance exactly once.
     #[default]

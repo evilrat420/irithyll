@@ -19,7 +19,7 @@ use crate::error::{IrithyllError, Result};
 ///
 /// Each variant stores the detector's configuration parameters so that fresh
 /// instances can be created on demand (e.g. when replacing a drifted tree).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum DriftDetectorType {
     /// Page-Hinkley Test with custom delta (magnitude tolerance) and lambda
     /// (detection threshold).
@@ -96,7 +96,9 @@ impl DriftDetectorType {
 /// | `delta`                  | 1e-7                 |
 /// | `drift_detector`         | PageHinkley(0.005, 50.0) |
 /// | `variant`                | Standard             |
-#[derive(Debug, Clone)]
+/// | `seed`                   | 0xDEAD_BEEF_CAFE_4242 |
+/// | `initial_target_count`   | 50                   |
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SGBTConfig {
     /// Number of boosting steps (trees in the ensemble). Default 100.
     pub n_steps: usize,
@@ -120,6 +122,14 @@ pub struct SGBTConfig {
     pub drift_detector: DriftDetectorType,
     /// SGBT computational variant. Default: Standard.
     pub variant: SGBTVariant,
+    /// Random seed for deterministic reproducibility. Default: 0xDEAD_BEEF_CAFE_4242.
+    ///
+    /// Controls feature subsampling and variant skip/MI stochastic decisions.
+    /// Two models with the same seed and same data will produce identical results.
+    pub seed: u64,
+    /// Number of initial targets to collect before computing the base prediction.
+    /// Default: 50.
+    pub initial_target_count: usize,
 }
 
 impl Default for SGBTConfig {
@@ -136,6 +146,8 @@ impl Default for SGBTConfig {
             delta: 1e-7,
             drift_detector: DriftDetectorType::default(),
             variant: SGBTVariant::default(),
+            seed: 0xDEAD_BEEF_CAFE_4242,
+            initial_target_count: 50,
         }
     }
 }
@@ -239,6 +251,24 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Set the random seed for deterministic reproducibility.
+    ///
+    /// Controls feature subsampling and variant skip/MI stochastic decisions.
+    /// Two models with the same seed and data sequence will produce identical results.
+    pub fn seed(mut self, seed: u64) -> Self {
+        self.config.seed = seed;
+        self
+    }
+
+    /// Set the number of initial targets to collect before computing the base prediction.
+    ///
+    /// The model collects this many target values before initializing the base
+    /// prediction (via `loss.initial_prediction`). Default: 50.
+    pub fn initial_target_count(mut self, count: usize) -> Self {
+        self.config.initial_target_count = count;
+        self
+    }
+
     /// Validate and build the configuration.
     ///
     /// # Errors
@@ -284,6 +314,12 @@ impl SGBTConfigBuilder {
         if c.delta <= 0.0 || c.delta >= 1.0 {
             return Err(IrithyllError::InvalidConfig(
                 "delta must be in (0, 1)".into(),
+            ));
+        }
+
+        if c.initial_target_count == 0 {
+            return Err(IrithyllError::InvalidConfig(
+                "initial_target_count must be > 0".into(),
             ));
         }
 

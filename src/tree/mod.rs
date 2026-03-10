@@ -26,4 +26,12 @@ pub trait StreamingTree: Send + Sync {
 
     /// Reset to initial state (single root leaf).
     fn reset(&mut self);
+
+    /// Accumulated split gains per feature for importance tracking.
+    ///
+    /// Returns an empty slice if the tree hasn't seen any features yet
+    /// or the implementation doesn't track split gains.
+    fn split_gains(&self) -> &[f64] {
+        &[]
+    }
 }

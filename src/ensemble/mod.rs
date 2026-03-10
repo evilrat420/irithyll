@@ -21,6 +21,7 @@ pub mod step;
 pub mod replacement;
 pub mod multiclass;
 pub mod variants;
+pub mod parallel;
 
 use std::fmt;
 
@@ -80,12 +81,16 @@ impl SGBT {
             .feature_subsample_rate(config.feature_subsample_rate);
 
         let steps: Vec<BoostingStep> = (0..config.n_steps)
-            .map(|_| {
+            .map(|i| {
+                let mut tc = tree_config.clone();
+                tc.seed = config.seed ^ (i as u64);
                 let detector = config.drift_detector.create();
-                BoostingStep::new(tree_config.clone(), detector)
+                BoostingStep::new(tc, detector)
             })
             .collect();
 
+        let seed = config.seed;
+        let initial_target_count = config.initial_target_count;
         Self {
             config,
             steps,
@@ -93,9 +98,9 @@ impl SGBT {
             base_prediction: 0.0,
             base_initialized: false,
             initial_targets: Vec::new(),
-            initial_target_count: 50,
+            initial_target_count,
             samples_seen: 0,
-            rng_state: 0xDEAD_BEEF_CAFE_4242,
+            rng_state: seed,
         }
     }
 
@@ -207,9 +212,31 @@ impl SGBT {
         &self.config
     }
 
-    /// Feature importances (placeholder — populated in Phase 6).
+    /// Feature importances based on accumulated split gains across all trees.
+    ///
+    /// Returns normalized importances (sum to 1.0) indexed by feature.
+    /// Returns an empty Vec if no splits have occurred yet.
     pub fn feature_importances(&self) -> Vec<f64> {
-        Vec::new()
+        // Aggregate split gains across all boosting steps.
+        let mut totals: Vec<f64> = Vec::new();
+        for step in &self.steps {
+            let gains = step.slot().split_gains();
+            if totals.is_empty() && !gains.is_empty() {
+                totals.resize(gains.len(), 0.0);
+            }
+            for (i, &g) in gains.iter().enumerate() {
+                if i < totals.len() {
+                    totals[i] += g;
+                }
+            }
+        }
+
+        // Normalize to sum to 1.0.
+        let sum: f64 = totals.iter().sum();
+        if sum > 0.0 {
+            totals.iter_mut().for_each(|v| *v /= sum);
+        }
+        totals
     }
 
     /// Reset the ensemble to initial state.
@@ -221,7 +248,150 @@ impl SGBT {
         self.base_initialized = false;
         self.initial_targets.clear();
         self.samples_seen = 0;
-        self.rng_state = 0xDEAD_BEEF_CAFE_4242;
+        self.rng_state = self.config.seed;
+    }
+
+    /// Serialize the model into a [`ModelState`](crate::serde_support::ModelState).
+    ///
+    /// Captures all internal state needed to reconstruct the model for
+    /// prediction and continued training. The caller must supply a
+    /// [`LossType`](crate::serde_support::LossType) tag matching the loss
+    /// function used during training.
+    #[cfg(feature = "serde-json")]
+    pub fn to_model_state(
+        &self,
+        loss_type: crate::serde_support::LossType,
+    ) -> crate::serde_support::ModelState {
+        use crate::serde_support::{ModelState, StepSnapshot, TreeSnapshot};
+
+        fn snapshot_tree(
+            tree: &crate::tree::hoeffding::HoeffdingTree,
+        ) -> TreeSnapshot {
+            use crate::tree::StreamingTree;
+            let arena = tree.arena();
+            TreeSnapshot {
+                feature_idx: arena.feature_idx.clone(),
+                threshold: arena.threshold.clone(),
+                left: arena.left.iter().map(|id| id.0).collect(),
+                right: arena.right.iter().map(|id| id.0).collect(),
+                leaf_value: arena.leaf_value.clone(),
+                is_leaf: arena.is_leaf.clone(),
+                depth: arena.depth.clone(),
+                sample_count: arena.sample_count.clone(),
+                n_features: tree.n_features(),
+                samples_seen: tree.n_samples_seen(),
+                rng_state: tree.rng_state(),
+            }
+        }
+
+        let steps = self
+            .steps
+            .iter()
+            .map(|step| {
+                let slot = step.slot();
+                let tree_snap = snapshot_tree(slot.active_tree());
+                let alt_snap = slot.alternate_tree().map(snapshot_tree);
+                StepSnapshot {
+                    tree: tree_snap,
+                    alternate_tree: alt_snap,
+                }
+            })
+            .collect();
+
+        ModelState {
+            config: self.config.clone(),
+            loss_type,
+            base_prediction: self.base_prediction,
+            base_initialized: self.base_initialized,
+            initial_targets: self.initial_targets.clone(),
+            initial_target_count: self.initial_target_count,
+            samples_seen: self.samples_seen,
+            rng_state: self.rng_state,
+            steps,
+        }
+    }
+
+    /// Reconstruct an SGBT model from a [`ModelState`](crate::serde_support::ModelState).
+    ///
+    /// Rebuilds the full ensemble including tree topology and leaf values.
+    /// Histogram accumulators are left empty and will rebuild from continued
+    /// training. The drift detector for each step is freshly created from
+    /// the config (its internal state is not serialized).
+    #[cfg(feature = "serde-json")]
+    pub fn from_model_state(state: crate::serde_support::ModelState) -> Self {
+        use crate::serde_support::TreeSnapshot;
+        use crate::tree::hoeffding::HoeffdingTree;
+        use crate::tree::node::{NodeId, TreeArena};
+        use crate::ensemble::replacement::TreeSlot;
+
+        fn rebuild_tree(
+            snapshot: &TreeSnapshot,
+            tree_config: TreeConfig,
+        ) -> HoeffdingTree {
+            let mut arena = TreeArena::new();
+            let n = snapshot.feature_idx.len();
+
+            // Rebuild arena from parallel vecs.
+            for i in 0..n {
+                arena.feature_idx.push(snapshot.feature_idx[i]);
+                arena.threshold.push(snapshot.threshold[i]);
+                arena.left.push(NodeId(snapshot.left[i]));
+                arena.right.push(NodeId(snapshot.right[i]));
+                arena.leaf_value.push(snapshot.leaf_value[i]);
+                arena.is_leaf.push(snapshot.is_leaf[i]);
+                arena.depth.push(snapshot.depth[i]);
+                arena.sample_count.push(snapshot.sample_count[i]);
+            }
+
+            HoeffdingTree::from_arena(
+                tree_config,
+                arena,
+                snapshot.n_features,
+                snapshot.samples_seen,
+                snapshot.rng_state,
+            )
+        }
+
+        let loss = state.loss_type.into_loss();
+
+        let steps = state
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, step_snap)| {
+                let tree_config = TreeConfig::new()
+                    .max_depth(state.config.max_depth)
+                    .n_bins(state.config.n_bins)
+                    .lambda(state.config.lambda)
+                    .gamma(state.config.gamma)
+                    .grace_period(state.config.grace_period)
+                    .delta(state.config.delta)
+                    .feature_subsample_rate(state.config.feature_subsample_rate)
+                    .seed(state.config.seed ^ (i as u64));
+
+                let active = rebuild_tree(&step_snap.tree, tree_config.clone());
+                let alternate = step_snap
+                    .alternate_tree
+                    .as_ref()
+                    .map(|snap| rebuild_tree(snap, tree_config.clone()));
+
+                let detector = state.config.drift_detector.create();
+                let slot = TreeSlot::from_trees(active, alternate, tree_config, detector);
+                BoostingStep::from_slot(slot)
+            })
+            .collect();
+
+        Self {
+            config: state.config,
+            steps,
+            loss,
+            base_prediction: state.base_prediction,
+            base_initialized: state.base_initialized,
+            initial_targets: state.initial_targets,
+            initial_target_count: state.initial_target_count,
+            samples_seen: state.samples_seen,
+            rng_state: state.rng_state,
+        }
     }
 }
 

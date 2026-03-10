@@ -50,6 +50,10 @@ pub use drift::{DriftDetector, DriftSignal};
 pub use tree::StreamingTree;
 pub use histogram::BinningStrategy;
 
+// Re-exports — parallel (feature-gated)
+#[cfg(feature = "parallel")]
+pub use ensemble::parallel::ParallelSGBT;
+
 // Re-exports — async streaming
 pub use stream::{AsyncSGBT, Predictor, SampleSender, Prediction, PredictionStream};
 

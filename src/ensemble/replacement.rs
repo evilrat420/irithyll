@@ -66,6 +66,24 @@ impl TreeSlot {
         }
     }
 
+    /// Reconstruct a `TreeSlot` from pre-built trees and a fresh drift detector.
+    ///
+    /// Used during model deserialization to restore tree state without replaying
+    /// the training stream.
+    pub fn from_trees(
+        active: HoeffdingTree,
+        alternate: Option<HoeffdingTree>,
+        tree_config: TreeConfig,
+        detector: Box<dyn DriftDetector>,
+    ) -> Self {
+        Self {
+            active,
+            alternate,
+            detector,
+            tree_config,
+        }
+    }
+
     /// Train the active tree (and alternate if it exists) on a single sample.
     ///
     /// The absolute value of the gradient is fed to the drift detector as an
@@ -159,6 +177,30 @@ impl TreeSlot {
     #[inline]
     pub fn has_alternate(&self) -> bool {
         self.alternate.is_some()
+    }
+
+    /// Accumulated split gains per feature from the active tree.
+    #[inline]
+    pub fn split_gains(&self) -> &[f64] {
+        self.active.split_gains()
+    }
+
+    /// Immutable access to the active tree.
+    #[inline]
+    pub fn active_tree(&self) -> &HoeffdingTree {
+        &self.active
+    }
+
+    /// Immutable access to the alternate tree (if one is being trained).
+    #[inline]
+    pub fn alternate_tree(&self) -> Option<&HoeffdingTree> {
+        self.alternate.as_ref()
+    }
+
+    /// Immutable access to the tree configuration.
+    #[inline]
+    pub fn tree_config(&self) -> &TreeConfig {
+        &self.tree_config
     }
 
     /// Reset to a completely fresh state: new tree, no alternate, reset detector.
