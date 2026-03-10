@@ -70,10 +70,22 @@ pub fn train_from_record_batch(
     let mut features = vec![0.0_f64; n_features];
 
     for row in 0..n_rows {
-        for (j, col) in feature_columns.iter().enumerate() {
-            features[j] = col.values()[row];
-        }
         let target = target_array.values()[row];
+        if !target.is_finite() {
+            continue;
+        }
+        let mut has_non_finite = false;
+        for (j, col) in feature_columns.iter().enumerate() {
+            let v = col.values()[row];
+            if !v.is_finite() {
+                has_non_finite = true;
+                break;
+            }
+            features[j] = v;
+        }
+        if has_non_finite {
+            continue;
+        }
         model.train_one_slice(&features, target, loss);
     }
 
@@ -159,11 +171,24 @@ pub fn record_batch_to_samples(
     let mut samples = Vec::with_capacity(n_rows);
 
     for row in 0..n_rows {
-        let mut features = Vec::with_capacity(n_features);
-        for col in &feature_columns {
-            features.push(col.values()[row]);
+        let target = target_array.values()[row];
+        if !target.is_finite() {
+            continue;
         }
-        samples.push((features, target_array.values()[row]));
+        let mut features = Vec::with_capacity(n_features);
+        let mut has_non_finite = false;
+        for col in &feature_columns {
+            let v = col.values()[row];
+            if !v.is_finite() {
+                has_non_finite = true;
+                break;
+            }
+            features.push(v);
+        }
+        if has_non_finite {
+            continue;
+        }
+        samples.push((features, target));
     }
 
     Ok(samples)
@@ -361,6 +386,51 @@ mod tests {
             assert_eq!(samples.len(), 5);
             assert_eq!(samples[0].0.len(), 2); // 2 feature columns
             assert!((samples[0].1 - 2.5).abs() < 1e-10); // first target
+        }
+
+        #[test]
+        fn nan_inf_rows_are_skipped_in_training() {
+            use crate::ensemble::config::SGBTConfig;
+            use crate::loss::squared::SquaredLoss;
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x1", DataType::Float64, false),
+                Field::new("target", DataType::Float64, false),
+            ]));
+            let x1 = Arc::new(Float64Array::from(vec![1.0, f64::NAN, 3.0, f64::INFINITY, 5.0]));
+            let target = Arc::new(Float64Array::from(vec![2.0, 4.0, f64::NAN, 8.0, 10.0]));
+            let batch = RecordBatch::try_new(schema, vec![x1, target]).unwrap();
+
+            let config = SGBTConfig::builder()
+                .n_steps(3)
+                .learning_rate(0.1)
+                .grace_period(2)
+                .build()
+                .unwrap();
+            let mut model = crate::ensemble::SGBT::new(config);
+            let loss = SquaredLoss;
+
+            let result = train_from_record_batch(&mut model, &batch, "target", &loss);
+            assert!(result.is_ok());
+            // Rows 0 (1.0, 2.0) and 4 (5.0, 10.0) are clean. Rows 1,2,3 have NaN/Inf.
+            assert_eq!(model.n_samples_seen(), 2);
+        }
+
+        #[test]
+        fn nan_inf_rows_are_skipped_in_samples() {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("x1", DataType::Float64, false),
+                Field::new("target", DataType::Float64, false),
+            ]));
+            let x1 = Arc::new(Float64Array::from(vec![1.0, f64::NAN, 3.0]));
+            let target = Arc::new(Float64Array::from(vec![2.0, 4.0, f64::NEG_INFINITY]));
+            let batch = RecordBatch::try_new(schema, vec![x1, target]).unwrap();
+
+            let samples = record_batch_to_samples(&batch, "target").unwrap();
+            // Only row 0 is fully finite.
+            assert_eq!(samples.len(), 1);
+            assert!((samples[0].0[0] - 1.0).abs() < 1e-10);
+            assert!((samples[0].1 - 2.0).abs() < 1e-10);
         }
     }
 }

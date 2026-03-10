@@ -21,7 +21,6 @@ tracing = "0.1"
 
 # Optional acceleration dependencies (activated via feature flags)
 rayon = { version = "1.10", optional = true }
-dashmap = { version = "6.1", optional = true }
 
 # Arrow/Parquet ecosystem
 arrow = { version = "54", optional = true, default-features = false, features = ["prettyprint"] }
@@ -42,7 +41,7 @@ serde-json = ["dep:serde_json"]
 serde-bincode = ["dep:bincode"]
 kmeans-binning = []
 simd = []
-parallel = ["dep:rayon", "dep:dashmap"]
+parallel = ["dep:rayon"]
 arrow = ["dep:arrow"]
 parquet = ["dep:parquet", "arrow"]
 onnx = ["dep:prost"]
@@ -59,4 +58,8 @@ harness = false
 
 [[bench]]
 name = "ensemble_bench"
+harness = false
+
+[[bench]]
+name = "parallel_bench"
 harness = false

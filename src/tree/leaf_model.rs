@@ -138,14 +138,19 @@ pub struct MLPLeafModel {
     output_bias: f64,
     hidden_size: usize,
     learning_rate: f64,
+    seed: u64,
     initialized: bool,
     hidden_activations: Vec<f64>,
     hidden_pre_activations: Vec<f64>,
 }
 
 impl MLPLeafModel {
-    /// Create a new MLP leaf model with the given hidden layer size and learning rate.
-    pub fn new(hidden_size: usize, learning_rate: f64) -> Self {
+    /// Create a new MLP leaf model with the given hidden layer size, learning rate, and seed.
+    ///
+    /// The seed controls deterministic weight initialization. Different seeds
+    /// produce different initial weights, which is critical for ensemble diversity
+    /// when multiple MLP leaves share the same `hidden_size`.
+    pub fn new(hidden_size: usize, learning_rate: f64, seed: u64) -> Self {
         Self {
             hidden_weights: Vec::new(),
             hidden_bias: Vec::new(),
@@ -153,6 +158,7 @@ impl MLPLeafModel {
             output_bias: 0.0,
             hidden_size,
             learning_rate,
+            seed,
             initialized: false,
             hidden_activations: Vec::new(),
             hidden_pre_activations: Vec::new(),
@@ -161,7 +167,7 @@ impl MLPLeafModel {
 
     /// Initialize weights using xorshift64, scaled to [-0.1, 0.1].
     fn initialize(&mut self, input_size: usize) {
-        let mut state = self.hidden_size as u64 ^ 0xCAFE;
+        let mut state = self.seed ^ (self.hidden_size as u64);
 
         self.hidden_weights = Vec::with_capacity(self.hidden_size);
         for _ in 0..self.hidden_size {
@@ -289,7 +295,9 @@ impl LeafModel for MLPLeafModel {
     }
 
     fn clone_fresh(&self) -> Box<dyn LeafModel> {
-        Box::new(MLPLeafModel::new(self.hidden_size, self.learning_rate))
+        // Derive a new seed so each fresh clone gets distinct initial weights.
+        let derived_seed = self.seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(1);
+        Box::new(MLPLeafModel::new(self.hidden_size, self.learning_rate, derived_seed))
     }
 }
 
@@ -321,14 +329,18 @@ impl Default for LeafModelType {
 
 impl LeafModelType {
     /// Create a fresh boxed leaf model of this type.
-    pub fn create(&self) -> Box<dyn LeafModel> {
+    ///
+    /// The `seed` parameter is used for MLP weight initialization. Different
+    /// seeds produce different initial weights, ensuring ensemble diversity.
+    /// For ClosedForm and Linear models the seed is unused.
+    pub fn create(&self, seed: u64) -> Box<dyn LeafModel> {
         match self {
             Self::ClosedForm => Box::new(ClosedFormLeaf::new()),
             Self::Linear { learning_rate } => Box::new(LinearLeafModel::new(*learning_rate)),
             Self::MLP {
                 hidden_size,
                 learning_rate,
-            } => Box::new(MLPLeafModel::new(*hidden_size, *learning_rate)),
+            } => Box::new(MLPLeafModel::new(*hidden_size, *learning_rate, seed)),
         }
     }
 }
@@ -452,7 +464,7 @@ mod tests {
 
     #[test]
     fn mlp_produces_finite_predictions() {
-        let model_uninit = MLPLeafModel::new(4, 0.01);
+        let model_uninit = MLPLeafModel::new(4, 0.01, 42);
         let features = vec![1.0, 2.0, 3.0];
 
         // Before training: should return 0
@@ -464,7 +476,7 @@ mod tests {
         );
 
         // After training: should still be finite
-        let mut model = MLPLeafModel::new(4, 0.01);
+        let mut model = MLPLeafModel::new(4, 0.01, 42);
         for _ in 0..10 {
             model.update(&features, 0.5, 1.0, 0.1);
         }
@@ -477,7 +489,7 @@ mod tests {
 
     #[test]
     fn mlp_loss_decreases() {
-        let mut model = MLPLeafModel::new(8, 0.05);
+        let mut model = MLPLeafModel::new(8, 0.05, 123);
         let features = vec![1.0, -0.5, 0.3];
         let target = 2.5;
         let lambda = 0.1;
@@ -506,7 +518,7 @@ mod tests {
 
     #[test]
     fn mlp_clone_fresh_resets() {
-        let mut model = MLPLeafModel::new(4, 0.01);
+        let mut model = MLPLeafModel::new(4, 0.01, 42);
         let features = vec![1.0, 2.0];
 
         // Train it
@@ -542,7 +554,7 @@ mod tests {
         let features = vec![1.0, 2.0, 3.0];
 
         // ClosedForm
-        let mut closed = LeafModelType::ClosedForm.create();
+        let mut closed = LeafModelType::ClosedForm.create(0);
         closed.update(&features, 1.0, 1.0, 0.1);
         let p = closed.predict(&features);
         assert!(p.is_finite(), "ClosedForm prediction should be finite");
@@ -551,7 +563,7 @@ mod tests {
         let mut linear = LeafModelType::Linear {
             learning_rate: 0.01,
         }
-        .create();
+        .create(0);
         linear.update(&features, 1.0, 1.0, 0.1);
         let p = linear.predict(&features);
         assert!(p.is_finite(), "Linear prediction should be finite");
@@ -561,7 +573,7 @@ mod tests {
             hidden_size: 4,
             learning_rate: 0.01,
         }
-        .create();
+        .create(99);
         mlp.update(&features, 1.0, 1.0, 0.1);
         let p = mlp.predict(&features);
         assert!(p.is_finite(), "MLP prediction should be finite");
