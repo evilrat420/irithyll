@@ -1,0 +1,54 @@
+[package]
+name = "irithyll"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Streaming Gradient Boosted Trees for evolving data streams"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/evilrat420/irithyll"
+keywords = ["machine-learning", "gradient-boosting", "streaming", "online-learning", "decision-trees"]
+categories = ["algorithms", "science"]
+
+[dependencies]
+dashmap = "6.1"
+rayon = "1.10"
+crossbeam = "0.8"
+parking_lot = "0.12"
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+futures-core = "0.3"
+ordered-float = { version = "5.0", features = ["serde"] }
+smallvec = { version = "1.13", features = ["serde"] }
+num-traits = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", optional = true }
+bincode = { version = "2", optional = true }
+thiserror = "2.0"
+tracing = "0.1"
+rand = "0.8"
+rand_xoshiro = "0.6"
+
+[dev-dependencies]
+proptest = "1.5"
+approx = "0.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+tokio = { version = "1", features = ["full"] }
+
+[features]
+default = ["serde-json"]
+serde-json = ["dep:serde_json"]
+serde-bincode = ["dep:bincode"]
+kmeans-binning = []
+simd = []
+full = ["serde-json", "serde-bincode", "kmeans-binning"]
+
+[[bench]]
+name = "histogram_bench"
+harness = false
+
+[[bench]]
+name = "tree_bench"
+harness = false
+
+[[bench]]
+name = "ensemble_bench"
+harness = false
