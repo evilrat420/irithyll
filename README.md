@@ -10,7 +10,7 @@
 
 Irithyll is a pure Rust implementation of the SGBT algorithm ([Gunasekara et al., 2024](https://doi.org/10.1007/s10994-024-06517-y)). It learns one sample at a time. No batches, no windows, no retraining. Each tree in the ensemble uses Hoeffding-bound split decisions to grow incrementally, and when the data distribution shifts, concept drift detectors trigger automatic tree replacement so the model stays current.
 
-This started as a real need: a gradient boosted tree that could sit inside a live trading system, ingesting samples as they arrive and adapting when markets change regime. The paper laid the foundation, but production use required going further. So irithyll adds EWMA leaf decay for continuous forgetting, lazy O(1) histogram decay (because decaying every bin on every sample doesn't scale), proactive tree replacement on a timer, and EFDT-style split re-evaluation at max-depth leaves. These aren't cosmetic extras; they're what makes the difference between a research prototype and something you can actually deploy.
+The paper laid the foundation, but deploying streaming trees in long-running systems required going further. Irithyll adds EWMA leaf decay for continuous forgetting, lazy O(1) histogram decay (because decaying every bin on every sample doesn't scale), proactive tree replacement on a timer, and EFDT-style split re-evaluation at max-depth leaves. Together these close the gap between the research algorithm and a system you can run indefinitely on non-stationary data.
 
 ## Features
 
