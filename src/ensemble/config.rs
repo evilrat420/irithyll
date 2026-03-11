@@ -68,7 +68,11 @@ impl DriftDetectorType {
                 warning_level,
                 drift_level,
                 min_instances,
-            } => Box::new(Ddm::with_params(*warning_level, *drift_level, *min_instances)),
+            } => Box::new(Ddm::with_params(
+                *warning_level,
+                *drift_level,
+                *min_instances,
+            )),
         }
     }
 }
@@ -404,12 +408,10 @@ impl SGBTConfigBuilder {
         }
         if let Some(interval) = c.split_reeval_interval {
             if interval < c.grace_period {
-                return Err(IrithyllError::InvalidConfig(
-                    format!(
-                        "split_reeval_interval ({}) must be >= grace_period ({})",
-                        interval, c.grace_period
-                    ),
-                ));
+                return Err(IrithyllError::InvalidConfig(format!(
+                    "split_reeval_interval ({}) must be >= grace_period ({})",
+                    interval, c.grace_period
+                )));
             }
         }
 
@@ -769,9 +771,7 @@ mod tests {
 
     #[test]
     fn validation_accepts_standard_variant() {
-        let result = SGBTConfig::builder()
-            .variant(SGBTVariant::Standard)
-            .build();
+        let result = SGBTConfig::builder().variant(SGBTVariant::Standard).build();
         assert!(result.is_ok());
     }
 
@@ -904,7 +904,10 @@ mod tests {
                 break;
             }
         }
-        assert!(drifted, "detector created from DriftDetectorType should be functional");
+        assert!(
+            drifted,
+            "detector created from DriftDetectorType should be functional"
+        );
     }
 
     // ------------------------------------------------------------------

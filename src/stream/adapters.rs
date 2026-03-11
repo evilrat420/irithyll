@@ -126,8 +126,8 @@ mod tests {
     use crate::sample::Sample;
     use crate::stream::channel;
 
-    use std::sync::Arc;
     use parking_lot::RwLock;
+    use std::sync::Arc;
 
     use futures_core::Stream;
     use std::pin::Pin;

@@ -380,11 +380,8 @@ impl Adwin {
 
         // Mark which buckets to keep. Since keep_set lists them newest-first,
         // we process them in reverse to restore oldest-first order within rows.
-        let mut keep_flags: Vec<Vec<bool>> = self
-            .rows
-            .iter()
-            .map(|row| vec![false; row.len()])
-            .collect();
+        let mut keep_flags: Vec<Vec<bool>> =
+            self.rows.iter().map(|row| vec![false; row.len()]).collect();
         for &(r, b) in &keep_set {
             keep_flags[r][b] = true;
         }
@@ -634,10 +631,7 @@ mod tests {
             det.update(3.0);
         }
         let mean = det.estimated_mean();
-        assert!(
-            (mean - 3.0).abs() < 1e-9,
-            "Expected mean ~3.0, got {mean}"
-        );
+        assert!((mean - 3.0).abs() < 1e-9, "Expected mean ~3.0, got {mean}");
 
         // Feed 100 values of 7.0.
         for _ in 0..100 {
@@ -772,7 +766,10 @@ mod tests {
             det.update(0.0);
         }
         let width_before = det.width();
-        assert!(width_before >= 1900, "Expected large window, got {width_before}");
+        assert!(
+            width_before >= 1900,
+            "Expected large window, got {width_before}"
+        );
 
         // Inject abrupt shift to force drift.
         let mut drifted = false;
@@ -843,6 +840,9 @@ mod tests {
         let signals1: Vec<DriftSignal> = values.iter().map(|&v| det1.update(v)).collect();
         let signals2: Vec<DriftSignal> = values.iter().map(|&v| det2.update(v)).collect();
 
-        assert_eq!(signals1, signals2, "Same input must produce identical signals");
+        assert_eq!(
+            signals1, signals2,
+            "Same input must produce identical signals"
+        );
     }
 }

@@ -137,10 +137,7 @@ mod tests {
 
         let expected = [2.0, 4.0, 6.0, 8.0];
         for (got, want) in edges.edges.iter().zip(expected.iter()) {
-            assert!(
-                (got - want).abs() < 1e-12,
-                "edge {got} != expected {want}"
-            );
+            assert!((got - want).abs() < 1e-12, "edge {got} != expected {want}");
         }
 
         // Verify equal spacing
@@ -257,10 +254,7 @@ mod tests {
 
         let expected = [-8.0, -6.0, -4.0];
         for (got, want) in edges.edges.iter().zip(expected.iter()) {
-            assert!(
-                (got - want).abs() < 1e-12,
-                "edge {got} != expected {want}"
-            );
+            assert!((got - want).abs() < 1e-12, "edge {got} != expected {want}");
         }
     }
 

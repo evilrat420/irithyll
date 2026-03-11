@@ -4,8 +4,8 @@
 //! underlying distribution has changed, triggering tree replacement in SGBT.
 
 pub mod adwin;
-pub mod pht;
 pub mod ddm;
+pub mod pht;
 
 /// Signal emitted by a drift detector after observing a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

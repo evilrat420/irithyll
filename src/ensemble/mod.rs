@@ -17,18 +17,18 @@
 //!    of all preceding trees.
 
 pub mod config;
-pub mod step;
-pub mod replacement;
 pub mod multiclass;
-pub mod variants;
 pub mod parallel;
+pub mod replacement;
+pub mod step;
+pub mod variants;
 
 use std::fmt;
 
 use crate::ensemble::config::SGBTConfig;
 use crate::ensemble::step::BoostingStep;
-use crate::loss::Loss;
 use crate::loss::squared::SquaredLoss;
+use crate::loss::Loss;
 use crate::sample::Sample;
 use crate::tree::builder::TreeConfig;
 
@@ -71,9 +71,9 @@ impl fmt::Debug for SGBT {
 impl SGBT {
     /// Create a new SGBT ensemble with squared loss (regression).
     pub fn new(config: SGBTConfig) -> Self {
-        let leaf_decay_alpha = config.leaf_half_life.map(|hl| {
-            (-(2.0_f64.ln()) / hl as f64).exp()
-        });
+        let leaf_decay_alpha = config
+            .leaf_half_life
+            .map(|hl| (-(2.0_f64.ln()) / hl as f64).exp());
 
         let tree_config = TreeConfig::new()
             .max_depth(config.max_depth)
@@ -141,14 +141,13 @@ impl SGBT {
         for step in &mut self.steps {
             let gradient = self.loss.gradient(sample.target, current_pred);
             let hessian = self.loss.hessian(sample.target, current_pred);
-            let train_count = self.config.variant.train_count(hessian, &mut self.rng_state);
+            let train_count = self
+                .config
+                .variant
+                .train_count(hessian, &mut self.rng_state);
 
-            let step_pred = step.train_and_predict(
-                &sample.features,
-                gradient,
-                hessian,
-                train_count,
-            );
+            let step_pred =
+                step.train_and_predict(&sample.features, gradient, hessian, train_count);
 
             current_pred += self.config.learning_rate * step_pred;
         }
@@ -252,14 +251,12 @@ impl SGBT {
         for step in &mut self.steps {
             let gradient = loss.gradient(target, current_pred);
             let hessian = loss.hessian(target, current_pred);
-            let train_count = self.config.variant.train_count(hessian, &mut self.rng_state);
+            let train_count = self
+                .config
+                .variant
+                .train_count(hessian, &mut self.rng_state);
 
-            let step_pred = step.train_and_predict(
-                features,
-                gradient,
-                hessian,
-                train_count,
-            );
+            let step_pred = step.train_and_predict(features, gradient, hessian, train_count);
 
             current_pred += self.config.learning_rate * step_pred;
         }
@@ -317,9 +314,7 @@ impl SGBT {
     ) -> crate::serde_support::ModelState {
         use crate::serde_support::{ModelState, StepSnapshot, TreeSnapshot};
 
-        fn snapshot_tree(
-            tree: &crate::tree::hoeffding::HoeffdingTree,
-        ) -> TreeSnapshot {
+        fn snapshot_tree(tree: &crate::tree::hoeffding::HoeffdingTree) -> TreeSnapshot {
             use crate::tree::StreamingTree;
             let arena = tree.arena();
             TreeSnapshot {
@@ -372,15 +367,12 @@ impl SGBT {
     /// the config (its internal state is not serialized).
     #[cfg(feature = "serde-json")]
     pub fn from_model_state(state: crate::serde_support::ModelState) -> Self {
+        use crate::ensemble::replacement::TreeSlot;
         use crate::serde_support::TreeSnapshot;
         use crate::tree::hoeffding::HoeffdingTree;
         use crate::tree::node::{NodeId, TreeArena};
-        use crate::ensemble::replacement::TreeSlot;
 
-        fn rebuild_tree(
-            snapshot: &TreeSnapshot,
-            tree_config: TreeConfig,
-        ) -> HoeffdingTree {
+        fn rebuild_tree(snapshot: &TreeSnapshot, tree_config: TreeConfig) -> HoeffdingTree {
             let mut arena = TreeArena::new();
             let n = snapshot.feature_idx.len();
 
@@ -407,9 +399,10 @@ impl SGBT {
 
         let loss = state.loss_type.into_loss();
 
-        let leaf_decay_alpha = state.config.leaf_half_life.map(|hl| {
-            (-(2.0_f64.ln()) / hl as f64).exp()
-        });
+        let leaf_decay_alpha = state
+            .config
+            .leaf_half_life
+            .map(|hl| (-(2.0_f64.ln()) / hl as f64).exp());
         let max_tree_samples = state.config.max_tree_samples;
 
         let steps = state
@@ -436,7 +429,13 @@ impl SGBT {
                     .map(|snap| rebuild_tree(snap, tree_config.clone()));
 
                 let detector = state.config.drift_detector.create();
-                let slot = TreeSlot::from_trees(active, alternate, tree_config, detector, max_tree_samples);
+                let slot = TreeSlot::from_trees(
+                    active,
+                    alternate,
+                    tree_config,
+                    detector,
+                    max_tree_samples,
+                );
                 BoostingStep::from_slot(slot)
             })
             .collect();
@@ -541,7 +540,8 @@ mod tests {
         assert!(
             late_rmse < early_rmse,
             "RMSE should decrease: early={:.4}, late={:.4}",
-            early_rmse, late_rmse
+            early_rmse,
+            late_rmse
         );
     }
 
@@ -569,7 +569,8 @@ mod tests {
         assert!(
             (pred_seq - pred_batch).abs() < 1e-10,
             "seq={}, batch={}",
-            pred_seq, pred_batch
+            pred_seq,
+            pred_batch
         );
     }
 
@@ -601,7 +602,11 @@ mod tests {
         use crate::loss::logistic::LogisticLoss;
         let model = SGBT::with_loss(default_config(), Box::new(LogisticLoss));
         let pred = model.predict_transformed(&[1.0, 2.0]);
-        assert!((pred - 0.5).abs() < 1e-6, "sigmoid(0) should be 0.5, got {}", pred);
+        assert!(
+            (pred - 0.5).abs() < 1e-6,
+            "sigmoid(0) should be 0.5, got {}",
+            pred
+        );
     }
 
     #[test]
@@ -623,7 +628,11 @@ mod tests {
         }
 
         let pred = model.predict(&[1.0, 2.0]);
-        assert!(pred.is_finite(), "EWMA-enabled model should produce finite predictions, got {}", pred);
+        assert!(
+            pred.is_finite(),
+            "EWMA-enabled model should produce finite predictions, got {}",
+            pred
+        );
     }
 
     #[test]
@@ -645,7 +654,11 @@ mod tests {
         }
 
         let pred = model.predict(&[1.0, 2.0]);
-        assert!(pred.is_finite(), "max_tree_samples model should produce finite predictions, got {}", pred);
+        assert!(
+            pred.is_finite(),
+            "max_tree_samples model should produce finite predictions, got {}",
+            pred
+        );
     }
 
     #[test]
@@ -676,6 +689,10 @@ mod tests {
         }
 
         let pred = model.predict(&[1.0, 2.0]);
-        assert!(pred.is_finite(), "split re-eval model should produce finite predictions, got {}", pred);
+        assert!(
+            pred.is_finite(),
+            "split re-eval model should produce finite predictions, got {}",
+            pred
+        );
     }
 }

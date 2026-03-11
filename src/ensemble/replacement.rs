@@ -19,8 +19,8 @@
 use std::fmt;
 
 use crate::drift::{DriftDetector, DriftSignal};
-use crate::tree::hoeffding::HoeffdingTree;
 use crate::tree::builder::TreeConfig;
+use crate::tree::hoeffding::HoeffdingTree;
 use crate::tree::StreamingTree;
 
 /// Manages the lifecycle of a single tree in the ensemble.
@@ -113,12 +113,7 @@ impl TreeSlot {
     ///   (or a fresh tree if no alternate exists). The drift detector is reset
     ///   via [`clone_fresh`](DriftDetector::clone_fresh) so it monitors the
     ///   new tree from a clean state.
-    pub fn train_and_predict(
-        &mut self,
-        features: &[f64],
-        gradient: f64,
-        hessian: f64,
-    ) -> f64 {
+    pub fn train_and_predict(&mut self, features: &[f64], gradient: f64, hessian: f64) -> f64 {
         // 1. Predict from active tree BEFORE training.
         let prediction = self.active.predict(features);
 
@@ -148,9 +143,10 @@ impl TreeSlot {
             DriftSignal::Drift => {
                 // Replace active tree: prefer the alternate (which has been
                 // training on recent data), fall back to a fresh tree.
-                self.active = self.alternate.take().unwrap_or_else(|| {
-                    HoeffdingTree::new(self.tree_config.clone())
-                });
+                self.active = self
+                    .alternate
+                    .take()
+                    .unwrap_or_else(|| HoeffdingTree::new(self.tree_config.clone()));
                 // Always clear the alternate slot after replacement.
                 self.alternate = None;
                 // Reset the drift detector to monitor the new tree cleanly.
@@ -164,9 +160,10 @@ impl TreeSlot {
         //    accumulating in slowly-drifting streams.
         if let Some(max_samples) = self.max_tree_samples {
             if self.active.n_samples_seen() >= max_samples {
-                self.active = self.alternate.take().unwrap_or_else(|| {
-                    HoeffdingTree::new(self.tree_config.clone())
-                });
+                self.active = self
+                    .alternate
+                    .take()
+                    .unwrap_or_else(|| HoeffdingTree::new(self.tree_config.clone()));
                 self.alternate = None;
                 self.detector = self.detector.clone_fresh();
             }
@@ -293,7 +290,10 @@ mod tests {
         // After training, the tree should have updated, so a second predict
         // should be non-zero (gradient=-0.5 pushes leaf weight positive).
         let pred2 = slot.predict(&features);
-        assert!(pred2.is_finite(), "prediction after training should be finite");
+        assert!(
+            pred2.is_finite(),
+            "prediction after training should be finite"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -334,9 +334,20 @@ mod tests {
 
         slot.reset();
 
-        assert_eq!(slot.n_leaves(), 1, "after reset, should have exactly 1 leaf");
-        assert_eq!(slot.n_samples_seen(), 0, "after reset, samples_seen should be 0");
-        assert!(!slot.has_alternate(), "after reset, no alternate should exist");
+        assert_eq!(
+            slot.n_leaves(),
+            1,
+            "after reset, should have exactly 1 leaf"
+        );
+        assert_eq!(
+            slot.n_samples_seen(),
+            0,
+            "after reset, samples_seen should be 0"
+        );
+        assert!(
+            !slot.has_alternate(),
+            "after reset, no alternate should exist"
+        );
 
         // Predict should return 0.0 again.
         let pred = slot.predict(&features);
@@ -407,11 +418,7 @@ mod tests {
     #[test]
     fn n_leaves_reflects_active_tree() {
         let slot = TreeSlot::new(test_tree_config(), test_detector(), None);
-        assert_eq!(
-            slot.n_leaves(),
-            1,
-            "fresh slot should have exactly 1 leaf",
-        );
+        assert_eq!(slot.n_leaves(), 1, "fresh slot should have exactly 1 leaf",);
     }
 
     // -------------------------------------------------------------------

@@ -1,9 +1,9 @@
 //! Integration tests for SGBT ensemble.
 
-use irithyll::{SGBTConfig, SGBT, Sample};
-use irithyll::loss::logistic::LogisticLoss;
 use irithyll::ensemble::multiclass::MulticlassSGBT;
 use irithyll::ensemble::variants::SGBTVariant;
+use irithyll::loss::logistic::LogisticLoss;
+use irithyll::{SGBTConfig, Sample, SGBT};
 
 // ---------------------------------------------------------------------------
 // Deterministic RNG
@@ -75,7 +75,8 @@ fn sgbt_regression_converges() {
     assert!(
         late_rmse < early_rmse,
         "RMSE should decrease over time: early={:.4}, late={:.4}",
-        early_rmse, late_rmse
+        early_rmse,
+        late_rmse
     );
 }
 
@@ -123,7 +124,8 @@ fn sgbt_classification_accuracy() {
     assert!(
         raw_class1 > raw_class0,
         "Raw prediction for class 1 region ({:.4}) should exceed class 0 region ({:.4})",
-        raw_class1, raw_class0
+        raw_class1,
+        raw_class0
     );
 
     // The transformed predictions (sigmoid) should reflect this ordering.
@@ -132,7 +134,8 @@ fn sgbt_classification_accuracy() {
     assert!(
         prob_class1 > prob_class0,
         "P(class1|x=3) = {:.4} should > P(class1|x=-3) = {:.4}",
-        prob_class1, prob_class0
+        prob_class1,
+        prob_class0
     );
 }
 
@@ -171,7 +174,9 @@ fn sgbt_batch_equals_sequential() {
         assert!(
             (pred_seq - pred_batch).abs() < 1e-10,
             "Predictions should be identical: seq={}, batch={} for features {:?}",
-            pred_seq, pred_batch, features
+            pred_seq,
+            pred_batch,
+            features
         );
     }
 
@@ -196,8 +201,15 @@ fn sgbt_reset_restores_initial_state() {
 
     model.reset();
 
-    assert_eq!(model.n_samples_seen(), 0, "samples_seen should be 0 after reset");
-    assert!(!model.is_initialized(), "model should not be initialized after reset");
+    assert_eq!(
+        model.n_samples_seen(),
+        0,
+        "samples_seen should be 0 after reset"
+    );
+    assert!(
+        !model.is_initialized(),
+        "model should not be initialized after reset"
+    );
 
     let pred = model.predict(&[1.0, 2.0]);
     assert!(
@@ -253,7 +265,8 @@ fn sgbt_with_skip_variant() {
     assert!(
         late_rmse < early_rmse,
         "Skip variant should still converge: early={:.4}, late={:.4}",
-        early_rmse, late_rmse
+        early_rmse,
+        late_rmse
     );
 }
 
@@ -298,7 +311,8 @@ fn sgbt_multiclass_basic() {
         assert!(
             p >= 0.0,
             "probability for class {} should be non-negative, got {}",
-            i, p
+            i,
+            p
         );
     }
 }

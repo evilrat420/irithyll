@@ -8,8 +8,8 @@
 //! - Drop the sender to signal completion
 //! - Await training and show final predictions
 
-use irithyll::{SGBTConfig, Sample};
 use irithyll::stream::AsyncSGBT;
+use irithyll::{SGBTConfig, Sample};
 
 /// Deterministic PRNG (xorshift64). Returns a value in [0, 1).
 fn xorshift64(state: &mut u64) -> f64 {
@@ -45,9 +45,7 @@ async fn main() {
     println!("  Samples seen:      {}", predictor.n_samples_seen());
 
     // 4. Spawn the training loop on a tokio task
-    let train_handle = tokio::spawn(async move {
-        runner.run().await
-    });
+    let train_handle = tokio::spawn(async move { runner.run().await });
 
     println!("\n--- Sending 500 samples ---");
 
@@ -91,8 +89,10 @@ async fn main() {
 
     // 8. Show final predictions from predictor
     println!("\n--- Final Predictions (y = 4*x1 - 2*x2 + 1) ---");
-    println!("  {:>6} {:>6} | {:>10} {:>10} {:>10}",
-        "x1", "x2", "true_y", "predicted", "error");
+    println!(
+        "  {:>6} {:>6} | {:>10} {:>10} {:>10}",
+        "x1", "x2", "true_y", "predicted", "error"
+    );
     println!("  {}", "-".repeat(52));
 
     let test_points: [(f64, f64); 5] = [

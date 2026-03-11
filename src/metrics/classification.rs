@@ -190,10 +190,10 @@ mod tests {
     #[test]
     fn fifty_percent_accuracy() {
         let mut m = ClassificationMetrics::new();
-        m.update(1, 1, 0.9);  // correct
-        m.update(0, 1, 0.8);  // wrong
-        m.update(1, 0, 0.2);  // wrong
-        m.update(0, 0, 0.1);  // correct
+        m.update(1, 1, 0.9); // correct
+        m.update(0, 1, 0.8); // wrong
+        m.update(1, 0, 0.2); // wrong
+        m.update(0, 0, 0.1); // correct
         assert!(approx_eq(m.accuracy(), 0.5));
     }
 
@@ -203,7 +203,7 @@ mod tests {
         m.update(1, 1, 0.9);
         m.update(1, 1, 0.8);
         m.update(0, 0, 0.1); // TN, does not affect precision denominator
-        // TP=2, FP=0 => precision = 1.0
+                             // TP=2, FP=0 => precision = 1.0
         assert!(approx_eq(m.precision(), 1.0));
     }
 
@@ -212,7 +212,7 @@ mod tests {
         let mut m = ClassificationMetrics::new();
         m.update(0, 1, 0.9); // FP
         m.update(0, 1, 0.8); // FP
-        // TP=0, FP=2 => precision = 0.0
+                             // TP=0, FP=2 => precision = 0.0
         assert!(approx_eq(m.precision(), 0.0));
     }
 
@@ -241,9 +241,9 @@ mod tests {
         m.update(1, 0, 0.3); // FN
         m.update(0, 1, 0.7); // FP
         m.update(0, 0, 0.1); // TN
-        // TP=1, FP=1, FN=1
-        // precision = 1/2 = 0.5, recall = 1/2 = 0.5
-        // f1 = 2*0.5*0.5 / (0.5+0.5) = 0.5
+                             // TP=1, FP=1, FN=1
+                             // precision = 1/2 = 0.5, recall = 1/2 = 0.5
+                             // f1 = 2*0.5*0.5 / (0.5+0.5) = 0.5
         assert!(approx_eq(m.f1(), 0.5));
     }
 
@@ -313,7 +313,7 @@ mod tests {
         // Confident wrong prediction should have high log loss
         let mut m = ClassificationMetrics::new();
         m.update(1, 0, 0.01); // target=1 but predicted proba=0.01
-        // loss = -(1.0 * ln(0.01) + 0.0 * ln(0.99)) = -ln(0.01) = ln(100) ~ 4.605
+                              // loss = -(1.0 * ln(0.01) + 0.0 * ln(0.99)) = -ln(0.01) = ln(100) ~ 4.605
         let expected = 100.0_f64.ln();
         assert!(approx_eq(m.log_loss(), expected));
     }

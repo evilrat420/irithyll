@@ -30,12 +30,7 @@ impl MulticlassSGBT {
         assert!(n_classes >= 2, "n_classes must be >= 2");
 
         let committees = (0..n_classes)
-            .map(|_| {
-                SGBT::with_loss(
-                    config.clone(),
-                    Box::new(SoftmaxLoss { n_classes }),
-                )
-            })
+            .map(|_| SGBT::with_loss(config.clone(), Box::new(SoftmaxLoss { n_classes })))
             .collect();
 
         Self {
@@ -72,7 +67,8 @@ impl MulticlassSGBT {
     /// Returns a vector of length `n_classes` summing to ~1.0.
     pub fn predict_proba(&self, features: &[f64]) -> Vec<f64> {
         // Get raw predictions from each committee
-        let raw: Vec<f64> = self.committees
+        let raw: Vec<f64> = self
+            .committees
             .iter()
             .map(|c| c.predict(features))
             .collect();

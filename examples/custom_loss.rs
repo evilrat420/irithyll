@@ -4,7 +4,7 @@
 //! quantile regression loss at tau=0.9, then training an SGBT model
 //! that targets the 90th percentile rather than the mean.
 
-use irithyll::{SGBTConfig, SGBT, Sample, Loss, RegressionMetrics};
+use irithyll::{Loss, RegressionMetrics, SGBTConfig, Sample, SGBT};
 
 /// Deterministic PRNG (xorshift64). Returns a value in [0, 1).
 fn xorshift64(state: &mut u64) -> f64 {
@@ -156,8 +156,10 @@ fn main() {
     println!("  The quantile model (tau=0.9) should predict ABOVE the mean model,");
     println!("  targeting the 90th percentile of the noise distribution.\n");
 
-    println!("  {:>6} | {:>10} {:>10} {:>10} {:>10}",
-        "x", "y=3*x", "mean_pred", "q90_pred", "q90-mean");
+    println!(
+        "  {:>6} | {:>10} {:>10} {:>10} {:>10}",
+        "x", "y=3*x", "mean_pred", "q90_pred", "q90-mean"
+    );
     println!("  {}", "-".repeat(56));
 
     let test_xs = [-4.0, -2.0, 0.0, 2.0, 4.0];

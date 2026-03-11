@@ -272,8 +272,15 @@ mod tests {
         step.reset();
 
         assert_eq!(step.n_leaves(), 1, "after reset, should have 1 leaf");
-        assert_eq!(step.n_samples_seen(), 0, "after reset, samples_seen should be 0");
-        assert!(!step.has_alternate(), "after reset, no alternate should exist");
+        assert_eq!(
+            step.n_samples_seen(),
+            0,
+            "after reset, samples_seen should be 0"
+        );
+        assert!(
+            !step.has_alternate(),
+            "after reset, no alternate should exist"
+        );
 
         let pred = step.predict(&features);
         assert!(

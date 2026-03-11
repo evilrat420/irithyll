@@ -31,11 +31,12 @@ pub fn train_from_record_batch(
     let schema = batch.schema();
 
     // Find target column index by name.
-    let target_idx = schema
-        .index_of(target_col)
-        .map_err(|_| crate::error::IrithyllError::Serialization(
-            format!("target column '{}' not found in RecordBatch schema", target_col),
-        ))?;
+    let target_idx = schema.index_of(target_col).map_err(|_| {
+        crate::error::IrithyllError::Serialization(format!(
+            "target column '{}' not found in RecordBatch schema",
+            target_col
+        ))
+    })?;
 
     // Verify target column is Float64.
     if schema.field(target_idx).data_type() != &DataType::Float64 {
@@ -60,7 +61,11 @@ pub fn train_from_record_batch(
     // Downcast feature columns to Float64Array slices.
     let feature_columns: Vec<&Float64Array> = feature_indices
         .iter()
-        .map(|&i| batch.column(i).as_primitive::<arrow::datatypes::Float64Type>())
+        .map(|&i| {
+            batch
+                .column(i)
+                .as_primitive::<arrow::datatypes::Float64Type>()
+        })
         .collect();
 
     let n_features = feature_columns.len();
@@ -109,7 +114,11 @@ pub fn predict_from_record_batch(
         .iter()
         .enumerate()
         .filter(|(_, f)| f.data_type() == &DataType::Float64)
-        .map(|(i, _)| batch.column(i).as_primitive::<arrow::datatypes::Float64Type>())
+        .map(|(i, _)| {
+            batch
+                .column(i)
+                .as_primitive::<arrow::datatypes::Float64Type>()
+        })
         .collect();
 
     let n_features = feature_columns.len();
@@ -142,11 +151,12 @@ pub fn record_batch_to_samples(
 ) -> crate::error::Result<Vec<(Vec<f64>, f64)>> {
     let schema = batch.schema();
 
-    let target_idx = schema
-        .index_of(target_col)
-        .map_err(|_| crate::error::IrithyllError::Serialization(
-            format!("target column '{}' not found in RecordBatch schema", target_col),
-        ))?;
+    let target_idx = schema.index_of(target_col).map_err(|_| {
+        crate::error::IrithyllError::Serialization(format!(
+            "target column '{}' not found in RecordBatch schema",
+            target_col
+        ))
+    })?;
 
     if schema.field(target_idx).data_type() != &DataType::Float64 {
         return Err(crate::error::IrithyllError::Serialization(format!(
@@ -163,7 +173,11 @@ pub fn record_batch_to_samples(
         .iter()
         .enumerate()
         .filter(|(i, f)| *i != target_idx && f.data_type() == &DataType::Float64)
-        .map(|(i, _)| batch.column(i).as_primitive::<arrow::datatypes::Float64Type>())
+        .map(|(i, _)| {
+            batch
+                .column(i)
+                .as_primitive::<arrow::datatypes::Float64Type>()
+        })
         .collect();
 
     let n_features = feature_columns.len();
@@ -199,9 +213,7 @@ pub fn record_batch_to_samples(
 /// # Errors
 /// Returns error if the file cannot be opened or read.
 #[cfg(feature = "parquet")]
-pub fn read_parquet_batches(
-    path: &std::path::Path,
-) -> crate::error::Result<Vec<RecordBatch>> {
+pub fn read_parquet_batches(path: &std::path::Path) -> crate::error::Result<Vec<RecordBatch>> {
     let file = std::fs::File::open(path).map_err(|e| {
         crate::error::IrithyllError::Serialization(format!(
             "failed to open parquet file '{}': {}",
@@ -397,7 +409,13 @@ mod tests {
                 Field::new("x1", DataType::Float64, false),
                 Field::new("target", DataType::Float64, false),
             ]));
-            let x1 = Arc::new(Float64Array::from(vec![1.0, f64::NAN, 3.0, f64::INFINITY, 5.0]));
+            let x1 = Arc::new(Float64Array::from(vec![
+                1.0,
+                f64::NAN,
+                3.0,
+                f64::INFINITY,
+                5.0,
+            ]));
             let target = Arc::new(Float64Array::from(vec![2.0, 4.0, f64::NAN, 8.0, 10.0]));
             let batch = RecordBatch::try_new(schema, vec![x1, target]).unwrap();
 

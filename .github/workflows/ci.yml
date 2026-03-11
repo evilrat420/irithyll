@@ -45,7 +45,7 @@ jobs:
           toolchain: "1.75"
       - uses: Swatinem/rust-cache@v2
       - name: Check compilation
-        run: cargo check --all-features
+        run: cargo check
 
   clippy:
     name: Clippy

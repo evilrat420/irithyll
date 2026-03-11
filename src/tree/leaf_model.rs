@@ -132,7 +132,7 @@ impl LeafModel for LinearLeafModel {
 /// learning rate. Weights are lazily initialized on the first `update` call
 /// using a deterministic xorshift64 PRNG so results are reproducible.
 pub struct MLPLeafModel {
-    hidden_weights: Vec<Vec<f64>>,   // [hidden_size][input_size]
+    hidden_weights: Vec<Vec<f64>>, // [hidden_size][input_size]
     hidden_bias: Vec<f64>,
     output_weights: Vec<f64>,
     output_bias: f64,
@@ -222,7 +222,11 @@ impl MLPLeafModel {
 
         // Output layer
         let mut out = self.output_bias;
-        for (w, a) in self.output_weights.iter().zip(self.hidden_activations.iter()) {
+        for (w, a) in self
+            .output_weights
+            .iter()
+            .zip(self.hidden_activations.iter())
+        {
             out += w * a;
         }
         out
@@ -235,15 +239,24 @@ impl LeafModel for MLPLeafModel {
             return 0.0;
         }
         // Non-mutating forward pass (can't store activations, recompute locally)
-        let hidden_acts: Vec<f64> = self.hidden_weights.iter().zip(self.hidden_bias.iter()).map(|(hw, &hb)| {
-            let mut z = hb;
-            for (j, x) in features.iter().enumerate() {
-                if j < hw.len() {
-                    z += hw[j] * x;
+        let hidden_acts: Vec<f64> = self
+            .hidden_weights
+            .iter()
+            .zip(self.hidden_bias.iter())
+            .map(|(hw, &hb)| {
+                let mut z = hb;
+                for (j, x) in features.iter().enumerate() {
+                    if j < hw.len() {
+                        z += hw[j] * x;
+                    }
                 }
-            }
-            if z > 0.0 { z } else { 0.0 }
-        }).collect();
+                if z > 0.0 {
+                    z
+                } else {
+                    0.0
+                }
+            })
+            .collect();
         let mut out = self.output_bias;
         for (w, a) in self.output_weights.iter().zip(hidden_acts.iter()) {
             out += w * a;
@@ -297,7 +310,11 @@ impl LeafModel for MLPLeafModel {
     fn clone_fresh(&self) -> Box<dyn LeafModel> {
         // Derive a new seed so each fresh clone gets distinct initial weights.
         let derived_seed = self.seed.wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(1);
-        Box::new(MLPLeafModel::new(self.hidden_size, self.learning_rate, derived_seed))
+        Box::new(MLPLeafModel::new(
+            self.hidden_size,
+            self.learning_rate,
+            derived_seed,
+        ))
     }
 }
 
@@ -321,7 +338,6 @@ pub enum LeafModelType {
         learning_rate: f64,
     },
 }
-
 
 impl LeafModelType {
     /// Create a fresh boxed leaf model of this type.
@@ -407,7 +423,10 @@ mod tests {
     fn closed_form_clone_fresh_resets() {
         let mut leaf = ClosedFormLeaf::new();
         leaf.update(&[], 5.0, 2.0, 1.0);
-        assert!(leaf.predict(&[]).abs() > 0.0, "leaf should have non-zero weight after update");
+        assert!(
+            leaf.predict(&[]).abs() > 0.0,
+            "leaf should have non-zero weight after update"
+        );
 
         let fresh = leaf.clone_fresh();
         assert!(
@@ -465,7 +484,10 @@ mod tests {
 
         // Before training: should return 0
         let pred_before = model_uninit.predict(&features);
-        assert!(pred_before.is_finite(), "uninit prediction should be finite");
+        assert!(
+            pred_before.is_finite(),
+            "uninit prediction should be finite"
+        );
         assert!(
             pred_before.abs() < 1e-15,
             "uninit prediction should be 0, got {pred_before}"

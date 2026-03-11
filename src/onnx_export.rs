@@ -356,7 +356,10 @@ pub fn export_onnx(
             attr_ints("nodes_truenodeids", nodes_truenodeids),
             attr_ints("nodes_falsenodeids", nodes_falsenodeids),
             attr_floats("nodes_hitrates", nodes_hitrates),
-            attr_ints("nodes_missing_value_tracks_true", nodes_missing_value_tracks_true),
+            attr_ints(
+                "nodes_missing_value_tracks_true",
+                nodes_missing_value_tracks_true,
+            ),
             attr_ints("target_ids", target_ids),
             attr_ints("target_nodeids", target_nodeids),
             attr_ints("target_treeids", target_treeids),
@@ -503,7 +506,10 @@ mod tests {
     fn export_produces_non_empty_bytes() {
         let model = trained_model();
         let bytes = export_onnx(&model, 3).unwrap();
-        assert!(!bytes.is_empty(), "ONNX export should produce non-empty bytes");
+        assert!(
+            !bytes.is_empty(),
+            "ONNX export should produce non-empty bytes"
+        );
         assert!(
             bytes.len() > 100,
             "ONNX export should have substantial content, got {} bytes",

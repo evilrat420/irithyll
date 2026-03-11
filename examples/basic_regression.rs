@@ -3,7 +3,7 @@
 //! Demonstrates training an SGBT model on `y = 2*x1 + 3*x2 + noise`,
 //! tracking RMSE over time, and making predictions.
 
-use irithyll::{SGBTConfig, SGBT, Sample, RegressionMetrics};
+use irithyll::{RegressionMetrics, SGBTConfig, Sample, SGBT};
 
 /// Deterministic PRNG (xorshift64). Returns a value in [0, 1).
 fn xorshift64(state: &mut u64) -> f64 {
@@ -74,8 +74,10 @@ fn main() {
 
     // 5. Make predictions and compare to true values
     println!("\n--- Test Predictions ---");
-    println!("  {:>6} {:>6} | {:>10} {:>10} {:>10}",
-        "x1", "x2", "true_y", "predicted", "error");
+    println!(
+        "  {:>6} {:>6} | {:>10} {:>10} {:>10}",
+        "x1", "x2", "true_y", "predicted", "error"
+    );
     println!("  {}", "-".repeat(52));
 
     let test_points: [(f64, f64); 5] = [

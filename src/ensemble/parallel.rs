@@ -33,8 +33,8 @@ use rayon::prelude::*;
 
 use crate::ensemble::config::SGBTConfig;
 use crate::ensemble::step::BoostingStep;
-use crate::loss::Loss;
 use crate::loss::squared::SquaredLoss;
+use crate::loss::Loss;
 use crate::sample::Sample;
 use crate::tree::builder::TreeConfig;
 
@@ -90,9 +90,9 @@ impl fmt::Debug for ParallelSGBT {
 impl ParallelSGBT {
     /// Create a new parallel SGBT ensemble with squared loss (regression).
     pub fn new(config: SGBTConfig) -> Self {
-        let leaf_decay_alpha = config.leaf_half_life.map(|hl| {
-            (-(2.0_f64.ln()) / hl as f64).exp()
-        });
+        let leaf_decay_alpha = config
+            .leaf_half_life
+            .map(|hl| (-(2.0_f64.ln()) / hl as f64).exp());
 
         let tree_config = TreeConfig::new()
             .max_depth(config.max_depth)
@@ -169,7 +169,11 @@ impl ParallelSGBT {
         // The RNG state is sequential (xorshift), so we must advance it
         // in order before entering the parallel section.
         let train_counts: Vec<usize> = (0..self.steps.len())
-            .map(|_| self.config.variant.train_count(hessian, &mut self.rng_state))
+            .map(|_| {
+                self.config
+                    .variant
+                    .train_count(hessian, &mut self.rng_state)
+            })
             .collect();
 
         // Train all steps with the same gradient/hessian.
@@ -177,28 +181,15 @@ impl ParallelSGBT {
         // Otherwise, fall back to sequential iteration.
         #[cfg(feature = "parallel")]
         {
-            self.steps
-                .par_iter_mut()
-                .enumerate()
-                .for_each(|(i, step)| {
-                    step.train_and_predict(
-                        &sample.features,
-                        gradient,
-                        hessian,
-                        train_counts[i],
-                    );
-                });
+            self.steps.par_iter_mut().enumerate().for_each(|(i, step)| {
+                step.train_and_predict(&sample.features, gradient, hessian, train_counts[i]);
+            });
         }
 
         #[cfg(not(feature = "parallel"))]
         {
             for (i, step) in self.steps.iter_mut().enumerate() {
-                step.train_and_predict(
-                    &sample.features,
-                    gradient,
-                    hessian,
-                    train_counts[i],
-                );
+                step.train_and_predict(&sample.features, gradient, hessian, train_counts[i]);
             }
         }
     }
@@ -417,7 +408,8 @@ mod tests {
         assert!(
             late_rmse < early_rmse,
             "RMSE should decrease: early={:.4}, late={:.4}",
-            early_rmse, late_rmse
+            early_rmse,
+            late_rmse
         );
     }
 
@@ -448,7 +440,8 @@ mod tests {
         assert!(
             (pred_seq - pred_batch).abs() < 1e-10,
             "seq={}, batch={}",
-            pred_seq, pred_batch
+            pred_seq,
+            pred_batch
         );
     }
 
@@ -489,7 +482,11 @@ mod tests {
         use crate::loss::logistic::LogisticLoss;
         let model = ParallelSGBT::with_loss(default_config(), Box::new(LogisticLoss));
         let pred = model.predict_transformed(&[1.0, 2.0]);
-        assert!((pred - 0.5).abs() < 1e-6, "sigmoid(0) should be 0.5, got {}", pred);
+        assert!(
+            (pred - 0.5).abs() < 1e-6,
+            "sigmoid(0) should be 0.5, got {}",
+            pred
+        );
     }
 
     // -------------------------------------------------------------------

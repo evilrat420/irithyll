@@ -3,10 +3,10 @@
 //! Each loss provides gradient and hessian computations used by the boosting
 //! loop to compute pseudo-residuals for tree fitting.
 
-pub mod squared;
+pub mod huber;
 pub mod logistic;
 pub mod softmax;
-pub mod huber;
+pub mod squared;
 
 /// A differentiable loss function for gradient boosting.
 ///

@@ -8,13 +8,13 @@
 //! - [`FeatureImportance`] -- Accumulated split gain per feature.
 //! - [`MetricSet`] -- Convenience wrapper combining regression and classification.
 
-pub mod regression;
 pub mod classification;
 pub mod importance;
+pub mod regression;
 
-pub use regression::RegressionMetrics;
 pub use classification::ClassificationMetrics;
 pub use importance::FeatureImportance;
+pub use regression::RegressionMetrics;
 
 /// Combined metric tracker that holds both regression and classification metrics.
 ///
@@ -58,12 +58,7 @@ impl MetricSet {
     /// - `target`: true class label.
     /// - `predicted`: predicted class label.
     /// - `predicted_proba`: model's predicted probability for the positive class.
-    pub fn update_classification(
-        &mut self,
-        target: usize,
-        predicted: usize,
-        predicted_proba: f64,
-    ) {
+    pub fn update_classification(&mut self, target: usize, predicted: usize, predicted_proba: f64) {
         self.cls.update(target, predicted, predicted_proba);
     }
 

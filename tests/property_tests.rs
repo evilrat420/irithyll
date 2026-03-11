@@ -2,12 +2,12 @@
 
 use proptest::prelude::*;
 
-use irithyll::loss::Loss;
-use irithyll::loss::squared::SquaredLoss;
 use irithyll::loss::logistic::LogisticLoss;
 use irithyll::loss::softmax::SoftmaxLoss;
-use irithyll::tree::hoeffding::HoeffdingTree;
+use irithyll::loss::squared::SquaredLoss;
+use irithyll::loss::Loss;
 use irithyll::tree::builder::TreeConfig;
+use irithyll::tree::hoeffding::HoeffdingTree;
 use irithyll::tree::StreamingTree;
 use irithyll::Sample;
 

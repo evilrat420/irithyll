@@ -178,10 +178,7 @@ impl BinningStrategy for KMeansBinning {
             if n_unique <= 1 {
                 return BinEdges { edges: Vec::new() };
             }
-            let edges: Vec<f64> = sorted
-                .windows(2)
-                .map(|w| (w[0] + w[1]) / 2.0)
-                .collect();
+            let edges: Vec<f64> = sorted.windows(2).map(|w| (w[0] + w[1]) / 2.0).collect();
             return BinEdges { edges };
         }
 
@@ -263,10 +260,7 @@ impl BinningStrategy for KMeansBinning {
             return BinEdges { edges: Vec::new() };
         }
 
-        let mut edges: Vec<f64> = centers
-            .windows(2)
-            .map(|w| (w[0] + w[1]) / 2.0)
-            .collect();
+        let mut edges: Vec<f64> = centers.windows(2).map(|w| (w[0] + w[1]) / 2.0).collect();
 
         // Deduplicate edges (possible with very tight center clusters).
         edges.dedup_by(|a, b| (*a - *b).abs() <= EPSILON);
@@ -283,7 +277,10 @@ impl BinningStrategy for KMeansBinning {
 
     /// Create a fresh instance with the same configuration but no data.
     fn clone_fresh(&self) -> Box<dyn BinningStrategy> {
-        Box::new(KMeansBinning::with_params(self.max_reservoir, self.max_iters))
+        Box::new(KMeansBinning::with_params(
+            self.max_reservoir,
+            self.max_iters,
+        ))
     }
 }
 

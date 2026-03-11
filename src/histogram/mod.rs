@@ -4,12 +4,12 @@
 //! Histograms discretize continuous features into bins and accumulate gradient/hessian
 //! statistics per bin, enabling efficient split evaluation.
 
-pub mod quantile;
-pub mod kmeans;
-pub mod uniform;
 pub mod bins;
+pub mod kmeans;
+pub mod quantile;
 #[cfg(feature = "simd")]
 pub mod simd;
+pub mod uniform;
 
 /// Bin edge boundaries computed by a binning strategy.
 #[derive(Debug, Clone)]
@@ -22,7 +22,10 @@ impl BinEdges {
     /// Find which bin a value falls into. Returns bin index in `[0, n_bins)`.
     #[inline]
     pub fn find_bin(&self, value: f64) -> usize {
-        match self.edges.binary_search_by(|e| e.partial_cmp(&value).unwrap()) {
+        match self
+            .edges
+            .binary_search_by(|e| e.partial_cmp(&value).unwrap())
+        {
             Ok(i) => i + 1,
             Err(i) => i,
         }

@@ -110,9 +110,7 @@ impl QuantileBinning {
         }
 
         // Binary search: find the first entry with value >= new value.
-        let pos = self
-            .summary
-            .partition_point(|t| t.value < value);
+        let pos = self.summary.partition_point(|t| t.value < value);
 
         // Compute delta for the new tuple.
         let delta = if pos == 0 || pos == self.summary.len() {
@@ -259,7 +257,10 @@ impl BinningStrategy for QuantileBinning {
             let phi = i as f64 / n_bins as f64;
             if let Some(val) = self.quantile(phi) {
                 // Deduplicate: skip if this edge equals the previous one.
-                if edges.last().map_or(true, |&last: &f64| (val - last).abs() > f64::EPSILON) {
+                if edges
+                    .last()
+                    .map_or(true, |&last: &f64| (val - last).abs() > f64::EPSILON)
+                {
                     edges.push(val);
                 }
             }
@@ -465,10 +466,7 @@ mod tests {
 
         let edges = q.compute_edges(4);
         // Should have ~3 edges (quartile boundaries) after dedup.
-        assert!(
-            !edges.edges.is_empty(),
-            "should produce at least one edge"
-        );
+        assert!(!edges.edges.is_empty(), "should produce at least one edge");
         assert!(
             edges.edges.len() <= 3,
             "4 bins -> at most 3 edges, got {}",

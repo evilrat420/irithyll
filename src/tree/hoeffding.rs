@@ -221,7 +221,13 @@ impl HoeffdingTree {
     ///
     /// The root is assumed to be `NodeId(0)`. Leaf states are created empty
     /// for all current leaf nodes in the arena.
-    pub fn from_arena(config: TreeConfig, arena: TreeArena, n_features: Option<usize>, samples_seen: u64, rng_state: u64) -> Self {
+    pub fn from_arena(
+        config: TreeConfig,
+        arena: TreeArena,
+        n_features: Option<usize>,
+        samples_seen: u64,
+        rng_state: u64,
+    ) -> Self {
         let root = if arena.n_nodes() > 0 {
             NodeId(0)
         } else {
@@ -440,7 +446,11 @@ impl HoeffdingTree {
         }
 
         // Sort candidates by gain descending.
-        candidates.sort_by(|a, b| b.1.gain.partial_cmp(&a.1.gain).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| {
+            b.1.gain
+                .partial_cmp(&a.1.gain)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let best_gain = candidates[0].1.gain;
         let second_best_gain = if candidates.len() > 1 {
@@ -647,9 +657,10 @@ impl StreamingTree for HoeffdingTree {
         let sample_count = self.arena.get_sample_count(leaf_id);
 
         // Get or create the leaf state.
-        let state = self.leaf_states.entry(leaf_id.0).or_insert_with(|| {
-            LeafState::new(n_features)
-        });
+        let state = self
+            .leaf_states
+            .entry(leaf_id.0)
+            .or_insert_with(|| LeafState::new(n_features));
 
         // If bins are not yet ready, check if we've reached the grace period.
         if !state.bins_ready {
@@ -768,10 +779,7 @@ impl StreamingTree for HoeffdingTree {
 
         // Insert a placeholder leaf state for the new root.
         let n_features = self.n_features.unwrap_or(0);
-        self.leaf_states.insert(
-            root.0,
-            LeafState::new(n_features),
-        );
+        self.leaf_states.insert(root.0, LeafState::new(n_features));
 
         self.samples_seen = 0;
         self.feature_mask.clear();
@@ -819,15 +827,15 @@ mod tests {
 
         let pred = tree.predict(&features);
         assert!(!pred.is_nan(), "prediction should not be NaN, got {}", pred);
-        assert!(pred.is_finite(), "prediction should be finite, got {}", pred);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite, got {}",
+            pred
+        );
 
         // With gradient=-0.5, hessian=1.0, lambda=1.0:
         // leaf_weight = -(-0.5) / (1.0 + 1.0) = 0.25
-        assert!(
-            (pred - 0.25).abs() < 1e-10,
-            "expected ~0.25, got {}",
-            pred
-        );
+        assert!((pred - 0.25).abs() < 1e-10, "expected ~0.25, got {}", pred);
     }
 
     // -----------------------------------------------------------------------
@@ -1005,8 +1013,16 @@ mod tests {
 
         tree.reset();
 
-        assert_eq!(tree.n_leaves(), 1, "after reset, should have exactly 1 leaf");
-        assert_eq!(tree.n_samples_seen(), 0, "after reset, samples_seen should be 0");
+        assert_eq!(
+            tree.n_leaves(),
+            1,
+            "after reset, should have exactly 1 leaf"
+        );
+        assert_eq!(
+            tree.n_samples_seen(),
+            0,
+            "after reset, samples_seen should be 0"
+        );
 
         // Predict should still work (returns 0.0 from empty leaf).
         let pred = tree.predict(&[5.0]);
@@ -1044,7 +1060,10 @@ mod tests {
 
         // Just verify it trained without panicking and produces finite predictions.
         let pred = tree.predict(&[2.5, 2.5]);
-        assert!(pred.is_finite(), "multi-feature prediction should be finite");
+        assert!(
+            pred.is_finite(),
+            "multi-feature prediction should be finite"
+        );
         assert_eq!(tree.n_samples_seen(), 1000);
     }
 
@@ -1066,7 +1085,9 @@ mod tests {
 
         // 5 features, only ~50% considered per split.
         for _ in 0..1000 {
-            let feats: Vec<f64> = (0..5).map(|_| test_rand_f64(&mut rng_state) * 10.0).collect();
+            let feats: Vec<f64> = (0..5)
+                .map(|_| test_rand_f64(&mut rng_state) * 10.0)
+                .collect();
             let y: f64 = feats.iter().sum();
             let pred = tree.predict(&feats);
             tree.train_one(&feats, pred - y, 1.0);
@@ -1155,7 +1176,11 @@ mod tests {
         }
 
         let pred = tree.predict(&[5.0]);
-        assert!(pred.is_finite(), "prediction without EWMA should be finite, got {}", pred);
+        assert!(
+            pred.is_finite(),
+            "prediction without EWMA should be finite, got {}",
+            pred
+        );
     }
 
     // -----------------------------------------------------------------------

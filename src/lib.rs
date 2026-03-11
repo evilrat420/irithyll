@@ -70,13 +70,13 @@
 pub mod error;
 pub mod sample;
 
-pub mod loss;
-pub mod histogram;
-pub mod tree;
 pub mod drift;
 pub mod ensemble;
-pub mod stream;
+pub mod histogram;
+pub mod loss;
 pub mod metrics;
+pub mod stream;
+pub mod tree;
 
 pub mod serde_support;
 
@@ -87,22 +87,22 @@ pub mod arrow_support;
 pub mod onnx_export;
 
 // Re-exports — core types
-pub use error::IrithyllError;
-pub use sample::Sample;
-pub use ensemble::config::SGBTConfig;
-pub use ensemble::SGBT;
-pub use ensemble::multiclass::MulticlassSGBT;
-pub use loss::Loss;
 pub use drift::{DriftDetector, DriftSignal};
-pub use tree::StreamingTree;
+pub use ensemble::config::SGBTConfig;
+pub use ensemble::multiclass::MulticlassSGBT;
+pub use ensemble::SGBT;
+pub use error::IrithyllError;
 pub use histogram::BinningStrategy;
+pub use loss::Loss;
+pub use sample::Sample;
+pub use tree::StreamingTree;
 
 // Re-exports — parallel (feature-gated)
 #[cfg(feature = "parallel")]
 pub use ensemble::parallel::ParallelSGBT;
 
 // Re-exports — async streaming
-pub use stream::{AsyncSGBT, Predictor, SampleSender, Prediction, PredictionStream};
+pub use stream::{AsyncSGBT, Prediction, PredictionStream, Predictor, SampleSender};
 
 // Re-exports — metrics
-pub use metrics::{RegressionMetrics, ClassificationMetrics, FeatureImportance, MetricSet};
+pub use metrics::{ClassificationMetrics, FeatureImportance, MetricSet, RegressionMetrics};

@@ -4,8 +4,8 @@
 //! metrics, showing how RMSE and R-squared evolve as the model trains.
 //! This is the standard evaluation protocol for streaming ML models.
 
-use irithyll::{SGBTConfig, SGBT, Sample, RegressionMetrics, ClassificationMetrics};
 use irithyll::loss::logistic::LogisticLoss;
+use irithyll::{ClassificationMetrics, RegressionMetrics, SGBTConfig, Sample, SGBT};
 
 /// Deterministic PRNG (xorshift64). Returns a value in [0, 1).
 fn xorshift64(state: &mut u64) -> f64 {
@@ -41,8 +41,10 @@ fn main() {
     let mut cumulative = RegressionMetrics::new();
     let mut windowed = RegressionMetrics::new();
 
-    println!("  {:>8} | {:>10} {:>10} {:>10} | {:>10} {:>10}",
-        "samples", "win_RMSE", "win_MAE", "win_R2", "cum_RMSE", "cum_R2");
+    println!(
+        "  {:>8} | {:>10} {:>10} {:>10} | {:>10} {:>10}",
+        "samples", "win_RMSE", "win_MAE", "win_R2", "cum_RMSE", "cum_R2"
+    );
     println!("  {}", "-".repeat(70));
 
     for i in 0..n_samples {
@@ -72,8 +74,13 @@ fn main() {
         }
     }
 
-    println!("\n  Final cumulative: RMSE={:.4}, MAE={:.4}, MSE={:.4}, R2={:.4}",
-        cumulative.rmse(), cumulative.mae(), cumulative.mse(), cumulative.r_squared());
+    println!(
+        "\n  Final cumulative: RMSE={:.4}, MAE={:.4}, MSE={:.4}, R2={:.4}",
+        cumulative.rmse(),
+        cumulative.mae(),
+        cumulative.mse(),
+        cumulative.r_squared()
+    );
 
     // -----------------------------------------------------------------------
     // Part 2: Classification with accuracy/precision/recall
@@ -95,8 +102,10 @@ fn main() {
     let n_cls_samples = 2000;
     let cls_window = 500;
 
-    println!("  {:>8} | {:>8} {:>8} {:>8} {:>8} | {:>8}",
-        "samples", "win_acc", "win_prec", "win_rec", "win_f1", "cum_acc");
+    println!(
+        "  {:>8} | {:>8} {:>8} {:>8} {:>8} | {:>8}",
+        "samples", "win_acc", "win_prec", "win_rec", "win_f1", "cum_acc"
+    );
     println!("  {}", "-".repeat(62));
 
     for i in 0..n_cls_samples {
@@ -129,7 +138,8 @@ fn main() {
         }
     }
 
-    println!("\n  Final cumulative: Acc={:.4}, Prec={:.4}, Rec={:.4}, F1={:.4}, LogLoss={:.4}",
+    println!(
+        "\n  Final cumulative: Acc={:.4}, Prec={:.4}, Rec={:.4}, F1={:.4}, LogLoss={:.4}",
         cls_cumulative.accuracy(),
         cls_cumulative.precision(),
         cls_cumulative.recall(),

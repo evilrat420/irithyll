@@ -230,7 +230,9 @@ mod tests {
         let mut state = seed;
         for _ in 0..count {
             // LCG: Numerical Recipes constants
-            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
             // Map to [-1.0, 1.0)
             let frac = ((state >> 33) as f64) / (u32::MAX as f64 / 2.0) - 1.0;
             values.push(center + amplitude * frac);
@@ -273,7 +275,10 @@ mod tests {
             }
         }
 
-        assert!(drift_detected, "upward shift from 0 to 10 must trigger Drift");
+        assert!(
+            drift_detected,
+            "upward shift from 0 to 10 must trigger Drift"
+        );
     }
 
     #[test]

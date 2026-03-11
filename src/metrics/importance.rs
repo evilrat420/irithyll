@@ -75,10 +75,7 @@ impl FeatureImportance {
             .collect();
 
         // Sort descending by gain, with stable index ordering for ties
-        indexed.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         indexed.truncate(k);
         indexed

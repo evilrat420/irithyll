@@ -4,8 +4,8 @@
 //! verifying that predictions match. This is essential for production
 //! deployments where model state must survive process restarts.
 
-use irithyll::{SGBTConfig, SGBT, Sample, RegressionMetrics};
-use irithyll::serde_support::{save_model, load_model, LossType};
+use irithyll::serde_support::{load_model, save_model, LossType};
+use irithyll::{RegressionMetrics, SGBTConfig, Sample, SGBT};
 
 /// Deterministic PRNG (xorshift64). Returns a value in [0, 1).
 fn xorshift64(state: &mut u64) -> f64 {
@@ -32,7 +32,10 @@ fn main() {
     let mut rng: u64 = 0xCAFE_BABE_DEAD_BEEF;
     let n_train = 1000;
 
-    println!("Training on {} samples (y = 2*x1 + 3*x2 + noise)...", n_train);
+    println!(
+        "Training on {} samples (y = 2*x1 + 3*x2 + noise)...",
+        n_train
+    );
     for _ in 0..n_train {
         let x1 = xorshift64(&mut rng) * 10.0 - 5.0;
         let x2 = xorshift64(&mut rng) * 10.0 - 5.0;
@@ -46,18 +49,23 @@ fn main() {
 
     // 2. Collect predictions before saving
     let test_points: Vec<[f64; 2]> = vec![
-        [1.0, 1.0], [-2.0, 3.0], [0.0, 0.0], [4.0, -1.0], [-3.0, -2.0],
+        [1.0, 1.0],
+        [-2.0, 3.0],
+        [0.0, 0.0],
+        [4.0, -1.0],
+        [-3.0, -2.0],
     ];
-    let original_preds: Vec<f64> = test_points
-        .iter()
-        .map(|p| model.predict(p))
-        .collect();
+    let original_preds: Vec<f64> = test_points.iter().map(|p| model.predict(p)).collect();
 
     // 3. Save model to JSON
     println!("\nSaving model to JSON...");
     let json = save_model(&model, LossType::Squared).expect("serialization failed");
     let json_bytes = json.len();
-    println!("  JSON size: {} bytes ({:.1} KB)", json_bytes, json_bytes as f64 / 1024.0);
+    println!(
+        "  JSON size: {} bytes ({:.1} KB)",
+        json_bytes,
+        json_bytes as f64 / 1024.0
+    );
 
     // 4. Restore model from JSON
     println!("\nRestoring model from JSON...");
@@ -68,8 +76,10 @@ fn main() {
 
     // 5. Verify predictions match
     println!("\n--- Prediction Comparison ---");
-    println!("  {:>6} {:>6} | {:>12} {:>12} {:>10}",
-        "x1", "x2", "original", "restored", "diff");
+    println!(
+        "  {:>6} {:>6} | {:>12} {:>12} {:>10}",
+        "x1", "x2", "original", "restored", "diff"
+    );
     println!("  {}", "-".repeat(56));
 
     let mut max_diff: f64 = 0.0;
@@ -86,7 +96,10 @@ fn main() {
     if max_diff < 1e-10 {
         println!("\n  [OK] Predictions match (max diff: {:.2e})", max_diff);
     } else {
-        println!("\n  [WARN] Prediction mismatch detected (max diff: {:.2e})", max_diff);
+        println!(
+            "\n  [WARN] Prediction mismatch detected (max diff: {:.2e})",
+            max_diff
+        );
     }
 
     // 6. Continue training the restored model

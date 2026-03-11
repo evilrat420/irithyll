@@ -192,7 +192,9 @@ mod tests {
         let gamma = 0.0;
 
         let result = criterion
-            .evaluate(&grad_sums, &hess_sums, total_grad, total_hess, gamma, lambda)
+            .evaluate(
+                &grad_sums, &hess_sums, total_grad, total_hess, gamma, lambda,
+            )
             .expect("should find a valid split");
 
         // Best split at bin index 1 (bins 0,1 go left; bins 2,3 go right).
@@ -259,12 +261,18 @@ mod tests {
         // With min_child_weight=1.0, left_hess=0.5 is too small.
         let strict = XGBoostGain::new(1.0);
         let result = strict.evaluate(&grad_sums, &hess_sums, total_grad, total_hess, 0.0, 1.0);
-        assert!(result.is_none(), "split should be rejected: left hess 0.5 < min_child_weight 1.0");
+        assert!(
+            result.is_none(),
+            "split should be rejected: left hess 0.5 < min_child_weight 1.0"
+        );
 
         // With min_child_weight=0.1, the split should be accepted.
         let lenient = XGBoostGain::new(0.1);
         let result = lenient.evaluate(&grad_sums, &hess_sums, total_grad, total_hess, 0.0, 1.0);
-        assert!(result.is_some(), "split should be accepted with lower min_child_weight");
+        assert!(
+            result.is_some(),
+            "split should be accepted with lower min_child_weight"
+        );
     }
 
     /// Verify the leaf weight formula: w = -G / (H + lambda).
@@ -297,7 +305,9 @@ mod tests {
         let total_hess: f64 = hess_sums.iter().sum(); // 4.0
 
         let result_pos = criterion
-            .evaluate(&grad_sums, &hess_sums, total_grad, total_hess, gamma, lambda)
+            .evaluate(
+                &grad_sums, &hess_sums, total_grad, total_hess, gamma, lambda,
+            )
             .expect("should find split");
 
         // Negate all gradients.
@@ -305,7 +315,14 @@ mod tests {
         let total_grad_neg: f64 = grad_sums_neg.iter().sum(); // still 0.0
 
         let result_neg = criterion
-            .evaluate(&grad_sums_neg, &hess_sums, total_grad_neg, total_hess, gamma, lambda)
+            .evaluate(
+                &grad_sums_neg,
+                &hess_sums,
+                total_grad_neg,
+                total_hess,
+                gamma,
+                lambda,
+            )
             .expect("should find split with negated gradients");
 
         // Gain should be identical.
@@ -333,14 +350,24 @@ mod tests {
         let total_hess = 10.0;
 
         // With gamma=0, should find a split.
-        let result = criterion.evaluate(&grad_sums, &hess_sums, total_grad, total_hess, 0.0, lambda);
+        let result =
+            criterion.evaluate(&grad_sums, &hess_sums, total_grad, total_hess, 0.0, lambda);
         assert!(result.is_some(), "should find split with gamma=0");
         let gain_no_gamma = result.unwrap().gain;
 
         // With gamma larger than the raw gain, should reject.
-        let result =
-            criterion.evaluate(&grad_sums, &hess_sums, total_grad, total_hess, gain_no_gamma + 1.0, lambda);
-        assert!(result.is_none(), "split should be rejected when gamma exceeds raw gain");
+        let result = criterion.evaluate(
+            &grad_sums,
+            &hess_sums,
+            total_grad,
+            total_hess,
+            gain_no_gamma + 1.0,
+            lambda,
+        );
+        assert!(
+            result.is_none(),
+            "split should be rejected when gamma exceeds raw gain"
+        );
     }
 
     /// Lambda regularization: increasing lambda should reduce gain by
@@ -395,7 +422,9 @@ mod tests {
         let total_hess: f64 = hess_sums.iter().sum();
 
         let result = criterion
-            .evaluate(&grad_sums, &hess_sums, total_grad, total_hess, gamma, lambda)
+            .evaluate(
+                &grad_sums, &hess_sums, total_grad, total_hess, gamma, lambda,
+            )
             .expect("should find a valid split");
 
         assert_eq!(result.bin_idx, 2, "best split should be at bin 2");

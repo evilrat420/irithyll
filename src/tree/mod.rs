@@ -4,11 +4,11 @@
 //! are triggered only when the Hoeffding bound guarantees the best split is
 //! statistically superior to alternatives.
 
-pub mod node;
-pub mod split;
-pub mod hoeffding;
 pub mod builder;
+pub mod hoeffding;
+pub mod node;
 pub mod predict;
+pub mod split;
 
 #[cfg(feature = "neural-leaves")]
 pub mod leaf_model;

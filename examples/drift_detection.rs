@@ -7,7 +7,7 @@
 //! The model's RMSE spikes at the drift point, then recovers as the
 //! ensemble replaces drifted trees via the Page-Hinkley detector.
 
-use irithyll::{SGBTConfig, SGBT, Sample, RegressionMetrics};
+use irithyll::{RegressionMetrics, SGBTConfig, Sample, SGBT};
 
 /// Deterministic PRNG (xorshift64). Returns a value in [0, 1).
 fn xorshift64(state: &mut u64) -> f64 {
@@ -44,7 +44,10 @@ fn main() {
     let mut window_metrics = RegressionMetrics::new();
     let mut window_results: Vec<(usize, f64)> = Vec::new();
 
-    println!("--- Training with windowed RMSE (window={}) ---", window_size);
+    println!(
+        "--- Training with windowed RMSE (window={}) ---",
+        window_size
+    );
 
     for i in 0..n_samples {
         // Generate feature in [-5, 5]
@@ -70,10 +73,12 @@ fn main() {
         if (i + 1) % window_size == 0 {
             let rmse = window_metrics.rmse();
             let window_end = i + 1;
-            let phase = if window_end <= drift_point { "Phase 1" } else { "Phase 2" };
-            let marker = if window_end > drift_point
-                && window_end <= (drift_point + window_size)
-            {
+            let phase = if window_end <= drift_point {
+                "Phase 1"
+            } else {
+                "Phase 2"
+            };
+            let marker = if window_end > drift_point && window_end <= (drift_point + window_size) {
                 " <-- DRIFT"
             } else {
                 ""
@@ -102,8 +107,7 @@ fn main() {
         .filter(|(end, _)| *end <= drift_point)
         .map(|(_, rmse)| *rmse)
         .collect();
-    let pre_drift_avg = pre_drift_rmses.iter().sum::<f64>()
-        / pre_drift_rmses.len().max(1) as f64;
+    let pre_drift_avg = pre_drift_rmses.iter().sum::<f64>() / pre_drift_rmses.len().max(1) as f64;
 
     // Drift window: first window after drift point
     let drift_window_rmse = window_results
@@ -119,8 +123,8 @@ fn main() {
         .take(2)
         .map(|(_, rmse)| *rmse)
         .collect();
-    let post_recovery_avg = post_recovery_rmses.iter().sum::<f64>()
-        / post_recovery_rmses.len().max(1) as f64;
+    let post_recovery_avg =
+        post_recovery_rmses.iter().sum::<f64>() / post_recovery_rmses.len().max(1) as f64;
 
     println!("  Pre-drift avg RMSE:    {:.4}", pre_drift_avg);
     println!("  Drift-window RMSE:     {:.4}", drift_window_rmse);
@@ -141,7 +145,10 @@ fn main() {
     // Verify the model has adapted to the new concept
     println!("\n--- Post-Drift Predictions (should follow y = -3*x + 5) ---");
     let test_xs = [-3.0, -1.0, 0.0, 1.0, 3.0];
-    println!("  {:>6} | {:>10} {:>10} {:>10}", "x", "true_y", "predicted", "error");
+    println!(
+        "  {:>6} | {:>10} {:>10} {:>10}",
+        "x", "true_y", "predicted", "error"
+    );
     println!("  {}", "-".repeat(45));
 
     for x in &test_xs {

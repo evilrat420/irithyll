@@ -65,8 +65,8 @@
 //! # }
 //! ```
 
-pub mod channel;
 pub mod adapters;
+pub mod channel;
 
 use std::sync::Arc;
 
@@ -77,8 +77,8 @@ use crate::ensemble::config::SGBTConfig;
 use crate::ensemble::SGBT;
 use crate::error::Result;
 
-pub use channel::{SampleSender, SampleReceiver};
 pub use adapters::{Prediction, PredictionStream};
+pub use channel::{SampleReceiver, SampleSender};
 
 /// Default bounded channel capacity when none is specified.
 const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
@@ -245,7 +245,9 @@ impl AsyncSGBT {
         // Drop our sender so the channel closes when external senders drop.
         self.sender.take();
 
-        let receiver = self.receiver.take()
+        let receiver = self
+            .receiver
+            .take()
             .expect("run() called more than once: receiver already consumed");
 
         self.run_inner(receiver, None::<fn(u64)>).await
@@ -270,18 +272,16 @@ impl AsyncSGBT {
         // Drop our sender so the channel closes when external senders drop.
         self.sender.take();
 
-        let receiver = self.receiver.take()
+        let receiver = self
+            .receiver
+            .take()
             .expect("run_with_callback() called more than once: receiver already consumed");
 
         self.run_inner(receiver, Some(callback)).await
     }
 
     /// Internal training loop shared by `run` and `run_with_callback`.
-    async fn run_inner<F>(
-        &self,
-        mut receiver: SampleReceiver,
-        callback: Option<F>,
-    ) -> Result<()>
+    async fn run_inner<F>(&self, mut receiver: SampleReceiver, callback: Option<F>) -> Result<()>
     where
         F: Fn(u64),
     {
@@ -568,7 +568,10 @@ mod tests {
 
         // Send consistent data: target = 10.0.
         for _ in 0..100 {
-            sender.send(Sample::new(vec![5.0, 2.5], 10.0)).await.unwrap();
+            sender
+                .send(Sample::new(vec![5.0, 2.5], 10.0))
+                .await
+                .unwrap();
         }
 
         // Give the training loop time to process.

@@ -176,11 +176,7 @@ impl TreeArena {
     #[inline]
     pub fn predict(&self, id: NodeId) -> f64 {
         let i = id.idx();
-        assert!(
-            self.is_leaf[i],
-            "predict called on internal node {:?}",
-            id
-        );
+        assert!(self.is_leaf[i], "predict called on internal node {:?}", id);
         self.leaf_value[i]
     }
 

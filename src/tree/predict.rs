@@ -45,11 +45,7 @@ pub fn predict_from_root(arena: &TreeArena, root: NodeId, features: &[f64]) -> f
 ///
 /// Returns a `Vec<f64>` with one prediction per row, in the same order as the
 /// input matrix.
-pub fn predict_batch(
-    arena: &TreeArena,
-    root: NodeId,
-    feature_matrix: &[Vec<f64>],
-) -> Vec<f64> {
+pub fn predict_batch(arena: &TreeArena, root: NodeId, feature_matrix: &[Vec<f64>]) -> Vec<f64> {
     feature_matrix
         .iter()
         .map(|features| predict_from_root(arena, root, features))
@@ -220,11 +216,11 @@ mod tests {
     fn build_two_level() -> (TreeArena, NodeId) {
         let mut arena = empty_arena();
 
-        let root = push_leaf(&mut arena, 0.0, 0);           // id 0
-        let inner = push_leaf(&mut arena, 0.0, 1);          // id 1
-        let right_leaf = push_leaf(&mut arena, 10.0, 1);    // id 2
-        let left_left = push_leaf(&mut arena, -5.0, 2);     // id 3
-        let left_right = push_leaf(&mut arena, 3.0, 2);     // id 4
+        let root = push_leaf(&mut arena, 0.0, 0); // id 0
+        let inner = push_leaf(&mut arena, 0.0, 1); // id 1
+        let right_leaf = push_leaf(&mut arena, 10.0, 1); // id 2
+        let left_left = push_leaf(&mut arena, -5.0, 2); // id 3
+        let left_right = push_leaf(&mut arena, 3.0, 2); // id 4
 
         convert_to_split(&mut arena, root, 0, 5.0, inner, right_leaf);
         convert_to_split(&mut arena, inner, 1, 2.0, left_left, left_right);
@@ -265,7 +261,7 @@ mod tests {
             vec![1.0, 0.5],
             vec![4.0, 3.0],
             vec![8.0, 0.0],
-            vec![5.0, 2.0],   // both exactly on threshold -> left, left => -5.0
+            vec![5.0, 2.0], // both exactly on threshold -> left, left => -5.0
         ];
 
         let batch = predict_batch(&arena, root, &rows);

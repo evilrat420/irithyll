@@ -5,7 +5,7 @@
 //! for serializing/deserializing generic `Serialize`/`Deserialize` types.
 
 use crate::error::{IrithyllError, Result};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Serialize a value to a JSON string.
 ///
@@ -76,15 +76,15 @@ use crate::ensemble::config::SGBTConfig;
 #[cfg(feature = "serde-json")]
 use crate::ensemble::SGBT;
 #[cfg(feature = "serde-json")]
-use crate::loss::Loss;
-#[cfg(feature = "serde-json")]
-use crate::loss::squared::SquaredLoss;
+use crate::loss::huber::HuberLoss;
 #[cfg(feature = "serde-json")]
 use crate::loss::logistic::LogisticLoss;
 #[cfg(feature = "serde-json")]
-use crate::loss::huber::HuberLoss;
-#[cfg(feature = "serde-json")]
 use crate::loss::softmax::SoftmaxLoss;
+#[cfg(feature = "serde-json")]
+use crate::loss::squared::SquaredLoss;
+#[cfg(feature = "serde-json")]
+use crate::loss::Loss;
 
 /// Tag for reconstructing the correct loss function on deserialization.
 ///
@@ -240,10 +240,7 @@ mod tests {
     #[cfg(feature = "serde-json")]
     #[test]
     fn json_batch_samples() {
-        let samples = vec![
-            Sample::new(vec![1.0], 2.0),
-            Sample::new(vec![3.0], 4.0),
-        ];
+        let samples = vec![Sample::new(vec![1.0], 2.0), Sample::new(vec![3.0], 4.0)];
         let json = to_json(&samples).unwrap();
         let restored: Vec<Sample> = from_json(&json).unwrap();
         assert_eq!(restored.len(), 2);

@@ -4,8 +4,8 @@
 //! Two clusters in 2D space: class 0 centered at (-2, -2),
 //! class 1 centered at (2, 2), with Gaussian-like noise.
 
-use irithyll::{SGBTConfig, SGBT, Sample, ClassificationMetrics};
 use irithyll::loss::logistic::LogisticLoss;
+use irithyll::{ClassificationMetrics, SGBTConfig, Sample, SGBT};
 
 /// Deterministic PRNG (xorshift64). Returns a value in [0, 1).
 fn xorshift64(state: &mut u64) -> f64 {
@@ -50,7 +50,11 @@ fn main() {
     for i in 0..n_samples {
         // Alternate classes: even=0, odd=1
         let label = if xorshift64(&mut rng) < 0.5 { 0.0 } else { 1.0 };
-        let (cx, cy) = if label == 0.0 { (-2.0, -2.0) } else { (2.0, 2.0) };
+        let (cx, cy) = if label == 0.0 {
+            (-2.0, -2.0)
+        } else {
+            (2.0, 2.0)
+        };
 
         // Add Gaussian-like noise (stddev ~ 1.0)
         let x1 = cx + randn(&mut rng);
@@ -91,17 +95,16 @@ fn main() {
 
     // 4. Test predictions on clear-cut points
     println!("\n--- Test Predictions ---");
-    println!("  {:>6} {:>6} | {:>8} {:>10}",
-        "x1", "x2", "prob", "class");
+    println!("  {:>6} {:>6} | {:>8} {:>10}", "x1", "x2", "prob", "class");
     println!("  {}", "-".repeat(38));
 
     let test_points: [(f64, f64, &str); 6] = [
         (-3.0, -3.0, "expect 0"),
         (-1.0, -1.0, "expect 0"),
-        ( 0.0,  0.0, "boundary"),
-        ( 1.0,  1.0, "expect 1"),
-        ( 3.0,  3.0, "expect 1"),
-        ( 5.0,  5.0, "expect 1"),
+        (0.0, 0.0, "boundary"),
+        (1.0, 1.0, "expect 1"),
+        (3.0, 3.0, "expect 1"),
+        (5.0, 5.0, "expect 1"),
     ];
 
     for (x1, x2, note) in &test_points {

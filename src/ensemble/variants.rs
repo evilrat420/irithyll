@@ -43,7 +43,6 @@ pub enum SGBTVariant {
     },
 }
 
-
 impl SGBTVariant {
     /// Determine how many times to train a tree on this instance.
     ///

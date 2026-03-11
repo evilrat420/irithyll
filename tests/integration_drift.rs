@@ -1,10 +1,10 @@
 //! Integration tests for drift detection and tree replacement.
 
-use irithyll::drift::pht::PageHinkleyTest;
 use irithyll::drift::adwin::Adwin;
+use irithyll::drift::pht::PageHinkleyTest;
 use irithyll::drift::{DriftDetector, DriftSignal};
-use irithyll::{SGBTConfig, SGBT, Sample};
 use irithyll::ensemble::config::DriftDetectorType;
+use irithyll::{SGBTConfig, Sample, SGBT};
 
 // ---------------------------------------------------------------------------
 // Deterministic RNG
@@ -166,16 +166,16 @@ fn sgbt_adapts_after_drift() {
         model.train_one(&Sample::new(vec![x], target));
     }
 
-    let early_rmse = (early_switch_errors.iter().sum::<f64>()
-        / early_switch_errors.len() as f64)
-        .sqrt();
+    let early_rmse =
+        (early_switch_errors.iter().sum::<f64>() / early_switch_errors.len() as f64).sqrt();
     let late_rmse =
         (late_switch_errors.iter().sum::<f64>() / late_switch_errors.len() as f64).sqrt();
 
     assert!(
         late_rmse < early_rmse,
         "Model should adapt to new concept: early_rmse={:.4}, late_rmse={:.4}",
-        early_rmse, late_rmse
+        early_rmse,
+        late_rmse
     );
 }
 

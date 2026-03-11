@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use irithyll::{SGBTConfig, SGBT, Sample};
+use irithyll::{SGBTConfig, Sample, SGBT};
 
 /// Deterministic xorshift64 PRNG returning f64 in [0, 1).
 fn xorshift64(state: &mut u64) -> f64 {

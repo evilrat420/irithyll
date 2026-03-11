@@ -227,7 +227,10 @@ mod tests {
         let signals = feed(&mut ddm, &values);
 
         let drift_count = signals.iter().filter(|&&s| s == DriftSignal::Drift).count();
-        assert_eq!(drift_count, 0, "stationary low error should produce no drift");
+        assert_eq!(
+            drift_count, 0,
+            "stationary low error should produce no drift"
+        );
     }
 
     // 2. Error rate increase -- drift detected.
@@ -393,12 +396,14 @@ mod tests {
         let mut manual_fresh = Ddm::with_params(1.5, 2.5, 50);
         let test_vals = generate_values(0.2, 0.01, 100);
 
-        let signals_a: Vec<DriftSignal> =
-            test_vals.iter().map(|&v| fresh.update(v)).collect();
+        let signals_a: Vec<DriftSignal> = test_vals.iter().map(|&v| fresh.update(v)).collect();
         let signals_b: Vec<DriftSignal> =
             test_vals.iter().map(|&v| manual_fresh.update(v)).collect();
 
-        assert_eq!(signals_a, signals_b, "clone_fresh should behave identically to a new instance with same params");
+        assert_eq!(
+            signals_a, signals_b,
+            "clone_fresh should behave identically to a new instance with same params"
+        );
 
         // Means should converge to the same value.
         assert!(

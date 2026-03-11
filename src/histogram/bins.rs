@@ -180,8 +180,8 @@ impl FeatureHistogram {
         let s_child = child.decay_scale;
 
         // Fast path: both scales are 1.0, use existing SIMD logic directly.
-        let scales_trivial = (s_self - 1.0).abs() <= f64::EPSILON
-            && (s_child - 1.0).abs() <= f64::EPSILON;
+        let scales_trivial =
+            (s_self - 1.0).abs() <= f64::EPSILON && (s_child - 1.0).abs() <= f64::EPSILON;
 
         #[cfg(feature = "simd")]
         {
@@ -189,8 +189,16 @@ impl FeatureHistogram {
                 let mut grad_sums = vec![0.0; n];
                 let mut hess_sums = vec![0.0; n];
                 let mut counts = vec![0u64; n];
-                crate::histogram::simd::subtract_f64(&self.grad_sums, &child.grad_sums, &mut grad_sums);
-                crate::histogram::simd::subtract_f64(&self.hess_sums, &child.hess_sums, &mut hess_sums);
+                crate::histogram::simd::subtract_f64(
+                    &self.grad_sums,
+                    &child.grad_sums,
+                    &mut grad_sums,
+                );
+                crate::histogram::simd::subtract_f64(
+                    &self.hess_sums,
+                    &child.hess_sums,
+                    &mut hess_sums,
+                );
                 crate::histogram::simd::subtract_u64(&self.counts, &child.counts, &mut counts);
                 return FeatureHistogram {
                     grad_sums,
@@ -264,7 +272,13 @@ impl LeafHistograms {
     /// Accumulate a sample with forward decay across all feature histograms.
     ///
     /// Each histogram is decayed by `alpha` before accumulating the new sample.
-    pub fn accumulate_with_decay(&mut self, features: &[f64], gradient: f64, hessian: f64, alpha: f64) {
+    pub fn accumulate_with_decay(
+        &mut self,
+        features: &[f64],
+        gradient: f64,
+        hessian: f64,
+        alpha: f64,
+    ) {
         debug_assert_eq!(
             features.len(),
             self.histograms.len(),
@@ -282,9 +296,7 @@ impl LeafHistograms {
     /// All histograms receive the same samples, so their total counts must agree.
     /// Returns 0 if there are no features.
     pub fn total_count(&self) -> u64 {
-        self.histograms
-            .first()
-            .map_or(0, |h| h.total_count())
+        self.histograms.first().map_or(0, |h| h.total_count())
     }
 
     /// Number of features (histograms).
@@ -422,9 +434,7 @@ mod tests {
 
     #[test]
     fn leaf_histograms_multi_feature() {
-        let edges_f0 = BinEdges {
-            edges: vec![5.0],
-        }; // 2 bins
+        let edges_f0 = BinEdges { edges: vec![5.0] }; // 2 bins
         let edges_f1 = BinEdges {
             edges: vec![2.0, 4.0, 6.0],
         }; // 4 bins
@@ -455,9 +465,7 @@ mod tests {
 
     #[test]
     fn leaf_histograms_reset() {
-        let edges = BinEdges {
-            edges: vec![3.0],
-        };
+        let edges = BinEdges { edges: vec![3.0] };
         let mut leaf = LeafHistograms::new(&[edges.clone(), edges]);
         leaf.accumulate(&[1.0, 5.0], 1.0, 1.0);
         assert_eq!(leaf.total_count(), 1);
@@ -477,9 +485,7 @@ mod tests {
     #[test]
     fn single_edge_histogram() {
         // Single edge -> 2 bins: (-inf, 5.0] and (5.0, +inf)
-        let edges = BinEdges {
-            edges: vec![5.0],
-        };
+        let edges = BinEdges { edges: vec![5.0] };
         let mut h = FeatureHistogram::new(edges);
         assert_eq!(h.n_bins(), 2);
 
@@ -510,7 +516,9 @@ mod tests {
     #[test]
     fn accumulate_with_decay_recent_dominates() {
         // 3 bins: edges at [3.0, 7.0] => bins [<3, 3-7, >7]
-        let edges = BinEdges { edges: vec![3.0, 7.0] };
+        let edges = BinEdges {
+            edges: vec![3.0, 7.0],
+        };
         let mut h = FeatureHistogram::new(edges);
         let alpha = 0.9;
 
@@ -531,7 +539,8 @@ mod tests {
         assert!(
             h.grad_sums[2] > h.grad_sums[0],
             "recent bin should dominate: bin2={} > bin0={}",
-            h.grad_sums[2], h.grad_sums[0],
+            h.grad_sums[2],
+            h.grad_sums[0],
         );
     }
 
@@ -539,7 +548,9 @@ mod tests {
     fn lazy_decay_matches_eager() {
         // Compare lazy decay (new) against a manual eager implementation.
         // They must produce identical results (within f64 precision).
-        let edges = BinEdges { edges: vec![3.0, 6.0] }; // 3 bins
+        let edges = BinEdges {
+            edges: vec![3.0, 6.0],
+        }; // 3 bins
         let alpha = 0.95;
 
         // Lazy histogram (our implementation).
@@ -552,14 +563,14 @@ mod tests {
         let mut eager_hess = vec![0.0; n];
 
         let samples: Vec<(f64, f64, f64)> = vec![
-            (1.0, 0.5, 1.0),   // bin 0
-            (4.0, -0.3, 0.8),  // bin 1
-            (1.0, 0.7, 1.2),   // bin 0
-            (8.0, -1.0, 0.5),  // bin 2
-            (5.0, 0.2, 0.9),   // bin 1
-            (1.0, 0.1, 1.1),   // bin 0
-            (8.0, 0.4, 0.6),   // bin 2
-            (4.0, -0.5, 1.0),  // bin 1
+            (1.0, 0.5, 1.0),  // bin 0
+            (4.0, -0.3, 0.8), // bin 1
+            (1.0, 0.7, 1.2),  // bin 0
+            (8.0, -1.0, 0.5), // bin 2
+            (5.0, 0.2, 0.9),  // bin 1
+            (1.0, 0.1, 1.1),  // bin 0
+            (8.0, 0.4, 0.6),  // bin 2
+            (4.0, -0.5, 1.0), // bin 1
         ];
 
         let edge_vals = [3.0, 6.0];
@@ -569,9 +580,13 @@ mod tests {
                 eager_grad[i] *= alpha;
                 eager_hess[i] *= alpha;
             }
-            let bin = if value <= edge_vals[0] { 0 }
-                      else if value <= edge_vals[1] { 1 }
-                      else { 2 };
+            let bin = if value <= edge_vals[0] {
+                0
+            } else if value <= edge_vals[1] {
+                1
+            } else {
+                2
+            };
             eager_grad[bin] += gradient;
             eager_hess[bin] += hessian;
 
@@ -585,11 +600,17 @@ mod tests {
         for i in 0..n {
             assert!(
                 (lazy.grad_sums[i] - eager_grad[i]).abs() < 1e-10,
-                "grad_sums[{}]: lazy={}, eager={}", i, lazy.grad_sums[i], eager_grad[i],
+                "grad_sums[{}]: lazy={}, eager={}",
+                i,
+                lazy.grad_sums[i],
+                eager_grad[i],
             );
             assert!(
                 (lazy.hess_sums[i] - eager_hess[i]).abs() < 1e-10,
-                "hess_sums[{}]: lazy={}, eager={}", i, lazy.hess_sums[i], eager_hess[i],
+                "hess_sums[{}]: lazy={}, eager={}",
+                i,
+                lazy.hess_sums[i],
+                eager_hess[i],
             );
         }
     }
@@ -610,7 +631,8 @@ mod tests {
         let total = h.total_gradient();
         assert!(
             (total - 1.9).abs() < 1e-10,
-            "total_gradient should account for decay_scale: got {}", total,
+            "total_gradient should account for decay_scale: got {}",
+            total,
         );
     }
 
@@ -628,7 +650,10 @@ mod tests {
         let grad_after_first = h.grad_sums.clone();
 
         h.materialize_decay(); // second call should be no-op
-        assert_eq!(h.grad_sums, grad_after_first, "second materialize should be a no-op");
+        assert_eq!(
+            h.grad_sums, grad_after_first,
+            "second materialize should be a no-op"
+        );
     }
 
     #[test]
@@ -644,13 +669,18 @@ mod tests {
 
         // Should not have NaN or Inf despite extreme decay.
         let total = h.total_gradient();
-        assert!(total.is_finite(), "gradient should be finite after renormalization, got {}", total);
+        assert!(
+            total.is_finite(),
+            "gradient should be finite after renormalization, got {}",
+            total
+        );
         assert!(total > 0.0, "gradient should be positive, got {}", total);
 
         // With alpha=0.5, geometric sum converges to 1/(1-0.5) = 2.0
         assert!(
             (total - 2.0).abs() < 0.1,
-            "total gradient should converge to ~2.0, got {}", total,
+            "total gradient should converge to ~2.0, got {}",
+            total,
         );
     }
 }

@@ -18,8 +18,16 @@
 /// # Panics
 /// Panics if `a`, `b`, and `out` do not all have the same length.
 pub fn subtract_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
-    assert_eq!(a.len(), b.len(), "subtract_f64: a and b must have the same length");
-    assert_eq!(a.len(), out.len(), "subtract_f64: a and out must have the same length");
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "subtract_f64: a and b must have the same length"
+    );
+    assert_eq!(
+        a.len(),
+        out.len(),
+        "subtract_f64: a and out must have the same length"
+    );
 
     #[cfg(target_arch = "x86_64")]
     {
@@ -123,12 +131,12 @@ unsafe fn sum_f64_avx2(slice: &[f64]) -> f64 {
     // Horizontal reduce: acc = [a0, a1, a2, a3]
     // Extract high 128 bits and add to low 128 bits.
     let hi128 = _mm256_extractf128_pd(acc, 1); // [a2, a3]
-    let lo128 = _mm256_castpd256_pd128(acc);    // [a0, a1]
-    let sum128 = _mm_add_pd(lo128, hi128);      // [a0+a2, a1+a3]
+    let lo128 = _mm256_castpd256_pd128(acc); // [a0, a1]
+    let sum128 = _mm_add_pd(lo128, hi128); // [a0+a2, a1+a3]
 
     // Final horizontal add of the two f64 lanes.
     let shuf = _mm_unpackhi_pd(sum128, sum128); // [a1+a3, a1+a3]
-    let total = _mm_add_sd(sum128, shuf);       // low lane = a0+a1+a2+a3
+    let total = _mm_add_sd(sum128, shuf); // low lane = a0+a1+a2+a3
     let mut result: f64 = _mm_cvtsd_f64(total);
 
     // Scalar tail.
@@ -153,8 +161,16 @@ unsafe fn sum_f64_avx2(slice: &[f64]) -> f64 {
 /// # Panics
 /// Panics if `a`, `b`, and `out` do not all have the same length.
 pub fn subtract_u64(a: &[u64], b: &[u64], out: &mut [u64]) {
-    assert_eq!(a.len(), b.len(), "subtract_u64: a and b must have the same length");
-    assert_eq!(a.len(), out.len(), "subtract_u64: a and out must have the same length");
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "subtract_u64: a and b must have the same length"
+    );
+    assert_eq!(
+        a.len(),
+        out.len(),
+        "subtract_u64: a and out must have the same length"
+    );
 
     for i in 0..a.len() {
         out[i] = a[i].saturating_sub(b[i]);

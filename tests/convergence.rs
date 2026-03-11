@@ -1,7 +1,7 @@
 //! Convergence and regret bound verification tests.
 
-use irithyll::{SGBTConfig, SGBT, Sample};
 use irithyll::loss::huber::HuberLoss;
+use irithyll::{SGBTConfig, Sample, SGBT};
 
 // ---------------------------------------------------------------------------
 // Deterministic RNG
@@ -72,7 +72,8 @@ fn linear_function_converges() {
     assert!(
         late_rmse < early_rmse,
         "RMSE should decrease: early={:.4}, late={:.4}",
-        early_rmse, late_rmse
+        early_rmse,
+        late_rmse
     );
 }
 
@@ -151,11 +152,7 @@ fn huber_converges_with_outliers() {
         rng ^= rng >> 7;
         rng ^= rng << 17;
         let r = rng as f64 / u64::MAX as f64;
-        let train_target = if r < 0.05 {
-            target + 50.0
-        } else {
-            target
-        };
+        let train_target = if r < 0.05 { target + 50.0 } else { target };
 
         let pred = model.predict(&[x]);
         // Measure error against the clean target (not the outlier-contaminated one)
@@ -177,7 +174,8 @@ fn huber_converges_with_outliers() {
     assert!(
         late_rmse < early_rmse,
         "Huber loss should converge even with 5%% outliers: early={:.4}, late={:.4}",
-        early_rmse, late_rmse
+        early_rmse,
+        late_rmse
     );
 }
 
@@ -249,6 +247,7 @@ fn more_steps_improves_accuracy() {
     assert!(
         rmse_50 < rmse_5 * 2.0,
         "50-step model should not be dramatically worse than 5-step: rmse_5={:.4}, rmse_50={:.4}",
-        rmse_5, rmse_50
+        rmse_5,
+        rmse_50
     );
 }
