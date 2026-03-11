@@ -60,7 +60,7 @@ pub trait BinningStrategy: Send + Sync + 'static {
 /// Concrete binning strategy enum, eliminating `Box<dyn BinningStrategy>`
 /// heap allocations per feature per leaf.
 ///
-/// This is used internally by [`HoeffdingTree`](crate::tree::HoeffdingTree)
+/// This is used internally by [`HoeffdingTree`](crate::tree::hoeffding::HoeffdingTree)
 /// leaf states. Each variant delegates to the corresponding strategy impl.
 #[derive(Debug, Clone)]
 pub enum BinnerKind {

@@ -172,8 +172,8 @@ pub struct SGBTConfig {
 
     /// Optional human-readable feature names.
     ///
-    /// When set, enables [`SGBT::named_feature_importances`] and
-    /// [`SGBT::train_one_named`] for production-friendly named access.
+    /// When set, enables [`named_feature_importances`](super::SGBT::named_feature_importances) and
+    /// [`train_one_named`](super::SGBT::train_one_named) for production-friendly named access.
     /// Length must match the number of features in training data.
     #[serde(default)]
     pub feature_names: Option<Vec<String>>,
@@ -359,7 +359,7 @@ impl SGBTConfigBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`IrithyllError::InvalidConfig`] with a structured
+    /// Returns [`InvalidConfig`](crate::IrithyllError::InvalidConfig) with a structured
     /// [`ConfigError`] if any parameter is out of its valid range.
     pub fn build(self) -> Result<SGBTConfig> {
         let c = &self.config;

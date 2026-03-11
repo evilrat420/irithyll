@@ -184,7 +184,7 @@ impl<L: Loss> ParallelSGBT<L> {
 
     /// Train on a single observation using delayed gradient updates.
     ///
-    /// Accepts any type implementing [`Observation`], including [`Sample`],
+    /// Accepts any type implementing [`Observation`], including [`Sample`](crate::Sample),
     /// [`SampleRef`](crate::SampleRef), or tuples like `(&[f64], f64)`.
     ///
     /// All boosting steps receive the same gradient/hessian computed from

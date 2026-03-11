@@ -205,7 +205,7 @@ mod tests {
 
         for i in 0..100 {
             let x = i as f64 * 0.1;
-            model.train_one(&[x, x * 2.0], &[x * 3.0, x * -1.0]);
+            model.train_one(&[x, x * 2.0], &[x * 3.0, -x]);
         }
 
         assert_eq!(model.n_samples_seen(), 100);
@@ -298,7 +298,7 @@ mod tests {
             let x1 = (rng >> 33) as f64 / (u32::MAX as f64) * 10.0 - 5.0;
 
             let t0 = 2.0 * x0 + 3.0 * x1;
-            let t1 = -1.0 * x0 + 0.5 * x1;
+            let t1 = -x0 + 0.5 * x1;
 
             let preds = model.predict(&[x0, x1]);
 
