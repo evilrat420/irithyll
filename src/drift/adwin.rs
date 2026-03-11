@@ -496,11 +496,70 @@ impl DriftDetector for Adwin {
         Box::new(Self::with_delta(self.delta).with_max_buckets(self.max_buckets))
     }
 
+    fn clone_boxed(&self) -> Box<dyn DriftDetector> {
+        Box::new(self.clone())
+    }
+
     fn estimated_mean(&self) -> f64 {
         if self.count == 0 {
             0.0
         } else {
             self.total / self.count as f64
+        }
+    }
+
+    fn serialize_state(&self) -> Option<crate::drift::state::DriftDetectorState> {
+        use crate::drift::state::{AdwinBucketState, DriftDetectorState};
+        let rows = self
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|b| AdwinBucketState {
+                        total: b.total,
+                        variance: b.variance,
+                        count: b.count,
+                    })
+                    .collect()
+            })
+            .collect();
+        Some(DriftDetectorState::Adwin {
+            rows,
+            total: self.total,
+            variance: self.variance,
+            count: self.count,
+            width: self.width,
+        })
+    }
+
+    fn restore_state(&mut self, state: &crate::drift::state::DriftDetectorState) -> bool {
+        if let crate::drift::state::DriftDetectorState::Adwin {
+            rows,
+            total,
+            variance,
+            count,
+            width,
+        } = state
+        {
+            self.rows = rows
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|b| Bucket {
+                            total: b.total,
+                            variance: b.variance,
+                            count: b.count,
+                        })
+                        .collect()
+                })
+                .collect();
+            self.total = *total;
+            self.variance = *variance;
+            self.count = *count;
+            self.width = *width;
+            true
+        } else {
+            false
         }
     }
 }

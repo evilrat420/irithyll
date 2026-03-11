@@ -30,6 +30,7 @@ use crate::tree::builder::TreeConfig;
 /// [`predict`](BoostingStep::predict) return the active tree's prediction
 /// **before** any training on the current sample. This ensures unbiased
 /// gradient computation in the boosting loop.
+#[derive(Clone)]
 pub struct BoostingStep {
     /// The tree slot managing the active tree, alternate, and drift detector.
     slot: TreeSlot,

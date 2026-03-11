@@ -17,6 +17,7 @@
 //!    of all preceding trees.
 
 pub mod config;
+pub mod multi_target;
 pub mod multiclass;
 pub mod parallel;
 pub mod replacement;
@@ -29,20 +30,54 @@ use crate::ensemble::config::SGBTConfig;
 use crate::ensemble::step::BoostingStep;
 use crate::loss::squared::SquaredLoss;
 use crate::loss::Loss;
+use crate::sample::Observation;
+#[allow(unused_imports)] // Used in doc links + tests
 use crate::sample::Sample;
 use crate::tree::builder::TreeConfig;
 
+/// Type alias for an SGBT model using dynamic (boxed) loss dispatch.
+///
+/// Use this when the loss function is determined at runtime (e.g., when
+/// deserializing a model from JSON where the loss type is stored as a tag).
+///
+/// For compile-time loss dispatch (preferred for performance), use
+/// `SGBT<LogisticLoss>`, `SGBT<HuberLoss>`, etc.
+pub type DynSGBT = SGBT<Box<dyn Loss>>;
+
 /// Streaming Gradient Boosted Trees ensemble.
 ///
-/// The primary entry point for training and prediction. Supports regression
-/// (default) and binary classification via pluggable loss functions.
-pub struct SGBT {
+/// The primary entry point for training and prediction. Generic over `L: Loss`
+/// so the loss function's gradient/hessian calls are monomorphized (inlined)
+/// into the boosting hot loop — no virtual dispatch overhead.
+///
+/// The default type parameter `L = SquaredLoss` means `SGBT::new(config)`
+/// creates a regression model without specifying the loss type explicitly.
+///
+/// # Examples
+///
+/// ```
+/// use irithyll::{SGBTConfig, SGBT};
+///
+/// // Regression with squared loss (default):
+/// let config = SGBTConfig::builder().n_steps(10).build().unwrap();
+/// let model = SGBT::new(config);
+/// ```
+///
+/// ```
+/// use irithyll::{SGBTConfig, SGBT};
+/// use irithyll::loss::logistic::LogisticLoss;
+///
+/// // Classification with logistic loss — no Box::new()!
+/// let config = SGBTConfig::builder().n_steps(10).build().unwrap();
+/// let model = SGBT::with_loss(config, LogisticLoss);
+/// ```
+pub struct SGBT<L: Loss = SquaredLoss> {
     /// Configuration.
     config: SGBTConfig,
     /// Boosting steps (one tree + drift detector each).
     steps: Vec<BoostingStep>,
-    /// Loss function.
-    loss: Box<dyn Loss>,
+    /// Loss function (monomorphized — no vtable).
+    loss: L,
     /// Base prediction (initial constant, computed from first batch of targets).
     base_prediction: f64,
     /// Whether base_prediction has been initialized.
@@ -57,7 +92,23 @@ pub struct SGBT {
     rng_state: u64,
 }
 
-impl fmt::Debug for SGBT {
+impl<L: Loss + Clone> Clone for SGBT<L> {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            steps: self.steps.clone(),
+            loss: self.loss.clone(),
+            base_prediction: self.base_prediction,
+            base_initialized: self.base_initialized,
+            initial_targets: self.initial_targets.clone(),
+            initial_target_count: self.initial_target_count,
+            samples_seen: self.samples_seen,
+            rng_state: self.rng_state,
+        }
+    }
+}
+
+impl<L: Loss> fmt::Debug for SGBT<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SGBT")
             .field("n_steps", &self.steps.len())
@@ -68,9 +119,38 @@ impl fmt::Debug for SGBT {
     }
 }
 
-impl SGBT {
+// ---------------------------------------------------------------------------
+// Convenience constructor for the default loss (SquaredLoss)
+// ---------------------------------------------------------------------------
+
+impl SGBT<SquaredLoss> {
     /// Create a new SGBT ensemble with squared loss (regression).
+    ///
+    /// This is the most common constructor. For classification or custom
+    /// losses, use [`with_loss`](SGBT::with_loss).
     pub fn new(config: SGBTConfig) -> Self {
+        Self::with_loss(config, SquaredLoss)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// General impl for all Loss types
+// ---------------------------------------------------------------------------
+
+impl<L: Loss> SGBT<L> {
+    /// Create a new SGBT ensemble with a specific loss function.
+    ///
+    /// The loss is stored by value (monomorphized), giving zero-cost
+    /// gradient/hessian dispatch.
+    ///
+    /// ```
+    /// use irithyll::{SGBTConfig, SGBT};
+    /// use irithyll::loss::logistic::LogisticLoss;
+    ///
+    /// let config = SGBTConfig::builder().n_steps(10).build().unwrap();
+    /// let model = SGBT::with_loss(config, LogisticLoss);
+    /// ```
+    pub fn with_loss(config: SGBTConfig, loss: L) -> Self {
         let leaf_decay_alpha = config
             .leaf_half_life
             .map(|hl| (-(2.0_f64.ln()) / hl as f64).exp());
@@ -102,7 +182,7 @@ impl SGBT {
         Self {
             config,
             steps,
-            loss: Box::new(SquaredLoss),
+            loss,
             base_prediction: 0.0,
             base_initialized: false,
             initial_targets: Vec::new(),
@@ -112,20 +192,19 @@ impl SGBT {
         }
     }
 
-    /// Create a new SGBT ensemble with a custom loss function.
-    pub fn with_loss(config: SGBTConfig, loss: Box<dyn Loss>) -> Self {
-        let mut model = Self::new(config);
-        model.loss = loss;
-        model
-    }
-
-    /// Train on a single sample.
-    pub fn train_one(&mut self, sample: &Sample) {
+    /// Train on a single observation.
+    ///
+    /// Accepts any type implementing [`Observation`], including [`Sample`],
+    /// [`SampleRef`](crate::SampleRef), or tuples like `(&[f64], f64)` for
+    /// zero-copy training.
+    pub fn train_one(&mut self, sample: &impl Observation) {
         self.samples_seen += 1;
+        let target = sample.target();
+        let features = sample.features();
 
         // Initialize base prediction from first few targets
         if !self.base_initialized {
-            self.initial_targets.push(sample.target);
+            self.initial_targets.push(target);
             if self.initial_targets.len() >= self.initial_target_count {
                 self.base_prediction = self.loss.initial_prediction(&self.initial_targets);
                 self.base_initialized = true;
@@ -139,22 +218,21 @@ impl SGBT {
 
         // Sequential boosting: each step targets the residual of all prior steps
         for step in &mut self.steps {
-            let gradient = self.loss.gradient(sample.target, current_pred);
-            let hessian = self.loss.hessian(sample.target, current_pred);
+            let gradient = self.loss.gradient(target, current_pred);
+            let hessian = self.loss.hessian(target, current_pred);
             let train_count = self
                 .config
                 .variant
                 .train_count(hessian, &mut self.rng_state);
 
-            let step_pred =
-                step.train_and_predict(&sample.features, gradient, hessian, train_count);
+            let step_pred = step.train_and_predict(features, gradient, hessian, train_count);
 
             current_pred += self.config.learning_rate * step_pred;
         }
     }
 
-    /// Train on a batch of samples.
-    pub fn train_batch(&mut self, samples: &[Sample]) {
+    /// Train on a batch of observations.
+    pub fn train_batch<O: Observation>(&mut self, samples: &[O]) {
         for sample in samples {
             self.train_one(sample);
         }
@@ -226,40 +304,9 @@ impl SGBT {
         &self.steps
     }
 
-    /// Train on a single sample given raw feature slice and target.
-    ///
-    /// Unlike [`train_one`](Self::train_one) which takes a [`Sample`], this
-    /// accepts a feature slice and target directly — avoiding allocation when
-    /// features are already available as a contiguous slice (e.g., from Arrow
-    /// `Float64Array::values()`).
-    pub fn train_one_slice(&mut self, features: &[f64], target: f64, loss: &dyn Loss) {
-        self.samples_seen += 1;
-
-        // Initialize base prediction from first few targets.
-        if !self.base_initialized {
-            self.initial_targets.push(target);
-            if self.initial_targets.len() >= self.initial_target_count {
-                self.base_prediction = loss.initial_prediction(&self.initial_targets);
-                self.base_initialized = true;
-                self.initial_targets.clear();
-                self.initial_targets.shrink_to_fit();
-            }
-        }
-
-        let mut current_pred = self.base_prediction;
-
-        for step in &mut self.steps {
-            let gradient = loss.gradient(target, current_pred);
-            let hessian = loss.hessian(target, current_pred);
-            let train_count = self
-                .config
-                .variant
-                .train_count(hessian, &mut self.rng_state);
-
-            let step_pred = step.train_and_predict(features, gradient, hessian, train_count);
-
-            current_pred += self.config.learning_rate * step_pred;
-        }
+    /// Immutable access to the loss function.
+    pub fn loss(&self) -> &L {
+        &self.loss
     }
 
     /// Feature importances based on accumulated split gains across all trees.
@@ -289,6 +336,108 @@ impl SGBT {
         totals
     }
 
+    /// Feature names, if configured.
+    pub fn feature_names(&self) -> Option<&[String]> {
+        self.config.feature_names.as_deref()
+    }
+
+    /// Feature importances paired with their names.
+    ///
+    /// Returns `None` if feature names are not configured. Otherwise returns
+    /// `(name, importance)` pairs sorted by importance descending.
+    pub fn named_feature_importances(&self) -> Option<Vec<(String, f64)>> {
+        let names = self.config.feature_names.as_ref()?;
+        let importances = self.feature_importances();
+        let mut pairs: Vec<(String, f64)> = names
+            .iter()
+            .zip(importances.iter().chain(std::iter::repeat(&0.0)))
+            .map(|(n, &v)| (n.clone(), v))
+            .collect();
+        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Some(pairs)
+    }
+
+    /// Train on a single sample with named features.
+    ///
+    /// Converts a `HashMap<String, f64>` of named features into a positional
+    /// vector using the configured feature names. Missing features default to 0.0.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `feature_names` is not configured.
+    pub fn train_one_named(
+        &mut self,
+        features: &std::collections::HashMap<String, f64>,
+        target: f64,
+    ) {
+        let names = self
+            .config
+            .feature_names
+            .as_ref()
+            .expect("train_one_named requires feature_names to be configured");
+        let vec: Vec<f64> = names
+            .iter()
+            .map(|name| features.get(name).copied().unwrap_or(0.0))
+            .collect();
+        self.train_one(&(&vec[..], target));
+    }
+
+    /// Predict with named features.
+    ///
+    /// Converts named features into a positional vector, same as `train_one_named`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `feature_names` is not configured.
+    pub fn predict_named(&self, features: &std::collections::HashMap<String, f64>) -> f64 {
+        let names = self
+            .config
+            .feature_names
+            .as_ref()
+            .expect("predict_named requires feature_names to be configured");
+        let vec: Vec<f64> = names
+            .iter()
+            .map(|name| features.get(name).copied().unwrap_or(0.0))
+            .collect();
+        self.predict(&vec)
+    }
+
+    /// Compute per-feature SHAP explanations for a prediction.
+    ///
+    /// Returns [`ShapValues`](crate::explain::treeshap::ShapValues) containing
+    /// per-feature contributions and a base value. The invariant holds:
+    /// `base_value + sum(values) ≈ self.predict(features)`.
+    pub fn explain(&self, features: &[f64]) -> crate::explain::treeshap::ShapValues {
+        crate::explain::treeshap::ensemble_shap(self, features)
+    }
+
+    /// Compute named SHAP explanations (requires `feature_names` configured).
+    ///
+    /// Returns `None` if feature names are not set. Otherwise returns
+    /// [`NamedShapValues`](crate::explain::treeshap::NamedShapValues) with
+    /// `(name, contribution)` pairs sorted by absolute contribution descending.
+    pub fn explain_named(
+        &self,
+        features: &[f64],
+    ) -> Option<crate::explain::treeshap::NamedShapValues> {
+        let names = self.config.feature_names.as_ref()?;
+        let shap = self.explain(features);
+        let mut pairs: Vec<(String, f64)> = names
+            .iter()
+            .zip(shap.values.iter().chain(std::iter::repeat(&0.0)))
+            .map(|(n, &v)| (n.clone(), v))
+            .collect();
+        pairs.sort_by(|a, b| {
+            b.1.abs()
+                .partial_cmp(&a.1.abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Some(crate::explain::treeshap::NamedShapValues {
+            values: pairs,
+            base_value: shap.base_value,
+        })
+    }
+
     /// Reset the ensemble to initial state.
     pub fn reset(&mut self) {
         for step in &mut self.steps {
@@ -303,14 +452,33 @@ impl SGBT {
 
     /// Serialize the model into a [`ModelState`](crate::serde_support::ModelState).
     ///
-    /// Captures all internal state needed to reconstruct the model for
-    /// prediction and continued training. The caller must supply a
-    /// [`LossType`](crate::serde_support::LossType) tag matching the loss
-    /// function used during training.
+    /// Auto-detects the [`LossType`](crate::loss::LossType) from the loss
+    /// function's [`Loss::loss_type()`] implementation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IrithyllError::Serialization`](crate::IrithyllError::Serialization)
+    /// if the loss does not implement `loss_type()` (returns `None`). For custom
+    /// losses, use [`to_model_state_with`](Self::to_model_state_with) instead.
     #[cfg(feature = "serde-json")]
-    pub fn to_model_state(
+    pub fn to_model_state(&self) -> crate::error::Result<crate::serde_support::ModelState> {
+        let loss_type = self.loss.loss_type().ok_or_else(|| {
+            crate::error::IrithyllError::Serialization(
+                "cannot auto-detect loss type for serialization: \
+                 implement Loss::loss_type() or use to_model_state_with()"
+                    .into(),
+            )
+        })?;
+        Ok(self.to_model_state_with(loss_type))
+    }
+
+    /// Serialize the model with an explicit [`LossType`](crate::loss::LossType) tag.
+    ///
+    /// Use this for custom loss functions that don't implement `loss_type()`.
+    #[cfg(feature = "serde-json")]
+    pub fn to_model_state_with(
         &self,
-        loss_type: crate::serde_support::LossType,
+        loss_type: crate::loss::LossType,
     ) -> crate::serde_support::ModelState {
         use crate::serde_support::{ModelState, StepSnapshot, TreeSnapshot};
 
@@ -339,9 +507,13 @@ impl SGBT {
                 let slot = step.slot();
                 let tree_snap = snapshot_tree(slot.active_tree());
                 let alt_snap = slot.alternate_tree().map(snapshot_tree);
+                let drift_state = slot.detector().serialize_state();
+                let alt_drift_state = slot.alt_detector().and_then(|d| d.serialize_state());
                 StepSnapshot {
                     tree: tree_snap,
                     alternate_tree: alt_snap,
+                    drift_state,
+                    alt_drift_state,
                 }
             })
             .collect();
@@ -358,14 +530,23 @@ impl SGBT {
             steps,
         }
     }
+}
 
+// ---------------------------------------------------------------------------
+// DynSGBT: deserialization returns a dynamically-dispatched model
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "serde-json")]
+impl SGBT<Box<dyn Loss>> {
     /// Reconstruct an SGBT model from a [`ModelState`](crate::serde_support::ModelState).
+    ///
+    /// Returns a [`DynSGBT`] (`SGBT<Box<dyn Loss>>`) because the concrete
+    /// loss type is determined at runtime from the serialized tag.
     ///
     /// Rebuilds the full ensemble including tree topology and leaf values.
     /// Histogram accumulators are left empty and will rebuild from continued
-    /// training. The drift detector for each step is freshly created from
-    /// the config (its internal state is not serialized).
-    #[cfg(feature = "serde-json")]
+    /// training. If drift detector state was serialized, it is restored;
+    /// otherwise a fresh detector is created from the config.
     pub fn from_model_state(state: crate::serde_support::ModelState) -> Self {
         use crate::ensemble::replacement::TreeSlot;
         use crate::serde_support::TreeSnapshot;
@@ -428,14 +609,22 @@ impl SGBT {
                     .as_ref()
                     .map(|snap| rebuild_tree(snap, tree_config.clone()));
 
-                let detector = state.config.drift_detector.create();
-                let slot = TreeSlot::from_trees(
+                let mut detector = state.config.drift_detector.create();
+                if let Some(ref ds) = step_snap.drift_state {
+                    detector.restore_state(ds);
+                }
+                let mut slot = TreeSlot::from_trees(
                     active,
                     alternate,
                     tree_config,
                     detector,
                     max_tree_samples,
                 );
+                if let Some(ref ads) = step_snap.alt_drift_state {
+                    if let Some(alt_det) = slot.alt_detector_mut() {
+                        alt_det.restore_state(ads);
+                    }
+                }
                 BoostingStep::from_slot(slot)
             })
             .collect();
@@ -600,7 +789,7 @@ mod tests {
     #[test]
     fn with_loss_uses_custom_loss() {
         use crate::loss::logistic::LogisticLoss;
-        let model = SGBT::with_loss(default_config(), Box::new(LogisticLoss));
+        let model = SGBT::with_loss(default_config(), LogisticLoss);
         let pred = model.predict_transformed(&[1.0, 2.0]);
         assert!(
             (pred - 0.5).abs() < 1e-6,
@@ -693,6 +882,69 @@ mod tests {
             pred.is_finite(),
             "split re-eval model should produce finite predictions, got {}",
             pred
+        );
+    }
+
+    #[test]
+    fn loss_accessor_works() {
+        use crate::loss::logistic::LogisticLoss;
+        let model = SGBT::with_loss(default_config(), LogisticLoss);
+        // Verify we can access the concrete loss type
+        let _loss: &LogisticLoss = model.loss();
+        assert_eq!(_loss.n_outputs(), 1);
+    }
+
+    #[test]
+    fn clone_produces_independent_copy() {
+        let config = default_config();
+        let mut model = SGBT::new(config);
+
+        // Train the original on some data
+        let mut rng: u64 = 99999;
+        for _ in 0..200 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let x = (rng as f64 / u64::MAX as f64) * 10.0 - 5.0;
+            let target = 2.0 * x + 1.0;
+            model.train_one(&Sample::new(vec![x], target));
+        }
+
+        // Clone the model
+        let mut cloned = model.clone();
+
+        // Both should produce identical predictions
+        let test_features = [3.0];
+        let pred_original = model.predict(&test_features);
+        let pred_cloned = cloned.predict(&test_features);
+        assert!(
+            (pred_original - pred_cloned).abs() < 1e-12,
+            "clone should predict identically: original={pred_original}, cloned={pred_cloned}"
+        );
+
+        // Train only the clone further — models should diverge
+        for _ in 0..200 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let x = (rng as f64 / u64::MAX as f64) * 10.0 - 5.0;
+            let target = -3.0 * x + 5.0; // Different relationship
+            cloned.train_one(&Sample::new(vec![x], target));
+        }
+
+        let pred_original_after = model.predict(&test_features);
+        let pred_cloned_after = cloned.predict(&test_features);
+
+        // Original should be unchanged
+        assert!(
+            (pred_original - pred_original_after).abs() < 1e-12,
+            "original should be unchanged after training clone"
+        );
+
+        // Clone should have diverged
+        assert!(
+            (pred_original_after - pred_cloned_after).abs() > 1e-6,
+            "clone should diverge after independent training"
         );
     }
 }

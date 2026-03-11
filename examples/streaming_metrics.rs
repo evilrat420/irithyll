@@ -96,7 +96,7 @@ fn main() {
         .build()
         .expect("valid config");
 
-    let mut cls_model = SGBT::with_loss(cls_config, Box::new(LogisticLoss));
+    let mut cls_model = SGBT::with_loss(cls_config, LogisticLoss);
     let mut cls_cumulative = ClassificationMetrics::new();
     let mut cls_windowed = ClassificationMetrics::new();
     let n_cls_samples = 2000;

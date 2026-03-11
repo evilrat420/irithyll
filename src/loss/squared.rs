@@ -13,6 +13,7 @@ use super::Loss;
 /// Optimal for regression when the noise is Gaussian.
 /// Sensitive to outliers — consider [`HuberLoss`](super::huber::HuberLoss)
 /// for heavy-tailed distributions.
+#[derive(Debug, Clone, Copy)]
 pub struct SquaredLoss;
 
 impl Loss for SquaredLoss {
@@ -48,6 +49,10 @@ impl Loss for SquaredLoss {
         }
         let sum: f64 = targets.iter().sum();
         sum / targets.len() as f64
+    }
+
+    fn loss_type(&self) -> Option<super::LossType> {
+        Some(super::LossType::Squared)
     }
 }
 

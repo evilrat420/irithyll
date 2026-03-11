@@ -188,8 +188,42 @@ impl DriftDetector for Ddm {
         ))
     }
 
+    fn clone_boxed(&self) -> Box<dyn DriftDetector> {
+        Box::new(self.clone())
+    }
+
     fn estimated_mean(&self) -> f64 {
         self.mean
+    }
+
+    fn serialize_state(&self) -> Option<crate::drift::state::DriftDetectorState> {
+        Some(crate::drift::state::DriftDetectorState::Ddm {
+            mean: self.mean,
+            m2: self.m2,
+            count: self.count,
+            min_p_plus_s: self.min_p_plus_s,
+            min_s: self.min_s,
+        })
+    }
+
+    fn restore_state(&mut self, state: &crate::drift::state::DriftDetectorState) -> bool {
+        if let crate::drift::state::DriftDetectorState::Ddm {
+            mean,
+            m2,
+            count,
+            min_p_plus_s,
+            min_s,
+        } = state
+        {
+            self.mean = *mean;
+            self.m2 = *m2;
+            self.count = *count;
+            self.min_p_plus_s = *min_p_plus_s;
+            self.min_s = *min_s;
+            true
+        } else {
+            false
+        }
     }
 }
 

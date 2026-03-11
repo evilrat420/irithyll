@@ -4,7 +4,7 @@
 //! verifying that predictions match. This is essential for production
 //! deployments where model state must survive process restarts.
 
-use irithyll::serde_support::{load_model, save_model, LossType};
+use irithyll::serde_support::{load_model, save_model};
 use irithyll::{RegressionMetrics, SGBTConfig, Sample, SGBT};
 
 /// Deterministic PRNG (xorshift64). Returns a value in [0, 1).
@@ -59,7 +59,7 @@ fn main() {
 
     // 3. Save model to JSON
     println!("\nSaving model to JSON...");
-    let json = save_model(&model, LossType::Squared).expect("serialization failed");
+    let json = save_model(&model).expect("serialization failed");
     let json_bytes = json.len();
     println!(
         "  JSON size: {} bytes ({:.1} KB)",
@@ -122,7 +122,7 @@ fn main() {
     // 7. Production pattern: write to file
     println!("\n--- Production Checkpoint Pattern ---");
     println!("  // Save checkpoint to disk:");
-    println!("  //   let json = save_model(&model, LossType::Squared)?;");
+    println!("  //   let json = save_model(&model)?;");
     println!("  //   std::fs::write(\"model.json\", &json)?;");
     println!("  //");
     println!("  // Restore on startup:");

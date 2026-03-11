@@ -13,6 +13,7 @@ use super::Loss;
 ///
 /// Targets must be `0.0` or `1.0`. Predictions are raw logits (unbounded).
 /// The sigmoid transform maps logits to probabilities in `[0, 1]`.
+#[derive(Debug, Clone, Copy)]
 pub struct LogisticLoss;
 
 /// Numerically stable sigmoid: 1 / (1 + exp(-x)).
@@ -65,6 +66,10 @@ impl Loss for LogisticLoss {
         let mean = (sum / targets.len() as f64).clamp(1e-7, 1.0 - 1e-7);
         // log-odds: ln(p / (1 - p))
         (mean / (1.0 - mean)).ln()
+    }
+
+    fn loss_type(&self) -> Option<super::LossType> {
+        Some(super::LossType::Logistic)
     }
 }
 

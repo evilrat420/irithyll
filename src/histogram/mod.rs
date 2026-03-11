@@ -52,3 +52,76 @@ pub trait BinningStrategy: Send + Sync + 'static {
     /// Create a fresh instance with the same configuration.
     fn clone_fresh(&self) -> Box<dyn BinningStrategy>;
 }
+
+// ---------------------------------------------------------------------------
+// BinnerKind — enum dispatch replacing Box<dyn BinningStrategy>
+// ---------------------------------------------------------------------------
+
+/// Concrete binning strategy enum, eliminating `Box<dyn BinningStrategy>`
+/// heap allocations per feature per leaf.
+///
+/// This is used internally by [`HoeffdingTree`](crate::tree::HoeffdingTree)
+/// leaf states. Each variant delegates to the corresponding strategy impl.
+#[derive(Debug, Clone)]
+pub enum BinnerKind {
+    /// Equal-width binning (default).
+    Uniform(uniform::UniformBinning),
+
+    /// K-means binning (feature-gated).
+    #[cfg(feature = "kmeans-binning")]
+    KMeans(kmeans::KMeansBinning),
+}
+
+impl BinnerKind {
+    /// Create a new uniform binner (the default strategy).
+    #[inline]
+    pub fn uniform() -> Self {
+        BinnerKind::Uniform(uniform::UniformBinning::new())
+    }
+
+    /// Create a new k-means binner.
+    #[cfg(feature = "kmeans-binning")]
+    #[inline]
+    pub fn kmeans() -> Self {
+        BinnerKind::KMeans(kmeans::KMeansBinning::new())
+    }
+
+    /// Observe a single value.
+    #[inline]
+    pub fn observe(&mut self, value: f64) {
+        match self {
+            BinnerKind::Uniform(b) => b.observe(value),
+            #[cfg(feature = "kmeans-binning")]
+            BinnerKind::KMeans(b) => b.observe(value),
+        }
+    }
+
+    /// Compute bin edges from observed values.
+    #[inline]
+    pub fn compute_edges(&self, n_bins: usize) -> BinEdges {
+        match self {
+            BinnerKind::Uniform(b) => b.compute_edges(n_bins),
+            #[cfg(feature = "kmeans-binning")]
+            BinnerKind::KMeans(b) => b.compute_edges(n_bins),
+        }
+    }
+
+    /// Reset observed state.
+    #[inline]
+    pub fn reset(&mut self) {
+        match self {
+            BinnerKind::Uniform(b) => b.reset(),
+            #[cfg(feature = "kmeans-binning")]
+            BinnerKind::KMeans(b) => b.reset(),
+        }
+    }
+
+    /// Create a fresh instance with the same variant but no data.
+    pub fn clone_fresh(&self) -> Self {
+        match self {
+            BinnerKind::Uniform(_) => BinnerKind::Uniform(uniform::UniformBinning::new()),
+            #[cfg(feature = "kmeans-binning")]
+            BinnerKind::KMeans(_) => BinnerKind::KMeans(kmeans::KMeansBinning::new()),
+        }
+    }
+}

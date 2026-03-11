@@ -43,6 +43,18 @@ pub enum SGBTVariant {
     },
 }
 
+impl std::fmt::Display for SGBTVariant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Standard => write!(f, "Standard"),
+            Self::Skip { k } => write!(f, "Skip(k={})", k),
+            Self::MultipleIterations { multiplier } => {
+                write!(f, "MultipleIterations(multiplier={})", multiplier)
+            }
+        }
+    }
+}
+
 impl SGBTVariant {
     /// Determine how many times to train a tree on this instance.
     ///

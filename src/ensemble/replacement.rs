@@ -54,6 +54,18 @@ impl fmt::Debug for TreeSlot {
     }
 }
 
+impl Clone for TreeSlot {
+    fn clone(&self) -> Self {
+        Self {
+            active: self.active.clone(),
+            alternate: self.alternate.clone(),
+            detector: self.detector.clone_boxed(),
+            tree_config: self.tree_config.clone(),
+            max_tree_samples: self.max_tree_samples,
+        }
+    }
+}
+
 impl TreeSlot {
     /// Create a new `TreeSlot` with a fresh tree and drift detector.
     ///
@@ -221,6 +233,33 @@ impl TreeSlot {
     #[inline]
     pub fn tree_config(&self) -> &TreeConfig {
         &self.tree_config
+    }
+
+    /// Immutable access to the drift detector.
+    #[inline]
+    pub fn detector(&self) -> &dyn DriftDetector {
+        &*self.detector
+    }
+
+    /// Mutable access to the drift detector.
+    #[inline]
+    pub fn detector_mut(&mut self) -> &mut dyn DriftDetector {
+        &mut *self.detector
+    }
+
+    /// Immutable access to the alternate drift detector (always `None` in
+    /// the current architecture — the alternate tree shares the main detector).
+    /// Reserved for future use.
+    #[inline]
+    pub fn alt_detector(&self) -> Option<&dyn DriftDetector> {
+        // Currently there's no separate alt detector.
+        None
+    }
+
+    /// Mutable access to the alternate drift detector.
+    #[inline]
+    pub fn alt_detector_mut(&mut self) -> Option<&mut dyn DriftDetector> {
+        None
     }
 
     /// Reset to a completely fresh state: new tree, no alternate, reset detector.

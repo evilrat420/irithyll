@@ -134,7 +134,7 @@ fn huber_converges_with_outliers() {
         .build()
         .unwrap();
 
-    let mut model = SGBT::with_loss(config, Box::new(HuberLoss::new(1.0)));
+    let mut model = SGBT::with_loss(config, HuberLoss::new(1.0));
     let mut rng: u64 = 54321;
 
     let mut early_errors = Vec::new();

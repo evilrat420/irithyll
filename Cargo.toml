@@ -1,6 +1,9 @@
+[workspace]
+members = [".", "irithyll-python"]
+
 [package]
 name = "irithyll"
-version = "1.0.0"
+version = "3.0.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Streaming Gradient Boosted Trees for evolving data streams"
@@ -64,4 +67,12 @@ harness = false
 
 [[bench]]
 name = "parallel_bench"
+harness = false
+
+[[bench]]
+name = "throughput_bench"
+harness = false
+
+[[bench]]
+name = "scaling_bench"
 harness = false

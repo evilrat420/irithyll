@@ -13,20 +13,21 @@ use arrow::datatypes::DataType;
 /// Iterates rows of the batch, treating all Float64 columns (except the target)
 /// as features. Columns that are not Float64 are silently skipped.
 ///
+/// The model's loss function is used for gradient/hessian computation
+/// (monomorphized — no `&dyn Loss` parameter needed).
+///
 /// # Arguments
-/// * `model` - The SGBT model to train
+/// * `model` - The SGBT model to train (generic over loss `L`)
 /// * `batch` - Arrow RecordBatch containing feature and target columns
 /// * `target_col` - Name of the target column
-/// * `loss` - Loss function for gradient/hessian computation
 ///
 /// # Errors
 /// Returns error if `target_col` is not found or is not Float64.
 #[cfg(feature = "arrow")]
-pub fn train_from_record_batch(
-    model: &mut crate::ensemble::SGBT,
+pub fn train_from_record_batch<L: crate::loss::Loss>(
+    model: &mut crate::ensemble::SGBT<L>,
     batch: &RecordBatch,
     target_col: &str,
-    loss: &dyn crate::loss::Loss,
 ) -> crate::error::Result<()> {
     let schema = batch.schema();
 
@@ -91,7 +92,7 @@ pub fn train_from_record_batch(
         if has_non_finite {
             continue;
         }
-        model.train_one_slice(&features, target, loss);
+        model.train_one(&crate::sample::SampleRef::new(&features, target));
     }
 
     Ok(())
@@ -102,8 +103,8 @@ pub fn train_from_record_batch(
 /// All Float64 columns are treated as features (in schema order).
 /// Non-Float64 columns are silently skipped.
 #[cfg(feature = "arrow")]
-pub fn predict_from_record_batch(
-    model: &crate::ensemble::SGBT,
+pub fn predict_from_record_batch<L: crate::loss::Loss>(
+    model: &crate::ensemble::SGBT<L>,
     batch: &RecordBatch,
 ) -> Float64Array {
     let schema = batch.schema();
@@ -257,16 +258,16 @@ pub fn read_parquet_batches(path: &std::path::Path) -> crate::error::Result<Vec<
 /// Stream-train an SGBT model from a Parquet file.
 ///
 /// Reads the file in batches and trains incrementally, avoiding loading the
-/// entire dataset into memory at once.
+/// entire dataset into memory at once. The model's loss function is used
+/// for gradient/hessian computation (monomorphized).
 ///
 /// # Errors
 /// Returns error if the file cannot be read or if the target column is invalid.
 #[cfg(feature = "parquet")]
-pub fn train_from_parquet(
-    model: &mut crate::ensemble::SGBT,
+pub fn train_from_parquet<L: crate::loss::Loss>(
+    model: &mut crate::ensemble::SGBT<L>,
     path: &std::path::Path,
     target_col: &str,
-    loss: &dyn crate::loss::Loss,
 ) -> crate::error::Result<()> {
     let file = std::fs::File::open(path).map_err(|e| {
         crate::error::IrithyllError::Serialization(format!(
@@ -301,7 +302,7 @@ pub fn train_from_parquet(
                 e
             ))
         })?;
-        train_from_record_batch(model, &batch, target_col, loss)?;
+        train_from_record_batch(model, &batch, target_col)?;
     }
 
     Ok(())
@@ -332,7 +333,6 @@ mod tests {
         #[test]
         fn train_from_batch_does_not_panic() {
             use crate::ensemble::config::SGBTConfig;
-            use crate::loss::squared::SquaredLoss;
 
             let config = SGBTConfig::builder()
                 .n_steps(5)
@@ -342,9 +342,8 @@ mod tests {
                 .unwrap();
             let mut model = crate::ensemble::SGBT::new(config);
             let batch = make_test_batch();
-            let loss = SquaredLoss;
 
-            let result = train_from_record_batch(&mut model, &batch, "target", &loss);
+            let result = train_from_record_batch(&mut model, &batch, "target");
             assert!(result.is_ok());
             assert_eq!(model.n_samples_seen(), 5);
         }
@@ -380,14 +379,12 @@ mod tests {
         #[test]
         fn missing_target_column_returns_error() {
             use crate::ensemble::config::SGBTConfig;
-            use crate::loss::squared::SquaredLoss;
 
             let config = SGBTConfig::builder().n_steps(3).build().unwrap();
             let mut model = crate::ensemble::SGBT::new(config);
             let batch = make_test_batch();
-            let loss = SquaredLoss;
 
-            let result = train_from_record_batch(&mut model, &batch, "nonexistent", &loss);
+            let result = train_from_record_batch(&mut model, &batch, "nonexistent");
             assert!(result.is_err());
         }
 
@@ -403,7 +400,6 @@ mod tests {
         #[test]
         fn nan_inf_rows_are_skipped_in_training() {
             use crate::ensemble::config::SGBTConfig;
-            use crate::loss::squared::SquaredLoss;
 
             let schema = Arc::new(Schema::new(vec![
                 Field::new("x1", DataType::Float64, false),
@@ -426,9 +422,8 @@ mod tests {
                 .build()
                 .unwrap();
             let mut model = crate::ensemble::SGBT::new(config);
-            let loss = SquaredLoss;
 
-            let result = train_from_record_batch(&mut model, &batch, "target", &loss);
+            let result = train_from_record_batch(&mut model, &batch, "target");
             assert!(result.is_ok());
             // Rows 0 (1.0, 2.0) and 4 (5.0, 10.0) are clean. Rows 1,2,3 have NaN/Inf.
             assert_eq!(model.n_samples_seen(), 2);

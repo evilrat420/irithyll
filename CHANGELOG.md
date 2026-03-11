@@ -5,6 +5,86 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-03-11
+
+### Added
+
+- **TreeSHAP explanations** -- path-dependent TreeSHAP (Lundberg et al., 2020) for
+  per-feature SHAP contributions. `SGBT::explain(features)` returns `ShapValues` with
+  the invariant `base_value + sum(values) == predict(features)`. Named explanations
+  via `explain_named()` when `feature_names` are configured.
+- **StreamingShap** -- online running-mean |SHAP| tracker for real-time feature
+  importance monitoring without storing past predictions.
+- **Named features** -- `SGBTConfig::builder().feature_names(vec!["price", "volume"])`
+  enables `named_feature_importances()` and `explain_named()`. Duplicate names are
+  rejected at build time.
+- **Multi-target regression** -- `MultiTargetSGBT` wraps T independent `SGBT<L>` models,
+  one per target dimension. `train_one(features, targets)` and `predict(features) -> Vec<f64>`.
+  Custom loss via `with_loss()`.
+- **Drift detector state serialization** -- `DriftDetector::serialize_state()` and
+  `restore_state()` preserve Page-Hinkley, ADWIN, and DDM internal state across
+  save/load cycles. No more spurious drift after checkpoint restore.
+- **PyO3 Python bindings** -- `irithyll-python` workspace crate providing
+  `StreamingGBT`, `StreamingGBTConfig`, `ShapExplanation`, and `MultiTargetGBT` as
+  Python classes. GIL-released train/predict, numpy zero-copy, JSON save/load.
+
+### Performance
+
+- **Vec leaf states** -- replaced `HashMap<u32, LeafState>` with `Vec<Option<LeafState>>`
+  indexed by NodeId. Eliminates hashing overhead on the hot path for dense node indices.
+
+## [2.0.0] - 2026-03-11
+
+### Breaking Changes
+
+- **Generic Loss parameter** -- `SGBT<L: Loss = SquaredLoss>` replaces the old boxed
+  `Box<dyn Loss>` design. Loss gradient/hessian calls are now monomorphized and inlined
+  by the compiler. Use `SGBT::with_loss(config, LogisticLoss)` instead of passing
+  `Box::new()`. `DynSGBT = SGBT<Box<dyn Loss>>` is provided for dynamic dispatch.
+  Cascades to `ParallelSGBT<L>`, `AsyncSGBT<L>`, `MulticlassSGBT<L>`, and `Predictor<L>`.
+- **Observation trait** -- `train_one()` now accepts `&impl Observation` instead of
+  `&Sample`. Zero-copy training via `SampleRef<'a>` (borrows `&[f64]`). Tuple impls
+  for `(&[f64], f64)` and `(Vec<f64>, f64)` enable quick usage without constructing
+  `Sample`. `train_one_slice()` is removed (subsumed by `Observation`).
+- **Structured errors** -- `ConfigError` is now a sub-enum with `OutOfRange` and
+  `Invalid` variants carrying `param`, `constraint`, and `value` fields. Replaces
+  `InvalidConfig(String)`.
+- **Auto LossType** -- `Loss` trait now requires `fn loss_type(&self) -> Option<LossType>`.
+  `save_model()` auto-detects loss type from the model, no more manual `LossType` tag.
+- **MulticlassSGBT::new() returns Result** -- no longer panics on `n_classes < 2`.
+
+### Added
+
+- **`SampleRef<'a>`** -- borrowed observation type for zero-allocation training.
+- **`Observation` trait** -- unified interface with default `weight() -> 1.0`. Implemented
+  for `Sample`, `SampleRef`, `(&[f64], f64)`, `(Vec<f64>, f64)`.
+- **`Clone` for `SGBT<L>`** -- deep clone including all tree state, drift detectors, and
+  leaf accumulators. Requires `L: Clone`. Also implemented for `ParallelSGBT<L>`.
+- **`DriftDetector::clone_boxed()`** -- deep clone preserving internal state (unlike
+  `clone_fresh()` which resets).
+- **`BinnerKind` enum** -- replaces `Box<dyn BinningStrategy>` per-feature per-leaf with
+  stack-allocated enum dispatch. Eliminates N_features heap allocations per new leaf.
+- **`PartialEq` for `SGBTConfig`** and `DriftDetectorType`.
+- **`Display` for `SGBTConfig`**, `SGBTVariant`, `DriftSignal`, `Sample`.
+- **`From` conversions** -- `From<(Vec<f64>, f64)>` and `From<(&[f64], f64)>` for Sample.
+- **`Debug` for `MulticlassSGBT`**.
+- **Throughput benchmarks** -- `throughput_bench` and `scaling_bench` for regression
+  tracking across configurations.
+
+### Performance
+
+- **Bitset feature mask** -- O(1) membership testing via `Vec<u64>` bitset, replacing
+  O(n) `Vec::contains()`. The fallback fill loop in `generate_feature_mask()` drops
+  from O(n^2) to O(n). Single `u64` for <=64 features.
+- **Enum BinningStrategy dispatch** -- `BinnerKind` enum eliminates heap allocation and
+  vtable indirection for histogram binners.
+- **Pre-allocated train_counts buffer** -- `ParallelSGBT` reuses a buffer instead of
+  allocating a fresh `Vec<usize>` per `train_one()` call.
+- **Monomorphized loss** -- generic `L: Loss` parameter enables the compiler to inline
+  gradient/hessian computations, eliminating vtable dispatch in the hot path.
+- **Measured improvement** -- 8.5% throughput gain on 100-step 20-feature training
+  workloads (Criterion benchmark).
+
 ## [1.0.0] - 2026-03-11
 
 ### Added
@@ -68,5 +148,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[3.0.0]: https://github.com/evilrat420/irithyll/compare/v2.0.0...v3.0.0
+[2.0.0]: https://github.com/evilrat420/irithyll/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/evilrat420/irithyll/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/evilrat420/irithyll/releases/tag/v0.1.0

@@ -13,7 +13,7 @@
 //! └──────────┘    channel    │  .run()    │
 //!                            └─────┬─────┘
 //!                                  │
-//!                       Arc<RwLock<SGBT>>
+//!                       Arc<RwLock<SGBT<L>>>
 //!                                  │
 //!                            ┌─────┴─────┐
 //!                            │ Predictor │  (read lock per predict)
@@ -68,6 +68,7 @@
 pub mod adapters;
 pub mod channel;
 
+use std::fmt;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -76,6 +77,8 @@ use tracing::debug;
 use crate::ensemble::config::SGBTConfig;
 use crate::ensemble::SGBT;
 use crate::error::Result;
+use crate::loss::squared::SquaredLoss;
+use crate::loss::Loss;
 
 pub use adapters::{Prediction, PredictionStream};
 pub use channel::{SampleReceiver, SampleSender};
@@ -90,17 +93,33 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 /// A concurrent, read-only prediction handle to a shared [`SGBT`] model.
 ///
 /// Obtained via [`AsyncSGBT::predictor`]. Each prediction acquires a read lock
-/// on the underlying `RwLock<SGBT>`, allowing multiple predictors to operate
+/// on the underlying `RwLock<SGBT<L>>`, allowing multiple predictors to operate
 /// concurrently and in parallel with the training loop (which holds a write
 /// lock only briefly per sample).
 ///
 /// `Predictor` is `Clone`, `Send`, and `Sync` -- share it freely across tasks.
-#[derive(Clone, Debug)]
-pub struct Predictor {
-    pub(crate) model: Arc<RwLock<SGBT>>,
+pub struct Predictor<L: Loss = SquaredLoss> {
+    pub(crate) model: Arc<RwLock<SGBT<L>>>,
 }
 
-impl Predictor {
+// Manual Clone impl — cloning the Arc doesn't require L: Clone.
+impl<L: Loss> Clone for Predictor<L> {
+    fn clone(&self) -> Self {
+        Self {
+            model: Arc::clone(&self.model),
+        }
+    }
+}
+
+impl<L: Loss> fmt::Debug for Predictor<L> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Predictor")
+            .field("n_samples_seen", &self.model.read().n_samples_seen())
+            .finish()
+    }
+}
+
+impl<L: Loss> Predictor<L> {
     /// Predict the raw model output for a feature vector.
     ///
     /// Acquires a read lock on the shared model. Returns the unscaled
@@ -145,6 +164,9 @@ impl Predictor {
 /// sample channel. Call [`run`](Self::run) to start the training loop,
 /// which consumes samples from the channel and trains incrementally.
 ///
+/// Generic over `L: Loss` so the training loop benefits from monomorphized
+/// gradient/hessian dispatch (no vtable overhead).
+///
 /// Prediction handles ([`Predictor`]) and sender handles ([`SampleSender`])
 /// can be obtained before starting the loop and used concurrently from
 /// other tasks.
@@ -154,9 +176,9 @@ impl Predictor {
 /// When [`run`](Self::run) is called, it drops the internal sender copy
 /// so that the channel closes as soon as all external senders are dropped.
 /// The loop then drains any remaining buffered samples and returns `Ok(())`.
-pub struct AsyncSGBT {
+pub struct AsyncSGBT<L: Loss = SquaredLoss> {
     /// Shared model, protected by a parking_lot RwLock.
-    model: Arc<RwLock<SGBT>>,
+    model: Arc<RwLock<SGBT<L>>>,
     /// Receiving end of the sample channel.
     receiver: Option<SampleReceiver>,
     /// Sending end, kept so callers can clone it via `sender()`.
@@ -165,22 +187,49 @@ pub struct AsyncSGBT {
     sender: Option<SampleSender>,
 }
 
-impl AsyncSGBT {
+impl AsyncSGBT<SquaredLoss> {
     /// Create a new async SGBT runner with the default channel capacity (1024).
     ///
-    /// Constructs the underlying [`SGBT`] from the given config, wraps it in
-    /// an `Arc<RwLock<_>>`, and creates a bounded mpsc channel for sample
-    /// ingestion.
+    /// Uses squared loss (regression). For other loss functions, use
+    /// [`with_loss`](AsyncSGBT::with_loss) or [`with_loss_and_capacity`](AsyncSGBT::with_loss_and_capacity).
     pub fn new(config: SGBTConfig) -> Self {
         Self::with_capacity(config, DEFAULT_CHANNEL_CAPACITY)
     }
 
     /// Create a new async SGBT runner with a custom channel capacity.
     ///
-    /// Use a smaller capacity (e.g., 1) for strict backpressure, or a larger
-    /// capacity to buffer bursts from fast data sources.
+    /// Uses squared loss (regression).
     pub fn with_capacity(config: SGBTConfig, capacity: usize) -> Self {
         let model = SGBT::new(config);
+        let shared = Arc::new(RwLock::new(model));
+        let (sender, receiver) = channel::bounded(capacity);
+
+        Self {
+            model: shared,
+            receiver: Some(receiver),
+            sender: Some(sender),
+        }
+    }
+}
+
+impl<L: Loss> AsyncSGBT<L> {
+    /// Create a new async SGBT runner with a specific loss function.
+    ///
+    /// ```no_run
+    /// use irithyll::SGBTConfig;
+    /// use irithyll::stream::AsyncSGBT;
+    /// use irithyll::loss::logistic::LogisticLoss;
+    ///
+    /// let config = SGBTConfig::builder().n_steps(10).build().unwrap();
+    /// let runner = AsyncSGBT::with_loss(config, LogisticLoss);
+    /// ```
+    pub fn with_loss(config: SGBTConfig, loss: L) -> Self {
+        Self::with_loss_and_capacity(config, loss, DEFAULT_CHANNEL_CAPACITY)
+    }
+
+    /// Create a new async SGBT runner with a specific loss and channel capacity.
+    pub fn with_loss_and_capacity(config: SGBTConfig, loss: L, capacity: usize) -> Self {
+        let model = SGBT::with_loss(config, loss);
         let shared = Arc::new(RwLock::new(model));
         let (sender, receiver) = channel::bounded(capacity);
 
@@ -212,7 +261,7 @@ impl AsyncSGBT {
     ///
     /// The predictor can be cloned and used from any thread or task while
     /// the training loop is running.
-    pub fn predictor(&self) -> Predictor {
+    pub fn predictor(&self) -> Predictor<L> {
         Predictor {
             model: Arc::clone(&self.model),
         }
@@ -223,7 +272,7 @@ impl AsyncSGBT {
     /// Receives samples from the bounded channel and trains the model
     /// incrementally. For each sample:
     ///
-    /// 1. Acquire write lock on the shared `SGBT`.
+    /// 1. Acquire write lock on the shared `SGBT<L>`.
     /// 2. Call `train_one(&sample)`.
     /// 3. Release the lock.
     ///
@@ -590,5 +639,28 @@ mod tests {
             pred_before,
             pred_after
         );
+    }
+
+    // 13. with_loss creates async runner with custom loss.
+    #[tokio::test]
+    async fn with_loss_creates_runner() {
+        use crate::loss::logistic::LogisticLoss;
+
+        let config = default_config();
+        let mut runner = AsyncSGBT::with_loss(config, LogisticLoss);
+        let sender = runner.sender();
+        let predictor = runner.predictor();
+
+        // Sigmoid(0) = 0.5 for logistic loss
+        let pred = predictor.predict_transformed(&[1.0, 2.0]);
+        assert!(
+            (pred - 0.5).abs() < 1e-6,
+            "sigmoid(0) should be 0.5, got {}",
+            pred
+        );
+
+        let handle = tokio::spawn(async move { runner.run().await });
+        drop(sender);
+        handle.await.unwrap().unwrap();
     }
 }

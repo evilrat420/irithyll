@@ -6,16 +6,21 @@
 
 use crate::ensemble::config::SGBTConfig;
 use crate::ensemble::SGBT;
+use crate::error::{ConfigError, IrithyllError};
 use crate::loss::softmax::SoftmaxLoss;
-use crate::sample::Sample;
+use crate::sample::{Observation, SampleRef};
 
 /// Multi-class SGBT using one-vs-rest committee of ensembles.
 ///
-/// Each class gets its own SGBT trained with softmax (logistic per-class) loss.
+/// Each class gets its own `SGBT<SoftmaxLoss>` trained with softmax
+/// (logistic per-class) loss. The concrete loss type is monomorphized
+/// for each committee — no `Box<dyn Loss>` overhead.
+///
 /// Predictions are softmax-normalized across all class committees.
+#[derive(Debug)]
 pub struct MulticlassSGBT {
-    /// One SGBT per class.
-    committees: Vec<SGBT>,
+    /// One SGBT per class, each with monomorphized SoftmaxLoss.
+    committees: Vec<SGBT<SoftmaxLoss>>,
     /// Number of classes.
     n_classes: usize,
     /// Total samples seen.
@@ -25,38 +30,50 @@ pub struct MulticlassSGBT {
 impl MulticlassSGBT {
     /// Create a new multi-class SGBT.
     ///
-    /// `n_classes` must be >= 2.
-    pub fn new(config: SGBTConfig, n_classes: usize) -> Self {
-        assert!(n_classes >= 2, "n_classes must be >= 2");
+    /// # Errors
+    ///
+    /// Returns [`IrithyllError::InvalidConfig`] if `n_classes < 2`.
+    pub fn new(config: SGBTConfig, n_classes: usize) -> crate::error::Result<Self> {
+        if n_classes < 2 {
+            return Err(IrithyllError::InvalidConfig(ConfigError::out_of_range(
+                "n_classes",
+                "must be >= 2",
+                n_classes,
+            )));
+        }
 
         let committees = (0..n_classes)
-            .map(|_| SGBT::with_loss(config.clone(), Box::new(SoftmaxLoss { n_classes })))
+            .map(|_| SGBT::with_loss(config.clone(), SoftmaxLoss { n_classes }))
             .collect();
 
-        Self {
+        Ok(Self {
             committees,
             n_classes,
             samples_seen: 0,
-        }
+        })
     }
 
-    /// Train on a single sample.
+    /// Train on a single observation.
     ///
-    /// `sample.target` should be the class index as f64 (0.0, 1.0, 2.0, ...).
-    pub fn train_one(&mut self, sample: &Sample) {
+    /// The observation's target should be the class index as f64 (0.0, 1.0, 2.0, ...).
+    ///
+    /// Uses [`SampleRef`] internally to avoid cloning feature vectors for each
+    /// committee (N classes = 0 clones instead of N clones).
+    pub fn train_one(&mut self, sample: &impl Observation) {
         self.samples_seen += 1;
-        let class_idx = sample.target as usize;
+        let class_idx = sample.target() as usize;
+        let features = sample.features();
 
         for (c, committee) in self.committees.iter_mut().enumerate() {
             // Binary target: 1.0 for the correct class, 0.0 otherwise
             let binary_target = if c == class_idx { 1.0 } else { 0.0 };
-            let binary_sample = Sample::new(sample.features.clone(), binary_target);
-            committee.train_one(&binary_sample);
+            let binary_ref = SampleRef::new(features, binary_target);
+            committee.train_one(&binary_ref);
         }
     }
 
-    /// Train on a batch of samples.
-    pub fn train_batch(&mut self, samples: &[Sample]) {
+    /// Train on a batch of observations.
+    pub fn train_batch<O: Observation>(&mut self, samples: &[O]) {
         for sample in samples {
             self.train_one(sample);
         }
@@ -112,6 +129,7 @@ impl MulticlassSGBT {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sample::Sample;
 
     fn test_config() -> SGBTConfig {
         SGBTConfig::builder()
@@ -126,13 +144,23 @@ mod tests {
 
     #[test]
     fn new_multiclass_creates_committees() {
-        let model = MulticlassSGBT::new(test_config(), 3);
+        let model = MulticlassSGBT::new(test_config(), 3).unwrap();
         assert_eq!(model.n_classes(), 3);
     }
 
     #[test]
+    fn new_multiclass_rejects_less_than_two_classes() {
+        let err = MulticlassSGBT::new(test_config(), 1).unwrap_err();
+        assert!(
+            err.to_string().contains("n_classes"),
+            "error should mention n_classes: {}",
+            err
+        );
+    }
+
+    #[test]
     fn predict_proba_sums_to_one() {
-        let model = MulticlassSGBT::new(test_config(), 3);
+        let model = MulticlassSGBT::new(test_config(), 3).unwrap();
         let proba = model.predict_proba(&[1.0, 2.0]);
         let sum: f64 = proba.iter().sum();
         assert!(
@@ -144,7 +172,7 @@ mod tests {
 
     #[test]
     fn predict_proba_uniform_before_training() {
-        let model = MulticlassSGBT::new(test_config(), 3);
+        let model = MulticlassSGBT::new(test_config(), 3).unwrap();
         let proba = model.predict_proba(&[1.0, 2.0]);
         // All committees predict 0.0, softmax of equal values = uniform
         for &p in &proba {
@@ -154,7 +182,7 @@ mod tests {
 
     #[test]
     fn train_one_does_not_panic() {
-        let mut model = MulticlassSGBT::new(test_config(), 3);
+        let mut model = MulticlassSGBT::new(test_config(), 3).unwrap();
         model.train_one(&Sample::new(vec![1.0, 2.0], 0.0));
         model.train_one(&Sample::new(vec![3.0, 4.0], 1.0));
         model.train_one(&Sample::new(vec![5.0, 6.0], 2.0));
@@ -163,7 +191,7 @@ mod tests {
 
     #[test]
     fn reset_clears_state() {
-        let mut model = MulticlassSGBT::new(test_config(), 3);
+        let mut model = MulticlassSGBT::new(test_config(), 3).unwrap();
         for i in 0..20 {
             model.train_one(&Sample::new(vec![i as f64], (i % 3) as f64));
         }

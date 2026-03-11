@@ -209,11 +209,48 @@ impl DriftDetector for PageHinkleyTest {
         Box::new(Self::with_params(self.delta, self.lambda))
     }
 
+    fn clone_boxed(&self) -> Box<dyn DriftDetector> {
+        Box::new(self.clone())
+    }
+
     fn estimated_mean(&self) -> f64 {
         if self.count == 0 {
             0.0
         } else {
             self.running_mean
+        }
+    }
+
+    fn serialize_state(&self) -> Option<crate::drift::state::DriftDetectorState> {
+        Some(crate::drift::state::DriftDetectorState::PageHinkley {
+            running_mean: self.running_mean,
+            sum_up: self.sum_up,
+            min_sum_up: self.min_sum_up,
+            sum_down: self.sum_down,
+            min_sum_down: self.min_sum_down,
+            count: self.count,
+        })
+    }
+
+    fn restore_state(&mut self, state: &crate::drift::state::DriftDetectorState) -> bool {
+        if let crate::drift::state::DriftDetectorState::PageHinkley {
+            running_mean,
+            sum_up,
+            min_sum_up,
+            sum_down,
+            min_sum_down,
+            count,
+        } = state
+        {
+            self.running_mean = *running_mean;
+            self.sum_up = *sum_up;
+            self.min_sum_up = *min_sum_up;
+            self.sum_down = *sum_down;
+            self.min_sum_down = *min_sum_down;
+            self.count = *count;
+            true
+        } else {
+            false
         }
     }
 }

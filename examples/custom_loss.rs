@@ -99,7 +99,7 @@ fn main() {
 
     // 2. Create SGBT with custom quantile loss
     let quantile_loss = QuantileLoss::new(0.9);
-    let mut model = SGBT::with_loss(config.clone(), Box::new(quantile_loss));
+    let mut model = SGBT::with_loss(config.clone(), quantile_loss);
 
     // Also create a standard (mean) regression model for comparison
     let mut mean_model = SGBT::new(config);

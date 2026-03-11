@@ -18,11 +18,8 @@
 //! 5. When splitting, use the histogram subtraction trick to initialize one
 //!    child's histograms for free.
 
-use std::collections::HashMap;
-
 use crate::histogram::bins::LeafHistograms;
-use crate::histogram::uniform::UniformBinning;
-use crate::histogram::{BinEdges, BinningStrategy};
+use crate::histogram::{BinEdges, BinnerKind};
 use crate::tree::builder::TreeConfig;
 use crate::tree::node::{NodeId, TreeArena};
 use crate::tree::split::{leaf_weight, SplitCandidate, SplitCriterion, XGBoostGain};
@@ -56,14 +53,16 @@ fn xorshift64(state: &mut u64) -> u64 {
 ///
 /// Each active leaf owns its own set of histogram accumulators (one per feature)
 /// and running gradient/hessian sums for leaf weight updates.
+#[derive(Clone)]
 struct LeafState {
     /// Histogram accumulators for this leaf. `None` until bin edges are computed
     /// (after the grace period).
     histograms: Option<LeafHistograms>,
 
     /// Per-feature binning strategies that collect observed values to compute
-    /// bin edges. Consumed when `bins_ready` becomes true.
-    binners: Vec<Box<dyn BinningStrategy>>,
+    /// bin edges. Uses `BinnerKind` enum dispatch instead of `Box<dyn>` to
+    /// eliminate N_features heap allocations per new leaf.
+    binners: Vec<BinnerKind>,
 
     /// Whether bin edges have been computed (after grace period samples).
     bins_ready: bool,
@@ -81,9 +80,7 @@ struct LeafState {
 impl LeafState {
     /// Create a fresh leaf state for a leaf with `n_features` features.
     fn new(n_features: usize) -> Self {
-        let binners: Vec<Box<dyn BinningStrategy>> = (0..n_features)
-            .map(|_| Box::new(UniformBinning::new()) as Box<dyn BinningStrategy>)
-            .collect();
+        let binners: Vec<BinnerKind> = (0..n_features).map(|_| BinnerKind::uniform()).collect();
 
         Self {
             histograms: None,
@@ -100,9 +97,7 @@ impl LeafState {
     #[allow(dead_code)]
     fn with_histograms(histograms: LeafHistograms) -> Self {
         let n_features = histograms.n_features();
-        let binners: Vec<Box<dyn BinningStrategy>> = (0..n_features)
-            .map(|_| Box::new(UniformBinning::new()) as Box<dyn BinningStrategy>)
-            .collect();
+        let binners: Vec<BinnerKind> = (0..n_features).map(|_| BinnerKind::uniform()).collect();
 
         // Recover grad/hess sums from the histograms.
         let grad_sum: f64 = histograms
@@ -150,8 +145,9 @@ pub struct HoeffdingTree {
     /// Tree configuration / hyperparameters.
     config: TreeConfig,
 
-    /// Per-leaf state indexed by `NodeId.0`.
-    leaf_states: HashMap<u32, LeafState>,
+    /// Per-leaf state indexed by `NodeId.0`. Dense Vec — NodeIds are
+    /// contiguous u32 indices from TreeArena, so direct indexing is optimal.
+    leaf_states: Vec<Option<LeafState>>,
 
     /// Number of features, learned from the first sample.
     n_features: Option<usize>,
@@ -164,6 +160,10 @@ pub struct HoeffdingTree {
 
     /// Scratch buffer for the feature mask (avoids repeated allocation).
     feature_mask: Vec<usize>,
+
+    /// Bitset scratch buffer for O(1) membership test during feature mask generation.
+    /// Each bit `i` indicates whether feature `i` is already in `feature_mask`.
+    feature_mask_bits: Vec<u64>,
 
     /// xorshift64 RNG state for feature subsampling.
     rng_state: u64,
@@ -182,21 +182,18 @@ impl HoeffdingTree {
         let mut arena = TreeArena::new();
         let root = arena.add_leaf(0);
 
-        let mut leaf_states = HashMap::new();
         // Insert a placeholder leaf state for the root. We don't know n_features
         // yet, so give it 0 binners — it will be properly initialized on the
         // first sample.
-        leaf_states.insert(
-            root.0,
-            LeafState {
-                histograms: None,
-                binners: Vec::new(),
-                bins_ready: false,
-                grad_sum: 0.0,
-                hess_sum: 0.0,
-                last_reeval_count: 0,
-            },
-        );
+        let mut leaf_states = vec![None; root.0 as usize + 1];
+        leaf_states[root.0 as usize] = Some(LeafState {
+            histograms: None,
+            binners: Vec::new(),
+            bins_ready: false,
+            grad_sum: 0.0,
+            hess_sum: 0.0,
+            last_reeval_count: 0,
+        });
 
         let seed = config.seed;
         Self {
@@ -208,6 +205,7 @@ impl HoeffdingTree {
             samples_seen: 0,
             split_criterion: XGBoostGain::default(),
             feature_mask: Vec::new(),
+            feature_mask_bits: Vec::new(),
             rng_state: seed,
             split_gains: Vec::new(),
         }
@@ -239,14 +237,15 @@ impl HoeffdingTree {
                 root,
                 config: config.clone(),
                 leaf_states: {
-                    let mut m = HashMap::new();
-                    m.insert(root.0, LeafState::new(n_features.unwrap_or(0)));
-                    m
+                    let mut v = vec![None; root.0 as usize + 1];
+                    v[root.0 as usize] = Some(LeafState::new(n_features.unwrap_or(0)));
+                    v
                 },
                 n_features,
                 samples_seen,
                 split_criterion: XGBoostGain::default(),
                 feature_mask: Vec::new(),
+                feature_mask_bits: Vec::new(),
                 rng_state,
                 split_gains: vec![0.0; n_features.unwrap_or(0)],
             };
@@ -254,10 +253,10 @@ impl HoeffdingTree {
 
         // Build leaf states for every leaf in the arena.
         let nf = n_features.unwrap_or(0);
-        let mut leaf_states = HashMap::new();
-        for i in 0..arena.n_nodes() {
+        let mut leaf_states: Vec<Option<LeafState>> = vec![None; arena.n_nodes()];
+        for (i, slot) in leaf_states.iter_mut().enumerate() {
             if arena.is_leaf[i] {
-                leaf_states.insert(i as u32, LeafState::new(nf));
+                *slot = Some(LeafState::new(nf));
             }
         }
 
@@ -270,9 +269,16 @@ impl HoeffdingTree {
             samples_seen,
             split_criterion: XGBoostGain::default(),
             feature_mask: Vec::new(),
+            feature_mask_bits: Vec::new(),
             rng_state,
             split_gains: vec![0.0; nf],
         }
+    }
+
+    /// Root node identifier.
+    #[inline]
+    pub fn root(&self) -> NodeId {
+        self.root
     }
 
     /// Immutable access to the underlying arena.
@@ -318,6 +324,9 @@ impl HoeffdingTree {
     ///
     /// If `feature_subsample_rate` is 1.0, all features are included.
     /// Otherwise, a random subset is selected via xorshift64.
+    ///
+    /// Uses a `Vec<u64>` bitset for O(1) membership testing, replacing the
+    /// previous O(n) `Vec::contains()` which made the fallback loop O(n²).
     fn generate_feature_mask(&mut self, n_features: usize) {
         self.feature_mask.clear();
 
@@ -328,26 +337,31 @@ impl HoeffdingTree {
                 ((n_features as f64) * self.config.feature_subsample_rate).ceil() as usize;
             let target_count = target_count.max(1).min(n_features);
 
-            // Fisher-Yates style selection: generate random indices.
-            // Simple approach: include each feature with probability = subsample_rate,
-            // then ensure at least `target_count` are selected.
+            // Prepare the bitset: one bit per feature, O(1) membership test.
+            let n_words = n_features.div_ceil(64);
+            self.feature_mask_bits.clear();
+            self.feature_mask_bits.resize(n_words, 0u64);
+
+            // Include each feature with probability = subsample_rate.
             for i in 0..n_features {
                 let r = xorshift64(&mut self.rng_state);
-                // Use a threshold on the RNG output.
                 let p = (r as f64) / (u64::MAX as f64);
                 if p < self.config.feature_subsample_rate {
                     self.feature_mask.push(i);
+                    self.feature_mask_bits[i / 64] |= 1u64 << (i % 64);
                 }
             }
 
             // If we didn't get enough features, fill up deterministically.
+            // Now O(n) instead of O(n²) thanks to the bitset.
             if self.feature_mask.len() < target_count {
                 for i in 0..n_features {
                     if self.feature_mask.len() >= target_count {
                         break;
                     }
-                    if !self.feature_mask.contains(&i) {
+                    if self.feature_mask_bits[i / 64] & (1u64 << (i % 64)) == 0 {
                         self.feature_mask.push(i);
+                        self.feature_mask_bits[i / 64] |= 1u64 << (i % 64);
                     }
                 }
             }
@@ -367,7 +381,11 @@ impl HoeffdingTree {
             match self.config.split_reeval_interval {
                 None => return false,
                 Some(interval) => {
-                    let state = match self.leaf_states.get(&leaf_id.0) {
+                    let state = match self
+                        .leaf_states
+                        .get(leaf_id.0 as usize)
+                        .and_then(|o| o.as_ref())
+                    {
                         Some(s) => s,
                         None => return false,
                     };
@@ -398,7 +416,11 @@ impl HoeffdingTree {
         // split evaluation sees correct gradient/hessian sums. O(n_features * n_bins)
         // but amortized over grace_period samples — not per-sample cost.
         if self.config.leaf_decay_alpha.is_some() {
-            if let Some(state) = self.leaf_states.get_mut(&leaf_id.0) {
+            if let Some(state) = self
+                .leaf_states
+                .get_mut(leaf_id.0 as usize)
+                .and_then(|o| o.as_mut())
+            {
                 if let Some(ref mut histograms) = state.histograms {
                     histograms.materialize_decay();
                 }
@@ -408,7 +430,11 @@ impl HoeffdingTree {
         // Evaluate splits for each feature in the mask.
         // We need to borrow leaf_states immutably while feature_mask is borrowed.
         // Collect candidates first.
-        let state = match self.leaf_states.get(&leaf_id.0) {
+        let state = match self
+            .leaf_states
+            .get(leaf_id.0 as usize)
+            .and_then(|o| o.as_ref())
+        {
             Some(s) => s,
             None => return false,
         };
@@ -481,7 +507,11 @@ impl HoeffdingTree {
             // If this was a re-evaluation at max depth, update the count
             // so we don't re-evaluate again until the next interval elapses.
             if at_max_depth {
-                if let Some(state) = self.leaf_states.get_mut(&leaf_id.0) {
+                if let Some(state) = self
+                    .leaf_states
+                    .get_mut(leaf_id.0 as usize)
+                    .and_then(|o| o.as_mut())
+                {
                     state.last_reeval_count = sample_count;
                 }
             }
@@ -554,8 +584,17 @@ impl HoeffdingTree {
         // However, to be more efficient, we CAN carry forward histogram data
         // using the subtraction trick. Let's do this properly:
 
-        let parent_state = self.leaf_states.remove(&leaf_id.0);
+        let parent_state = self
+            .leaf_states
+            .get_mut(leaf_id.0 as usize)
+            .and_then(|o| o.take());
         let nf = n_features;
+
+        // Ensure Vec is large enough for child NodeIds.
+        let max_child = left_id.0.max(right_id.0) as usize;
+        if self.leaf_states.len() <= max_child {
+            self.leaf_states.resize_with(max_child + 1, || None);
+        }
 
         if let Some(parent) = parent_state {
             if let Some(parent_hists) = parent.histograms {
@@ -579,9 +618,7 @@ impl HoeffdingTree {
 
                 let left_state = LeafState {
                     histograms: Some(left_hists),
-                    binners: (0..nf)
-                        .map(|_| Box::new(UniformBinning::new()) as Box<dyn BinningStrategy>)
-                        .collect(),
+                    binners: (0..nf).map(|_| BinnerKind::uniform()).collect(),
                     bins_ready: true,
                     grad_sum: 0.0,
                     hess_sum: 0.0,
@@ -590,26 +627,24 @@ impl HoeffdingTree {
 
                 let right_state = LeafState {
                     histograms: Some(right_hists),
-                    binners: (0..nf)
-                        .map(|_| Box::new(UniformBinning::new()) as Box<dyn BinningStrategy>)
-                        .collect(),
+                    binners: (0..nf).map(|_| BinnerKind::uniform()).collect(),
                     bins_ready: true,
                     grad_sum: 0.0,
                     hess_sum: 0.0,
                     last_reeval_count: 0,
                 };
 
-                self.leaf_states.insert(left_id.0, left_state);
-                self.leaf_states.insert(right_id.0, right_state);
+                self.leaf_states[left_id.0 as usize] = Some(left_state);
+                self.leaf_states[right_id.0 as usize] = Some(right_state);
             } else {
                 // Parent didn't have histograms (shouldn't happen if bins_ready).
-                self.leaf_states.insert(left_id.0, LeafState::new(nf));
-                self.leaf_states.insert(right_id.0, LeafState::new(nf));
+                self.leaf_states[left_id.0 as usize] = Some(LeafState::new(nf));
+                self.leaf_states[right_id.0 as usize] = Some(LeafState::new(nf));
             }
         } else {
             // No parent state found (shouldn't happen).
-            self.leaf_states.insert(left_id.0, LeafState::new(nf));
-            self.leaf_states.insert(right_id.0, LeafState::new(nf));
+            self.leaf_states[left_id.0 as usize] = Some(LeafState::new(nf));
+            self.leaf_states[right_id.0 as usize] = Some(LeafState::new(nf));
         }
 
         true
@@ -633,10 +668,12 @@ impl StreamingTree for HoeffdingTree {
             self.split_gains.resize(n, 0.0);
 
             // Re-initialize the root's leaf state now that we know n_features.
-            if let Some(state) = self.leaf_states.get_mut(&self.root.0) {
-                state.binners = (0..n)
-                    .map(|_| Box::new(UniformBinning::new()) as Box<dyn BinningStrategy>)
-                    .collect();
+            if let Some(state) = self
+                .leaf_states
+                .get_mut(self.root.0 as usize)
+                .and_then(|o| o.as_mut())
+            {
+                state.binners = (0..n).map(|_| BinnerKind::uniform()).collect();
             }
             n
         };
@@ -657,10 +694,14 @@ impl StreamingTree for HoeffdingTree {
         let sample_count = self.arena.get_sample_count(leaf_id);
 
         // Get or create the leaf state.
-        let state = self
-            .leaf_states
-            .entry(leaf_id.0)
-            .or_insert_with(|| LeafState::new(n_features));
+        let idx = leaf_id.0 as usize;
+        if self.leaf_states.len() <= idx {
+            self.leaf_states.resize_with(idx + 1, || None);
+        }
+        if self.leaf_states[idx].is_none() {
+            self.leaf_states[idx] = Some(LeafState::new(n_features));
+        }
+        let state = self.leaf_states[idx].as_mut().unwrap();
 
         // If bins are not yet ready, check if we've reached the grace period.
         if !state.bins_ready {
@@ -744,7 +785,11 @@ impl StreamingTree for HoeffdingTree {
     /// the leaf's current weight.
     fn predict(&self, features: &[f64]) -> f64 {
         let leaf_id = self.route_to_leaf(features);
-        if let Some(state) = self.leaf_states.get(&leaf_id.0) {
+        if let Some(state) = self
+            .leaf_states
+            .get(leaf_id.0 as usize)
+            .and_then(|o| o.as_ref())
+        {
             if state.hess_sum != 0.0 {
                 // Compute live prediction from accumulated statistics.
                 leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda)
@@ -779,10 +824,12 @@ impl StreamingTree for HoeffdingTree {
 
         // Insert a placeholder leaf state for the new root.
         let n_features = self.n_features.unwrap_or(0);
-        self.leaf_states.insert(root.0, LeafState::new(n_features));
+        self.leaf_states.resize_with(root.0 as usize + 1, || None);
+        self.leaf_states[root.0 as usize] = Some(LeafState::new(n_features));
 
         self.samples_seen = 0;
         self.feature_mask.clear();
+        self.feature_mask_bits.clear();
         self.rng_state = self.config.seed;
         self.split_gains.iter_mut().for_each(|g| *g = 0.0);
     }
@@ -792,8 +839,27 @@ impl StreamingTree for HoeffdingTree {
     }
 }
 
-// Implement Send + Sync manually because LeafState contains Box<dyn BinningStrategy>
-// which is Send + Sync by its trait bound.
+impl Clone for HoeffdingTree {
+    fn clone(&self) -> Self {
+        Self {
+            arena: self.arena.clone(),
+            root: self.root,
+            config: self.config.clone(),
+            leaf_states: self.leaf_states.clone(),
+            n_features: self.n_features,
+            samples_seen: self.samples_seen,
+            split_criterion: self.split_criterion,
+            feature_mask: self.feature_mask.clone(),
+            feature_mask_bits: self.feature_mask_bits.clone(),
+            rng_state: self.rng_state,
+            split_gains: self.split_gains.clone(),
+        }
+    }
+}
+
+// SAFETY: All fields are Send + Sync. BinnerKind is a concrete enum with
+// Send + Sync variants. XGBoostGain is stateless. Vec<Option<LeafState>>
+// and Vec fields are trivially Send + Sync.
 unsafe impl Send for HoeffdingTree {}
 unsafe impl Sync for HoeffdingTree {}
 

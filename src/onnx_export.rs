@@ -271,8 +271,8 @@ const ONNX_FLOAT: i32 = 1;
 /// # Errors
 ///
 /// Returns `IrithyllError::Serialization` if protobuf encoding fails.
-pub fn export_onnx(
-    model: &crate::ensemble::SGBT,
+pub fn export_onnx<L: crate::loss::Loss>(
+    model: &crate::ensemble::SGBT<L>,
     n_features: usize,
 ) -> crate::error::Result<Vec<u8>> {
     use prost::Message;
@@ -462,8 +462,8 @@ pub fn export_onnx(
 /// # Errors
 ///
 /// Returns `IrithyllError::Serialization` if encoding or file I/O fails.
-pub fn save_onnx(
-    model: &crate::ensemble::SGBT,
+pub fn save_onnx<L: crate::loss::Loss>(
+    model: &crate::ensemble::SGBT<L>,
     n_features: usize,
     path: &std::path::Path,
 ) -> crate::error::Result<()> {

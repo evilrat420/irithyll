@@ -9,7 +9,7 @@ use crate::drift::ddm::Ddm;
 use crate::drift::pht::PageHinkleyTest;
 use crate::drift::DriftDetector;
 use crate::ensemble::variants::SGBTVariant;
-use crate::error::{IrithyllError, Result};
+use crate::error::{ConfigError, Result};
 
 // ---------------------------------------------------------------------------
 // DriftDetectorType
@@ -19,7 +19,7 @@ use crate::error::{IrithyllError, Result};
 ///
 /// Each variant stores the detector's configuration parameters so that fresh
 /// instances can be created on demand (e.g. when replacing a drifted tree).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DriftDetectorType {
     /// Page-Hinkley Test with custom delta (magnitude tolerance) and lambda
     /// (detection threshold).
@@ -105,7 +105,7 @@ impl DriftDetectorType {
 /// | `leaf_half_life`         | None (disabled)      |
 /// | `max_tree_samples`       | None (disabled)      |
 /// | `split_reeval_interval`  | None (disabled)      |
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SGBTConfig {
     /// Number of boosting steps (trees in the ensemble). Default 100.
     pub n_steps: usize,
@@ -169,6 +169,14 @@ pub struct SGBTConfig {
     /// `None` (default) disables re-evaluation — max-depth leaves are permanent.
     #[serde(default)]
     pub split_reeval_interval: Option<usize>,
+
+    /// Optional human-readable feature names.
+    ///
+    /// When set, enables [`SGBT::named_feature_importances`] and
+    /// [`SGBT::train_one_named`] for production-friendly named access.
+    /// Length must match the number of features in training data.
+    #[serde(default)]
+    pub feature_names: Option<Vec<String>>,
 }
 
 impl Default for SGBTConfig {
@@ -190,6 +198,7 @@ impl Default for SGBTConfig {
             leaf_half_life: None,
             max_tree_samples: None,
             split_reeval_interval: None,
+            feature_names: None,
         }
     }
 }
@@ -337,81 +346,113 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Set human-readable feature names.
+    ///
+    /// Enables named feature importances and named training input.
+    /// Names must be unique; validated at [`build()`](Self::build).
+    pub fn feature_names(mut self, names: Vec<String>) -> Self {
+        self.config.feature_names = Some(names);
+        self
+    }
+
     /// Validate and build the configuration.
     ///
     /// # Errors
     ///
-    /// Returns [`IrithyllError::InvalidConfig`] if any parameter is out of
-    /// its valid range.
+    /// Returns [`IrithyllError::InvalidConfig`] with a structured
+    /// [`ConfigError`] if any parameter is out of its valid range.
     pub fn build(self) -> Result<SGBTConfig> {
         let c = &self.config;
 
         // -- Ensemble-level parameters --
         if c.n_steps == 0 {
-            return Err(IrithyllError::InvalidConfig("n_steps must be > 0".into()));
+            return Err(ConfigError::out_of_range("n_steps", "must be > 0", c.n_steps).into());
         }
         if c.learning_rate <= 0.0 || c.learning_rate > 1.0 {
-            return Err(IrithyllError::InvalidConfig(
-                "learning_rate must be in (0, 1]".into(),
-            ));
+            return Err(ConfigError::out_of_range(
+                "learning_rate",
+                "must be in (0, 1]",
+                c.learning_rate,
+            )
+            .into());
         }
         if c.feature_subsample_rate <= 0.0 || c.feature_subsample_rate > 1.0 {
-            return Err(IrithyllError::InvalidConfig(
-                "feature_subsample_rate must be in (0, 1]".into(),
-            ));
+            return Err(ConfigError::out_of_range(
+                "feature_subsample_rate",
+                "must be in (0, 1]",
+                c.feature_subsample_rate,
+            )
+            .into());
         }
 
         // -- Tree-level parameters --
         if c.max_depth == 0 {
-            return Err(IrithyllError::InvalidConfig("max_depth must be > 0".into()));
+            return Err(ConfigError::out_of_range("max_depth", "must be > 0", c.max_depth).into());
         }
         if c.n_bins < 2 {
-            return Err(IrithyllError::InvalidConfig("n_bins must be >= 2".into()));
+            return Err(ConfigError::out_of_range("n_bins", "must be >= 2", c.n_bins).into());
         }
         if c.lambda < 0.0 {
-            return Err(IrithyllError::InvalidConfig("lambda must be >= 0".into()));
+            return Err(ConfigError::out_of_range("lambda", "must be >= 0", c.lambda).into());
         }
         if c.gamma < 0.0 {
-            return Err(IrithyllError::InvalidConfig("gamma must be >= 0".into()));
+            return Err(ConfigError::out_of_range("gamma", "must be >= 0", c.gamma).into());
         }
         if c.grace_period == 0 {
-            return Err(IrithyllError::InvalidConfig(
-                "grace_period must be > 0".into(),
-            ));
+            return Err(
+                ConfigError::out_of_range("grace_period", "must be > 0", c.grace_period).into(),
+            );
         }
         if c.delta <= 0.0 || c.delta >= 1.0 {
-            return Err(IrithyllError::InvalidConfig(
-                "delta must be in (0, 1)".into(),
-            ));
+            return Err(ConfigError::out_of_range("delta", "must be in (0, 1)", c.delta).into());
         }
 
         if c.initial_target_count == 0 {
-            return Err(IrithyllError::InvalidConfig(
-                "initial_target_count must be > 0".into(),
-            ));
+            return Err(ConfigError::out_of_range(
+                "initial_target_count",
+                "must be > 0",
+                c.initial_target_count,
+            )
+            .into());
         }
 
         // -- Streaming adaptation parameters --
         if let Some(hl) = c.leaf_half_life {
             if hl == 0 {
-                return Err(IrithyllError::InvalidConfig(
-                    "leaf_half_life must be >= 1".into(),
-                ));
+                return Err(ConfigError::out_of_range("leaf_half_life", "must be >= 1", hl).into());
             }
         }
         if let Some(max) = c.max_tree_samples {
             if max < 100 {
-                return Err(IrithyllError::InvalidConfig(
-                    "max_tree_samples must be >= 100".into(),
-                ));
+                return Err(
+                    ConfigError::out_of_range("max_tree_samples", "must be >= 100", max).into(),
+                );
             }
         }
         if let Some(interval) = c.split_reeval_interval {
             if interval < c.grace_period {
-                return Err(IrithyllError::InvalidConfig(format!(
-                    "split_reeval_interval ({}) must be >= grace_period ({})",
-                    interval, c.grace_period
-                )));
+                return Err(ConfigError::invalid(
+                    "split_reeval_interval",
+                    format!(
+                        "must be >= grace_period ({}), got {}",
+                        c.grace_period, interval
+                    ),
+                )
+                .into());
+            }
+        }
+
+        // -- Feature names --
+        if let Some(ref names) = c.feature_names {
+            let mut seen = std::collections::HashSet::new();
+            for name in names {
+                if !seen.insert(name.as_str()) {
+                    return Err(ConfigError::invalid(
+                        "feature_names",
+                        format!("duplicate feature name: '{}'", name),
+                    )
+                    .into());
+                }
             }
         }
 
@@ -419,21 +460,30 @@ impl SGBTConfigBuilder {
         match &c.drift_detector {
             DriftDetectorType::PageHinkley { delta, lambda } => {
                 if *delta <= 0.0 {
-                    return Err(IrithyllError::InvalidConfig(
-                        "drift_detector PageHinkley delta must be > 0".into(),
-                    ));
+                    return Err(ConfigError::out_of_range(
+                        "drift_detector.PageHinkley.delta",
+                        "must be > 0",
+                        delta,
+                    )
+                    .into());
                 }
                 if *lambda <= 0.0 {
-                    return Err(IrithyllError::InvalidConfig(
-                        "drift_detector PageHinkley lambda must be > 0".into(),
-                    ));
+                    return Err(ConfigError::out_of_range(
+                        "drift_detector.PageHinkley.lambda",
+                        "must be > 0",
+                        lambda,
+                    )
+                    .into());
                 }
             }
             DriftDetectorType::Adwin { delta } => {
                 if *delta <= 0.0 || *delta >= 1.0 {
-                    return Err(IrithyllError::InvalidConfig(
-                        "drift_detector Adwin delta must be in (0, 1)".into(),
-                    ));
+                    return Err(ConfigError::out_of_range(
+                        "drift_detector.Adwin.delta",
+                        "must be in (0, 1)",
+                        delta,
+                    )
+                    .into());
                 }
             }
             DriftDetectorType::Ddm {
@@ -442,24 +492,38 @@ impl SGBTConfigBuilder {
                 min_instances,
             } => {
                 if *warning_level <= 0.0 {
-                    return Err(IrithyllError::InvalidConfig(
-                        "drift_detector Ddm warning_level must be > 0".into(),
-                    ));
+                    return Err(ConfigError::out_of_range(
+                        "drift_detector.Ddm.warning_level",
+                        "must be > 0",
+                        warning_level,
+                    )
+                    .into());
                 }
                 if *drift_level <= 0.0 {
-                    return Err(IrithyllError::InvalidConfig(
-                        "drift_detector Ddm drift_level must be > 0".into(),
-                    ));
+                    return Err(ConfigError::out_of_range(
+                        "drift_detector.Ddm.drift_level",
+                        "must be > 0",
+                        drift_level,
+                    )
+                    .into());
                 }
                 if *drift_level <= *warning_level {
-                    return Err(IrithyllError::InvalidConfig(
-                        "drift_detector Ddm drift_level must be > warning_level".into(),
-                    ));
+                    return Err(ConfigError::invalid(
+                        "drift_detector.Ddm.drift_level",
+                        format!(
+                            "must be > warning_level ({}), got {}",
+                            warning_level, drift_level
+                        ),
+                    )
+                    .into());
                 }
                 if *min_instances == 0 {
-                    return Err(IrithyllError::InvalidConfig(
-                        "drift_detector Ddm min_instances must be > 0".into(),
-                    ));
+                    return Err(ConfigError::out_of_range(
+                        "drift_detector.Ddm.min_instances",
+                        "must be > 0",
+                        min_instances,
+                    )
+                    .into());
                 }
             }
         }
@@ -469,21 +533,63 @@ impl SGBTConfigBuilder {
             SGBTVariant::Standard => {} // no extra validation
             SGBTVariant::Skip { k } => {
                 if *k == 0 {
-                    return Err(IrithyllError::InvalidConfig(
-                        "variant Skip k must be > 0".into(),
-                    ));
+                    return Err(
+                        ConfigError::out_of_range("variant.Skip.k", "must be > 0", k).into(),
+                    );
                 }
             }
             SGBTVariant::MultipleIterations { multiplier } => {
                 if *multiplier <= 0.0 {
-                    return Err(IrithyllError::InvalidConfig(
-                        "variant MultipleIterations multiplier must be > 0".into(),
-                    ));
+                    return Err(ConfigError::out_of_range(
+                        "variant.MultipleIterations.multiplier",
+                        "must be > 0",
+                        multiplier,
+                    )
+                    .into());
                 }
             }
         }
 
         Ok(self.config)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Display impls
+// ---------------------------------------------------------------------------
+
+impl std::fmt::Display for DriftDetectorType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PageHinkley { delta, lambda } => {
+                write!(f, "PageHinkley(delta={}, lambda={})", delta, lambda)
+            }
+            Self::Adwin { delta } => write!(f, "Adwin(delta={})", delta),
+            Self::Ddm {
+                warning_level,
+                drift_level,
+                min_instances,
+            } => write!(
+                f,
+                "Ddm(warning={}, drift={}, min_instances={})",
+                warning_level, drift_level, min_instances
+            ),
+        }
+    }
+}
+
+impl std::fmt::Display for SGBTConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SGBTConfig {{ steps={}, lr={}, depth={}, bins={}, variant={}, drift={} }}",
+            self.n_steps,
+            self.learning_rate,
+            self.max_depth,
+            self.n_bins,
+            self.variant,
+            self.drift_detector,
+        )
     }
 }
 
@@ -701,7 +807,8 @@ mod tests {
             .build();
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("drift_level must be > warning_level"));
+        assert!(msg.contains("drift_level"));
+        assert!(msg.contains("must be > warning_level"));
     }
 
     #[test]
@@ -926,5 +1033,54 @@ mod tests {
     fn boundary_grace_period_one_accepted() {
         let result = SGBTConfig::builder().grace_period(1).build();
         assert!(result.is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // 12. Feature names — valid config with names
+    // ------------------------------------------------------------------
+    #[test]
+    fn feature_names_accepted() {
+        let cfg = SGBTConfig::builder()
+            .feature_names(vec!["price".into(), "volume".into(), "spread".into()])
+            .build()
+            .unwrap();
+        assert_eq!(
+            cfg.feature_names.as_ref().unwrap(),
+            &["price", "volume", "spread"]
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // 13. Feature names — duplicate names rejected
+    // ------------------------------------------------------------------
+    #[test]
+    fn feature_names_rejects_duplicates() {
+        let result = SGBTConfig::builder()
+            .feature_names(vec!["price".into(), "volume".into(), "price".into()])
+            .build();
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("duplicate"));
+    }
+
+    // ------------------------------------------------------------------
+    // 14. Feature names — serde backward compat (missing field)
+    // ------------------------------------------------------------------
+    #[test]
+    fn feature_names_serde_backward_compat() {
+        // JSON without feature_names should deserialize fine (defaults to None).
+        let cfg = SGBTConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: SGBTConfig = serde_json::from_str(&json).unwrap();
+        assert!(restored.feature_names.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // 15. Feature names — empty vec is valid
+    // ------------------------------------------------------------------
+    #[test]
+    fn feature_names_empty_vec_accepted() {
+        let cfg = SGBTConfig::builder().feature_names(vec![]).build().unwrap();
+        assert!(cfg.feature_names.unwrap().is_empty());
     }
 }

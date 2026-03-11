@@ -35,7 +35,7 @@ use crate::ensemble::config::SGBTConfig;
 use crate::ensemble::step::BoostingStep;
 use crate::loss::squared::SquaredLoss;
 use crate::loss::Loss;
-use crate::sample::Sample;
+use crate::sample::Observation;
 use crate::tree::builder::TreeConfig;
 
 use std::fmt;
@@ -46,6 +46,9 @@ use std::fmt;
 /// for gradient computation. Predictions remain sequential (deterministic)
 /// -- only training is parallelized.
 ///
+/// Generic over `L: Loss` so the loss function's gradient/hessian calls
+/// are monomorphized (inlined) into the training loop — no virtual dispatch.
+///
 /// # Differences from [`SGBT`](super::SGBT)
 ///
 /// | Aspect | `SGBT` | `ParallelSGBT` |
@@ -55,13 +58,13 @@ use std::fmt;
 /// | Prediction | Sequential | Sequential (identical) |
 /// | Convergence | Optimal | Slightly delayed |
 /// | Throughput | 1x | ~Nx (N = cores) |
-pub struct ParallelSGBT {
+pub struct ParallelSGBT<L: Loss = SquaredLoss> {
     /// Configuration.
     config: SGBTConfig,
     /// Boosting steps (one tree + drift detector each).
     steps: Vec<BoostingStep>,
-    /// Loss function.
-    loss: Box<dyn Loss>,
+    /// Loss function (monomorphized — no vtable).
+    loss: L,
     /// Base prediction (initial constant, computed from first batch of targets).
     base_prediction: f64,
     /// Whether base_prediction has been initialized.
@@ -74,9 +77,28 @@ pub struct ParallelSGBT {
     samples_seen: u64,
     /// RNG state for variant skip logic.
     rng_state: u64,
+    /// Pre-allocated buffer for per-step train counts (avoids heap alloc per sample).
+    train_counts_buf: Vec<usize>,
 }
 
-impl fmt::Debug for ParallelSGBT {
+impl<L: Loss + Clone> Clone for ParallelSGBT<L> {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            steps: self.steps.clone(),
+            loss: self.loss.clone(),
+            base_prediction: self.base_prediction,
+            base_initialized: self.base_initialized,
+            initial_targets: self.initial_targets.clone(),
+            initial_target_count: self.initial_target_count,
+            samples_seen: self.samples_seen,
+            rng_state: self.rng_state,
+            train_counts_buf: self.train_counts_buf.clone(),
+        }
+    }
+}
+
+impl<L: Loss> fmt::Debug for ParallelSGBT<L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ParallelSGBT")
             .field("n_steps", &self.steps.len())
@@ -87,9 +109,36 @@ impl fmt::Debug for ParallelSGBT {
     }
 }
 
-impl ParallelSGBT {
+// ---------------------------------------------------------------------------
+// Convenience constructor for the default loss (SquaredLoss)
+// ---------------------------------------------------------------------------
+
+impl ParallelSGBT<SquaredLoss> {
     /// Create a new parallel SGBT ensemble with squared loss (regression).
     pub fn new(config: SGBTConfig) -> Self {
+        Self::with_loss(config, SquaredLoss)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// General impl for all Loss types
+// ---------------------------------------------------------------------------
+
+impl<L: Loss> ParallelSGBT<L> {
+    /// Create a new parallel SGBT ensemble with a specific loss function.
+    ///
+    /// The loss is stored by value (monomorphized), giving zero-cost
+    /// gradient/hessian dispatch.
+    ///
+    /// ```
+    /// use irithyll::SGBTConfig;
+    /// use irithyll::ensemble::parallel::ParallelSGBT;
+    /// use irithyll::loss::logistic::LogisticLoss;
+    ///
+    /// let config = SGBTConfig::builder().n_steps(10).build().unwrap();
+    /// let model = ParallelSGBT::with_loss(config, LogisticLoss);
+    /// ```
+    pub fn with_loss(config: SGBTConfig, loss: L) -> Self {
         let leaf_decay_alpha = config
             .leaf_half_life
             .map(|hl| (-(2.0_f64.ln()) / hl as f64).exp());
@@ -118,37 +167,37 @@ impl ParallelSGBT {
 
         let seed = config.seed;
         let initial_target_count = config.initial_target_count;
+        let n_steps = steps.len();
         Self {
             config,
             steps,
-            loss: Box::new(SquaredLoss),
+            loss,
             base_prediction: 0.0,
             base_initialized: false,
             initial_targets: Vec::new(),
             initial_target_count,
             samples_seen: 0,
             rng_state: seed,
+            train_counts_buf: vec![0; n_steps],
         }
     }
 
-    /// Create a new parallel SGBT ensemble with a custom loss function.
-    pub fn with_loss(config: SGBTConfig, loss: Box<dyn Loss>) -> Self {
-        let mut model = Self::new(config);
-        model.loss = loss;
-        model
-    }
-
-    /// Train on a single sample using delayed gradient updates.
+    /// Train on a single observation using delayed gradient updates.
+    ///
+    /// Accepts any type implementing [`Observation`], including [`Sample`],
+    /// [`SampleRef`](crate::SampleRef), or tuples like `(&[f64], f64)`.
     ///
     /// All boosting steps receive the same gradient/hessian computed from
     /// the full ensemble prediction, then train in parallel (when the
     /// `parallel` feature is enabled).
-    pub fn train_one(&mut self, sample: &Sample) {
+    pub fn train_one(&mut self, sample: &impl Observation) {
         self.samples_seen += 1;
+        let target = sample.target();
+        let features = sample.features();
 
         // Initialize base prediction from first few targets.
         if !self.base_initialized {
-            self.initial_targets.push(sample.target);
+            self.initial_targets.push(target);
             if self.initial_targets.len() >= self.initial_target_count {
                 self.base_prediction = self.loss.initial_prediction(&self.initial_targets);
                 self.base_initialized = true;
@@ -158,23 +207,23 @@ impl ParallelSGBT {
         }
 
         // Compute the FULL ensemble prediction (same as predict()).
-        let full_pred = self.predict(&sample.features);
+        let full_pred = self.predict(features);
 
         // Compute gradient and hessian from the full ensemble prediction.
         // All steps will use these same values (delayed gradient approach).
-        let gradient = self.loss.gradient(sample.target, full_pred);
-        let hessian = self.loss.hessian(sample.target, full_pred);
+        let gradient = self.loss.gradient(target, full_pred);
+        let hessian = self.loss.hessian(target, full_pred);
 
-        // Pre-compute train_count for each step sequentially.
+        // Pre-compute train_count for each step sequentially into the
+        // pre-allocated buffer (zero heap alloc per sample).
         // The RNG state is sequential (xorshift), so we must advance it
         // in order before entering the parallel section.
-        let train_counts: Vec<usize> = (0..self.steps.len())
-            .map(|_| {
-                self.config
-                    .variant
-                    .train_count(hessian, &mut self.rng_state)
-            })
-            .collect();
+        for tc in self.train_counts_buf.iter_mut() {
+            *tc = self
+                .config
+                .variant
+                .train_count(hessian, &mut self.rng_state);
+        }
 
         // Train all steps with the same gradient/hessian.
         // When `parallel` feature is enabled, use rayon for concurrency.
@@ -182,20 +231,20 @@ impl ParallelSGBT {
         #[cfg(feature = "parallel")]
         {
             self.steps.par_iter_mut().enumerate().for_each(|(i, step)| {
-                step.train_and_predict(&sample.features, gradient, hessian, train_counts[i]);
+                step.train_and_predict(features, gradient, hessian, self.train_counts_buf[i]);
             });
         }
 
         #[cfg(not(feature = "parallel"))]
         {
             for (i, step) in self.steps.iter_mut().enumerate() {
-                step.train_and_predict(&sample.features, gradient, hessian, train_counts[i]);
+                step.train_and_predict(features, gradient, hessian, self.train_counts_buf[i]);
             }
         }
     }
 
-    /// Train on a batch of samples.
-    pub fn train_batch(&mut self, samples: &[Sample]) {
+    /// Train on a batch of observations.
+    pub fn train_batch<O: Observation>(&mut self, samples: &[O]) {
         for sample in samples {
             self.train_one(sample);
         }
@@ -263,6 +312,11 @@ impl ParallelSGBT {
         &self.config
     }
 
+    /// Immutable access to the loss function.
+    pub fn loss(&self) -> &L {
+        &self.loss
+    }
+
     /// Feature importances based on accumulated split gains across all trees.
     ///
     /// Returns normalized importances (sum to 1.0) indexed by feature.
@@ -308,6 +362,7 @@ impl ParallelSGBT {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sample::Sample;
 
     fn default_config() -> SGBTConfig {
         SGBTConfig::builder()
@@ -480,7 +535,7 @@ mod tests {
     #[test]
     fn with_loss_uses_custom_loss() {
         use crate::loss::logistic::LogisticLoss;
-        let model = ParallelSGBT::with_loss(default_config(), Box::new(LogisticLoss));
+        let model = ParallelSGBT::with_loss(default_config(), LogisticLoss);
         let pred = model.predict_transformed(&[1.0, 2.0]);
         assert!(
             (pred - 0.5).abs() < 1e-6,

@@ -76,41 +76,11 @@ use crate::ensemble::config::SGBTConfig;
 #[cfg(feature = "serde-json")]
 use crate::ensemble::SGBT;
 #[cfg(feature = "serde-json")]
-use crate::loss::huber::HuberLoss;
-#[cfg(feature = "serde-json")]
-use crate::loss::logistic::LogisticLoss;
-#[cfg(feature = "serde-json")]
-use crate::loss::softmax::SoftmaxLoss;
-#[cfg(feature = "serde-json")]
-use crate::loss::squared::SquaredLoss;
-#[cfg(feature = "serde-json")]
 use crate::loss::Loss;
 
-/// Tag for reconstructing the correct loss function on deserialization.
-///
-/// When saving a model, the loss type is captured as a tag so the correct
-/// loss function can be reconstructed on load without runtime type inspection.
+// Re-export LossType from the loss module for backwards compatibility.
 #[cfg(feature = "serde-json")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum LossType {
-    Squared,
-    Logistic,
-    Huber { delta: f64 },
-    Softmax { n_classes: usize },
-}
-
-#[cfg(feature = "serde-json")]
-impl LossType {
-    /// Reconstruct the loss function from its serialized tag.
-    pub fn into_loss(self) -> Box<dyn Loss> {
-        match self {
-            LossType::Squared => Box::new(SquaredLoss),
-            LossType::Logistic => Box::new(LogisticLoss),
-            LossType::Huber { delta } => Box::new(HuberLoss { delta }),
-            LossType::Softmax { n_classes } => Box::new(SoftmaxLoss { n_classes }),
-        }
-    }
-}
+pub use crate::loss::LossType;
 
 /// Serializable snapshot of the tree arena structure.
 ///
@@ -139,6 +109,12 @@ pub struct TreeSnapshot {
 pub struct StepSnapshot {
     pub tree: TreeSnapshot,
     pub alternate_tree: Option<TreeSnapshot>,
+    /// Drift detector accumulated state (preserves warmup across save/load).
+    #[serde(default)]
+    pub drift_state: Option<crate::drift::state::DriftDetectorState>,
+    /// Alternate drift detector state (if an alternate tree is training).
+    #[serde(default)]
+    pub alt_drift_state: Option<crate::drift::state::DriftDetectorState>,
 }
 
 /// Complete serializable state of an SGBT model.
@@ -161,31 +137,40 @@ pub struct ModelState {
 
 /// Save an SGBT model to a JSON string.
 ///
-/// Requires the `serde-json` feature (enabled by default).
-///
-/// # Arguments
-///
-/// * `model` - The SGBT model to serialize.
-/// * `loss_type` - The loss type tag (must match the loss function used to create the model).
+/// Auto-detects the loss type from the model's loss function. For built-in
+/// losses (Squared, Logistic, Huber, Softmax) this works automatically.
+/// For custom losses, use [`save_model_with`] to supply the tag manually.
 ///
 /// # Errors
 ///
-/// Returns [`IrithyllError::Serialization`] if serialization fails.
+/// Returns [`IrithyllError::Serialization`] if the loss type cannot be
+/// auto-detected or if serialization fails.
 #[cfg(feature = "serde-json")]
-pub fn save_model(model: &SGBT, loss_type: LossType) -> Result<String> {
-    let state = model.to_model_state(loss_type);
+pub fn save_model<L: Loss>(model: &SGBT<L>) -> Result<String> {
+    let state = model.to_model_state()?;
+    to_json_pretty(&state)
+}
+
+/// Save an SGBT model to a JSON string with an explicit loss type tag.
+///
+/// Use this for custom loss functions that don't implement `loss_type()`.
+#[cfg(feature = "serde-json")]
+pub fn save_model_with<L: Loss>(model: &SGBT<L>, loss_type: LossType) -> Result<String> {
+    let state = model.to_model_state_with(loss_type);
     to_json_pretty(&state)
 }
 
 /// Load an SGBT model from a JSON string.
 ///
-/// Requires the `serde-json` feature (enabled by default).
+/// Returns a [`DynSGBT`](crate::ensemble::DynSGBT) (`SGBT<Box<dyn Loss>>`)
+/// because the concrete loss type is determined at runtime from the
+/// serialized tag.
 ///
 /// # Errors
 ///
 /// Returns [`IrithyllError::Serialization`] if deserialization fails.
 #[cfg(feature = "serde-json")]
-pub fn load_model(json: &str) -> Result<SGBT> {
+pub fn load_model(json: &str) -> Result<crate::ensemble::DynSGBT> {
     let state: ModelState = from_json(json)?;
     Ok(SGBT::from_model_state(state))
 }

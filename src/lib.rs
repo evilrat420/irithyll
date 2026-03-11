@@ -78,6 +78,7 @@ pub mod metrics;
 pub mod stream;
 pub mod tree;
 
+pub mod explain;
 pub mod serde_support;
 
 #[cfg(feature = "arrow")]
@@ -89,13 +90,18 @@ pub mod onnx_export;
 // Re-exports — core types
 pub use drift::{DriftDetector, DriftSignal};
 pub use ensemble::config::SGBTConfig;
+pub use ensemble::multi_target::MultiTargetSGBT;
 pub use ensemble::multiclass::MulticlassSGBT;
-pub use ensemble::SGBT;
-pub use error::IrithyllError;
-pub use histogram::BinningStrategy;
-pub use loss::Loss;
-pub use sample::Sample;
+pub use ensemble::{DynSGBT, SGBT};
+pub use error::{ConfigError, IrithyllError};
+pub use histogram::{BinnerKind, BinningStrategy};
+pub use loss::{Loss, LossType};
+pub use sample::{Observation, Sample, SampleRef};
 pub use tree::StreamingTree;
+
+// Re-exports — explainability
+pub use explain::streaming::StreamingShap;
+pub use explain::treeshap::ShapValues;
 
 // Re-exports — parallel (feature-gated)
 #[cfg(feature = "parallel")]

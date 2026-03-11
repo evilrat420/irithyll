@@ -97,7 +97,7 @@ fn sgbt_classification_accuracy() {
         .build()
         .unwrap();
 
-    let mut model = SGBT::with_loss(config, Box::new(LogisticLoss));
+    let mut model = SGBT::with_loss(config, LogisticLoss);
     let mut rng: u64 = 12345;
 
     for _ in 0..2000 {
@@ -285,7 +285,7 @@ fn sgbt_multiclass_basic() {
         .build()
         .unwrap();
 
-    let mut model = MulticlassSGBT::new(config, 3);
+    let mut model = MulticlassSGBT::new(config, 3).unwrap();
     let mut rng: u64 = 0x1234_5678_ABCD_EF00;
 
     for i in 0..300 {

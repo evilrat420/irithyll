@@ -37,7 +37,7 @@ fn main() {
         .build()
         .expect("valid config");
 
-    let mut model = SGBT::with_loss(config, Box::new(LogisticLoss));
+    let mut model = SGBT::with_loss(config, LogisticLoss);
 
     println!("Config: n_steps=30, lr=0.1, logistic loss");
 

@@ -18,6 +18,7 @@ use super::Loss;
 ///
 /// At `|residual| <= delta` the loss is quadratic (like [`SquaredLoss`](super::squared::SquaredLoss)).
 /// Beyond that threshold the loss grows linearly, bounding the influence of outliers.
+#[derive(Debug, Clone, Copy)]
 pub struct HuberLoss {
     /// Threshold at which the loss transitions from quadratic to linear.
     /// Must be positive. Default is `1.0`.
@@ -92,6 +93,10 @@ impl Loss for HuberLoss {
         } else {
             (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
         }
+    }
+
+    fn loss_type(&self) -> Option<super::LossType> {
+        Some(super::LossType::Huber { delta: self.delta })
     }
 }
 

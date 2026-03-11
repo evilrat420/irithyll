@@ -15,6 +15,7 @@ use super::Loss;
 ///
 /// `n_classes` controls the number of tree committees. Each committee uses
 /// logistic-style gradients on one-hot encoded targets.
+#[derive(Debug, Clone, Copy)]
 pub struct SoftmaxLoss {
     /// Number of classes in the classification problem.
     pub n_classes: usize,
@@ -70,6 +71,12 @@ impl Loss for SoftmaxLoss {
         // Start each class committee from zero (no prior bias).
         // The boosting loop will learn class priors through early trees.
         0.0
+    }
+
+    fn loss_type(&self) -> Option<super::LossType> {
+        Some(super::LossType::Softmax {
+            n_classes: self.n_classes,
+        })
     }
 }
 
