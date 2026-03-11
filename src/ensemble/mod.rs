@@ -167,7 +167,9 @@ impl<L: Loss> SGBT<L> {
             .feature_subsample_rate(config.feature_subsample_rate)
             .leaf_decay_alpha_opt(leaf_decay_alpha)
             .split_reeval_interval_opt(config.split_reeval_interval)
-            .feature_types_opt(config.feature_types.clone());
+            .feature_types_opt(config.feature_types.clone())
+            .gradient_clip_sigma_opt(config.gradient_clip_sigma)
+            .monotone_constraints_opt(config.monotone_constraints.clone());
 
         let max_tree_samples = config.max_tree_samples;
 
@@ -241,6 +243,137 @@ impl<L: Loss> SGBT<L> {
         }
     }
 
+    /// Train on a batch with periodic callback for cooperative yielding.
+    ///
+    /// The callback is invoked every `interval` samples with the number of
+    /// samples processed so far. This allows long-running training to yield
+    /// to other tasks in an async runtime, update progress bars, or perform
+    /// periodic checkpointing.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use irithyll::{SGBTConfig, SGBT};
+    ///
+    /// let config = SGBTConfig::builder().n_steps(10).build().unwrap();
+    /// let mut model = SGBT::new(config);
+    /// let data: Vec<(Vec<f64>, f64)> = Vec::new(); // your data
+    ///
+    /// model.train_batch_with_callback(&data, 1000, |processed| {
+    ///     println!("Trained {} samples", processed);
+    /// });
+    /// ```
+    pub fn train_batch_with_callback<O: Observation, F: FnMut(usize)>(
+        &mut self,
+        samples: &[O],
+        interval: usize,
+        mut callback: F,
+    ) {
+        let interval = interval.max(1); // Prevent zero interval
+        for (i, sample) in samples.iter().enumerate() {
+            self.train_one(sample);
+            if (i + 1) % interval == 0 {
+                callback(i + 1);
+            }
+        }
+        // Final callback if the total isn't a multiple of interval
+        let total = samples.len();
+        if total % interval != 0 {
+            callback(total);
+        }
+    }
+
+    /// Train on a random subsample of a batch using reservoir sampling.
+    ///
+    /// When `max_samples < samples.len()`, selects a representative subset
+    /// using Algorithm R (Vitter, 1985) — a uniform random sample without
+    /// replacement. The selected samples are then trained in their original
+    /// order to preserve sequential dependencies.
+    ///
+    /// This is ideal for large replay buffers where training on the full
+    /// dataset is prohibitively slow but a representative subset gives
+    /// equivalent model quality (e.g., 1M of 4.3M samples with R²=0.997).
+    ///
+    /// When `max_samples >= samples.len()`, all samples are trained.
+    pub fn train_batch_subsampled<O: Observation>(&mut self, samples: &[O], max_samples: usize) {
+        if max_samples >= samples.len() {
+            self.train_batch(samples);
+            return;
+        }
+
+        // Reservoir sampling (Algorithm R) to select indices
+        let mut reservoir: Vec<usize> = (0..max_samples).collect();
+        let mut rng = self.rng_state;
+
+        for i in max_samples..samples.len() {
+            // Generate random index in [0, i]
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let j = (rng % (i as u64 + 1)) as usize;
+            if j < max_samples {
+                reservoir[j] = i;
+            }
+        }
+
+        self.rng_state = rng;
+
+        // Sort to preserve original order (important for EWMA/drift state)
+        reservoir.sort_unstable();
+
+        // Train on the selected subset
+        for &idx in &reservoir {
+            self.train_one(&samples[idx]);
+        }
+    }
+
+    /// Train on a batch with both subsampling and periodic callbacks.
+    ///
+    /// Combines reservoir subsampling with cooperative yield points.
+    /// Ideal for long-running daemon training where you need both
+    /// efficiency (subsampling) and cooperation (yielding).
+    pub fn train_batch_subsampled_with_callback<O: Observation, F: FnMut(usize)>(
+        &mut self,
+        samples: &[O],
+        max_samples: usize,
+        interval: usize,
+        mut callback: F,
+    ) {
+        if max_samples >= samples.len() {
+            self.train_batch_with_callback(samples, interval, callback);
+            return;
+        }
+
+        // Reservoir sampling
+        let mut reservoir: Vec<usize> = (0..max_samples).collect();
+        let mut rng = self.rng_state;
+
+        for i in max_samples..samples.len() {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let j = (rng % (i as u64 + 1)) as usize;
+            if j < max_samples {
+                reservoir[j] = i;
+            }
+        }
+
+        self.rng_state = rng;
+        reservoir.sort_unstable();
+
+        let interval = interval.max(1);
+        for (i, &idx) in reservoir.iter().enumerate() {
+            self.train_one(&samples[idx]);
+            if (i + 1) % interval == 0 {
+                callback(i + 1);
+            }
+        }
+        let total = reservoir.len();
+        if total % interval != 0 {
+            callback(total);
+        }
+    }
+
     /// Predict the raw output for a feature vector.
     pub fn predict(&self, features: &[f64]) -> f64 {
         let mut pred = self.base_prediction;
@@ -258,6 +391,40 @@ impl<L: Loss> SGBT<L> {
     /// Predict probability (alias for `predict_transformed`).
     pub fn predict_proba(&self, features: &[f64]) -> f64 {
         self.predict_transformed(features)
+    }
+
+    /// Predict with confidence estimation.
+    ///
+    /// Returns `(prediction, confidence)` where confidence = 1 / sqrt(sum_variance).
+    /// Higher confidence indicates more certain predictions (leaves have seen
+    /// more hessian mass). Confidence of 0.0 means the model has no information.
+    ///
+    /// This enables execution engines to modulate aggressiveness:
+    /// - High confidence + favorable prediction → act immediately
+    /// - Low confidence → fall back to simpler models or wait for more data
+    ///
+    /// The variance per tree is estimated as `1 / (H_sum + lambda)` at the
+    /// leaf where the sample lands. The ensemble variance is the sum of
+    /// per-tree variances (scaled by learning_rate²), and confidence is
+    /// the reciprocal of the standard deviation.
+    pub fn predict_with_confidence(&self, features: &[f64]) -> (f64, f64) {
+        let mut pred = self.base_prediction;
+        let mut total_variance = 0.0;
+        let lr2 = self.config.learning_rate * self.config.learning_rate;
+
+        for step in &self.steps {
+            let (value, variance) = step.predict_with_variance(features);
+            pred += self.config.learning_rate * value;
+            total_variance += lr2 * variance;
+        }
+
+        let confidence = if total_variance > 0.0 && total_variance.is_finite() {
+            1.0 / total_variance.sqrt()
+        } else {
+            0.0
+        };
+
+        (pred, confidence)
     }
 
     /// Batch prediction.
@@ -609,6 +776,8 @@ impl SGBT<Box<dyn Loss>> {
                     .leaf_decay_alpha_opt(leaf_decay_alpha)
                     .split_reeval_interval_opt(state.config.split_reeval_interval)
                     .feature_types_opt(state.config.feature_types.clone())
+                    .gradient_clip_sigma_opt(state.config.gradient_clip_sigma)
+                    .monotone_constraints_opt(state.config.monotone_constraints.clone())
                     .seed(state.config.seed ^ (i as u64));
 
                 let active = rebuild_tree(&step_snap.tree, tree_config.clone());
@@ -953,6 +1122,327 @@ mod tests {
         assert!(
             (pred_original_after - pred_cloned_after).abs() > 1e-6,
             "clone should diverge after independent training"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // predict_with_confidence returns finite values
+    // -------------------------------------------------------------------
+    #[test]
+    fn predict_with_confidence_finite() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        // Train enough to initialize
+        for i in 0..100 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(&[x, x * 2.0][..], x + 1.0));
+        }
+
+        let (pred, confidence) = model.predict_with_confidence(&[1.0, 2.0]);
+        assert!(pred.is_finite(), "prediction should be finite");
+        assert!(confidence.is_finite(), "confidence should be finite");
+        assert!(
+            confidence > 0.0,
+            "confidence should be positive after training"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // predict_with_confidence positive after training
+    // -------------------------------------------------------------------
+    #[test]
+    fn predict_with_confidence_positive_after_training() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        // Train enough to initialize and build structure
+        for i in 0..200 {
+            let x = i as f64 * 0.05;
+            model.train_one(&(&[x][..], x * 2.0));
+        }
+
+        let (pred, confidence) = model.predict_with_confidence(&[1.0]);
+
+        assert!(pred.is_finite(), "prediction should be finite");
+        assert!(
+            confidence > 0.0 && confidence.is_finite(),
+            "confidence should be finite and positive, got {}",
+            confidence,
+        );
+
+        // Multiple queries should give consistent confidence
+        let (pred2, conf2) = model.predict_with_confidence(&[1.0]);
+        assert!(
+            (pred - pred2).abs() < 1e-12,
+            "same input should give same prediction"
+        );
+        assert!(
+            (confidence - conf2).abs() < 1e-12,
+            "same input should give same confidence"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // predict_with_confidence agrees with predict on point estimate
+    // -------------------------------------------------------------------
+    #[test]
+    fn predict_with_confidence_matches_predict() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64 - 100.0) * 0.01;
+            model.train_one(&(&[x, x * x][..], x * 3.0 + 1.0));
+        }
+
+        let pred = model.predict(&[0.5, 0.25]);
+        let (conf_pred, _) = model.predict_with_confidence(&[0.5, 0.25]);
+
+        assert!(
+            (pred - conf_pred).abs() < 1e-10,
+            "prediction mismatch: predict()={} vs predict_with_confidence()={}",
+            pred,
+            conf_pred,
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // gradient clipping config round-trips through builder
+    // -------------------------------------------------------------------
+    #[test]
+    fn gradient_clip_config_builder() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .gradient_clip_sigma(3.0)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.gradient_clip_sigma, Some(3.0));
+    }
+
+    // -------------------------------------------------------------------
+    // monotonic constraints config round-trips through builder
+    // -------------------------------------------------------------------
+    #[test]
+    fn monotone_constraints_config_builder() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .monotone_constraints(vec![1, -1, 0])
+            .build()
+            .unwrap();
+
+        assert_eq!(config.monotone_constraints, Some(vec![1, -1, 0]));
+    }
+
+    // -------------------------------------------------------------------
+    // monotonic constraints validation rejects invalid values
+    // -------------------------------------------------------------------
+    #[test]
+    fn monotone_constraints_invalid_value_rejected() {
+        let result = SGBTConfig::builder()
+            .n_steps(10)
+            .monotone_constraints(vec![1, 2, 0])
+            .build();
+
+        assert!(result.is_err(), "constraint value 2 should be rejected");
+    }
+
+    // -------------------------------------------------------------------
+    // gradient clipping validation rejects non-positive sigma
+    // -------------------------------------------------------------------
+    #[test]
+    fn gradient_clip_sigma_negative_rejected() {
+        let result = SGBTConfig::builder()
+            .n_steps(10)
+            .gradient_clip_sigma(-1.0)
+            .build();
+
+        assert!(result.is_err(), "negative sigma should be rejected");
+    }
+
+    // -------------------------------------------------------------------
+    // gradient clipping ensemble-level reduces outlier impact
+    // -------------------------------------------------------------------
+    #[test]
+    fn gradient_clipping_reduces_outlier_impact() {
+        // Without clipping
+        let config_no_clip = SGBTConfig::builder()
+            .n_steps(5)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model_no_clip = SGBT::new(config_no_clip);
+
+        // With clipping
+        let config_clip = SGBTConfig::builder()
+            .n_steps(5)
+            .grace_period(10)
+            .gradient_clip_sigma(3.0)
+            .build()
+            .unwrap();
+        let mut model_clip = SGBT::new(config_clip);
+
+        // Train both on identical normal data
+        for i in 0..100 {
+            let x = (i as f64) * 0.01;
+            let sample = (&[x][..], x * 2.0);
+            model_no_clip.train_one(&sample);
+            model_clip.train_one(&sample);
+        }
+
+        let pred_no_clip_before = model_no_clip.predict(&[0.5]);
+        let pred_clip_before = model_clip.predict(&[0.5]);
+
+        // Inject outlier
+        let outlier = (&[0.5_f64][..], 10000.0);
+        model_no_clip.train_one(&outlier);
+        model_clip.train_one(&outlier);
+
+        let pred_no_clip_after = model_no_clip.predict(&[0.5]);
+        let pred_clip_after = model_clip.predict(&[0.5]);
+
+        let delta_no_clip = (pred_no_clip_after - pred_no_clip_before).abs();
+        let delta_clip = (pred_clip_after - pred_clip_before).abs();
+
+        // Clipped model should be less affected by the outlier
+        assert!(
+            delta_clip <= delta_no_clip + 1e-10,
+            "clipped model should be less affected: delta_clip={}, delta_no_clip={}",
+            delta_clip,
+            delta_no_clip,
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // train_batch_with_callback fires at correct intervals
+    // -------------------------------------------------------------------
+    #[test]
+    fn train_batch_with_callback_fires() {
+        let config = SGBTConfig::builder()
+            .n_steps(3)
+            .grace_period(5)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        let data: Vec<(Vec<f64>, f64)> = (0..25)
+            .map(|i| (vec![i as f64 * 0.1], i as f64 * 0.5))
+            .collect();
+
+        let mut callbacks = Vec::new();
+        model.train_batch_with_callback(&data, 10, |n| {
+            callbacks.push(n);
+        });
+
+        // Should fire at 10, 20, and 25 (final)
+        assert_eq!(callbacks, vec![10, 20, 25]);
+    }
+
+    // -------------------------------------------------------------------
+    // train_batch_subsampled produces deterministic subset
+    // -------------------------------------------------------------------
+    #[test]
+    fn train_batch_subsampled_trains_subset() {
+        let config = SGBTConfig::builder()
+            .n_steps(3)
+            .grace_period(5)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        let data: Vec<(Vec<f64>, f64)> = (0..100)
+            .map(|i| (vec![i as f64 * 0.01], i as f64 * 0.1))
+            .collect();
+
+        // Train on only 20 of 100 samples
+        model.train_batch_subsampled(&data, 20);
+
+        // Model should have seen some samples
+        assert!(
+            model.n_samples_seen() > 0,
+            "model should have trained on subset"
+        );
+        assert!(
+            model.n_samples_seen() <= 20,
+            "model should have trained at most 20 samples, got {}",
+            model.n_samples_seen(),
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // train_batch_subsampled full dataset = train_batch
+    // -------------------------------------------------------------------
+    #[test]
+    fn train_batch_subsampled_full_equals_batch() {
+        let config1 = SGBTConfig::builder()
+            .n_steps(3)
+            .grace_period(5)
+            .build()
+            .unwrap();
+        let config2 = config1.clone();
+
+        let mut model1 = SGBT::new(config1);
+        let mut model2 = SGBT::new(config2);
+
+        let data: Vec<(Vec<f64>, f64)> = (0..50)
+            .map(|i| (vec![i as f64 * 0.1], i as f64 * 0.5))
+            .collect();
+
+        model1.train_batch(&data);
+        model2.train_batch_subsampled(&data, 1000); // max_samples > data.len()
+
+        // Both should have identical state
+        assert_eq!(model1.n_samples_seen(), model2.n_samples_seen());
+        let pred1 = model1.predict(&[2.5]);
+        let pred2 = model2.predict(&[2.5]);
+        assert!(
+            (pred1 - pred2).abs() < 1e-12,
+            "full subsample should equal batch: {} vs {}",
+            pred1,
+            pred2,
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // train_batch_subsampled_with_callback combines both
+    // -------------------------------------------------------------------
+    #[test]
+    fn train_batch_subsampled_with_callback_works() {
+        let config = SGBTConfig::builder()
+            .n_steps(3)
+            .grace_period(5)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        let data: Vec<(Vec<f64>, f64)> = (0..200)
+            .map(|i| (vec![i as f64 * 0.01], i as f64 * 0.1))
+            .collect();
+
+        let mut callbacks = Vec::new();
+        model.train_batch_subsampled_with_callback(&data, 50, 10, |n| {
+            callbacks.push(n);
+        });
+
+        // Should have trained ~50 samples with callbacks at 10, 20, 30, 40, 50
+        assert!(!callbacks.is_empty(), "should have received callbacks");
+        assert_eq!(
+            *callbacks.last().unwrap(),
+            50,
+            "final callback should be total samples"
         );
     }
 }

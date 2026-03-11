@@ -76,6 +76,48 @@ struct LeafState {
 
     /// Sample count at last split re-evaluation (for EFDT-inspired re-eval).
     last_reeval_count: u64,
+
+    /// EWMA gradient mean for gradient clipping (Welford online algorithm).
+    clip_grad_mean: f64,
+
+    /// EWMA gradient M2 accumulator (Welford) for variance estimation.
+    clip_grad_m2: f64,
+
+    /// Number of gradients observed for clipping statistics.
+    clip_grad_count: u64,
+}
+
+/// Clip a gradient using Welford online stats tracked per leaf.
+///
+/// Updates running mean/variance, then clamps the gradient to `mean ± sigma * std_dev`.
+/// Returns the (possibly clamped) gradient. During warmup (< 10 samples), no clipping
+/// is applied to let the statistics stabilize.
+#[inline]
+fn clip_gradient(state: &mut LeafState, gradient: f64, sigma: f64) -> f64 {
+    state.clip_grad_count += 1;
+    let n = state.clip_grad_count as f64;
+
+    // Welford online update
+    let delta = gradient - state.clip_grad_mean;
+    state.clip_grad_mean += delta / n;
+    let delta2 = gradient - state.clip_grad_mean;
+    state.clip_grad_m2 += delta * delta2;
+
+    // No clipping during warmup
+    if state.clip_grad_count < 10 {
+        return gradient;
+    }
+
+    let variance = state.clip_grad_m2 / (n - 1.0);
+    let std_dev = variance.sqrt();
+
+    if std_dev < 1e-15 {
+        return gradient; // All gradients identical — no clipping needed
+    }
+
+    let lo = state.clip_grad_mean - sigma * std_dev;
+    let hi = state.clip_grad_mean + sigma * std_dev;
+    gradient.clamp(lo, hi)
 }
 
 /// Create binners according to feature types.
@@ -109,6 +151,9 @@ impl LeafState {
             grad_sum: 0.0,
             hess_sum: 0.0,
             last_reeval_count: 0,
+            clip_grad_mean: 0.0,
+            clip_grad_m2: 0.0,
+            clip_grad_count: 0,
         }
     }
 
@@ -136,6 +181,9 @@ impl LeafState {
             grad_sum,
             hess_sum,
             last_reeval_count: 0,
+            clip_grad_mean: 0.0,
+            clip_grad_m2: 0.0,
+            clip_grad_count: 0,
         }
     }
 }
@@ -213,6 +261,9 @@ impl HoeffdingTree {
             grad_sum: 0.0,
             hess_sum: 0.0,
             last_reeval_count: 0,
+            clip_grad_mean: 0.0,
+            clip_grad_m2: 0.0,
+            clip_grad_count: 0,
         });
 
         let seed = config.seed;
@@ -555,6 +606,35 @@ impl HoeffdingTree {
             }
         }
 
+        // Filter out candidates that violate monotonic constraints.
+        if let Some(ref mc) = self.config.monotone_constraints {
+            candidates.retain(|(feat_idx, candidate, _)| {
+                if *feat_idx >= mc.len() {
+                    return true; // No constraint for this feature
+                }
+                let constraint = mc[*feat_idx];
+                if constraint == 0 {
+                    return true; // Unconstrained
+                }
+
+                let left_val =
+                    leaf_weight(candidate.left_grad, candidate.left_hess, self.config.lambda);
+                let right_val = leaf_weight(
+                    candidate.right_grad,
+                    candidate.right_hess,
+                    self.config.lambda,
+                );
+
+                if constraint > 0 {
+                    // Non-decreasing: left_value <= right_value
+                    left_val <= right_val
+                } else {
+                    // Non-increasing: left_value >= right_value
+                    left_val >= right_val
+                }
+            });
+        }
+
         if candidates.is_empty() {
             return false;
         }
@@ -739,6 +819,9 @@ impl HoeffdingTree {
                     grad_sum: 0.0,
                     hess_sum: 0.0,
                     last_reeval_count: 0,
+                    clip_grad_mean: 0.0,
+                    clip_grad_m2: 0.0,
+                    clip_grad_count: 0,
                 };
 
                 let right_state = LeafState {
@@ -748,6 +831,9 @@ impl HoeffdingTree {
                     grad_sum: 0.0,
                     hess_sum: 0.0,
                     last_reeval_count: 0,
+                    clip_grad_mean: 0.0,
+                    clip_grad_m2: 0.0,
+                    clip_grad_count: 0,
                 };
 
                 self.leaf_states[left_id.0 as usize] = Some(left_state);
@@ -823,6 +909,13 @@ impl StreamingTree for HoeffdingTree {
             ));
         }
         let state = self.leaf_states[idx].as_mut().unwrap();
+
+        // Apply per-leaf gradient clipping if enabled.
+        let gradient = if let Some(sigma) = self.config.gradient_clip_sigma {
+            clip_gradient(state, gradient, sigma)
+        } else {
+            gradient
+        };
 
         // If bins are not yet ready, check if we've reached the grace period.
         if !state.bins_ready {
@@ -960,6 +1053,26 @@ impl StreamingTree for HoeffdingTree {
 
     fn split_gains(&self) -> &[f64] {
         &self.split_gains
+    }
+
+    fn predict_with_variance(&self, features: &[f64]) -> (f64, f64) {
+        let leaf_id = self.route_to_leaf(features);
+        if let Some(state) = self
+            .leaf_states
+            .get(leaf_id.0 as usize)
+            .and_then(|o| o.as_ref())
+        {
+            let value = if state.hess_sum != 0.0 {
+                leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda)
+            } else {
+                self.arena.leaf_value[leaf_id.0 as usize]
+            };
+            // Variance of the leaf weight estimate = 1 / (H_sum + lambda)
+            let variance = 1.0 / (state.hess_sum + self.config.lambda);
+            (value, variance)
+        } else {
+            (0.0, f64::INFINITY)
+        }
     }
 }
 
@@ -1435,6 +1548,182 @@ mod tests {
             leaves <= 4,
             "without re-eval, max_depth=2 should cap at 4 leaves, got {}",
             leaves,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Gradient clipping clamps outliers
+    // -----------------------------------------------------------------------
+    #[test]
+    fn gradient_clipping_clamps_outliers() {
+        let config = TreeConfig::new()
+            .grace_period(20)
+            .max_depth(2)
+            .n_bins(16)
+            .gradient_clip_sigma(2.0);
+
+        let mut tree = HoeffdingTree::new(config);
+
+        // Train 50 normal samples
+        let mut rng_state = 42u64;
+        for _ in 0..50 {
+            let x = test_rand_f64(&mut rng_state) * 2.0;
+            let grad = x * 0.1; // small gradients ~[0, 0.2]
+            tree.train_one(&[x], grad, 1.0);
+        }
+
+        let pred_before = tree.predict(&[1.0]);
+
+        // Now inject an extreme outlier gradient
+        tree.train_one(&[1.0], 1000.0, 1.0);
+
+        let pred_after = tree.predict(&[1.0]);
+
+        // With clipping at 2-sigma, the outlier should be clamped.
+        // Without clipping, the prediction would jump massively.
+        // The change should be bounded.
+        let delta = (pred_after - pred_before).abs();
+        assert!(
+            delta < 100.0,
+            "gradient clipping should limit impact of outlier, but prediction changed by {}",
+            delta,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: clip_gradient function directly
+    // -----------------------------------------------------------------------
+    #[test]
+    fn clip_gradient_welford_tracks_stats() {
+        let mut state = LeafState::new(1);
+
+        // Feed 20 varied gradients to build up statistics
+        for i in 0..20 {
+            let grad = 1.0 + (i as f64) * 0.1; // range [1.0, 2.9]
+            let clipped = clip_gradient(&mut state, grad, 3.0);
+            // 3-sigma is very wide, so these should not be clipped
+            assert!(
+                (clipped - grad).abs() < 1e-10,
+                "normal gradients should not be clipped at 3-sigma"
+            );
+        }
+
+        // Now an extreme outlier — mean is ~1.95, std ~0.59, 3-sigma range is ~[0.18, 3.72]
+        let clipped = clip_gradient(&mut state, 100.0, 3.0);
+        assert!(
+            clipped < 100.0,
+            "extreme outlier should be clipped, got {}",
+            clipped,
+        );
+        assert!(
+            clipped > 0.0,
+            "clipped value should be positive, got {}",
+            clipped,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: clip_gradient warmup period
+    // -----------------------------------------------------------------------
+    #[test]
+    fn clip_gradient_warmup_no_clipping() {
+        let mut state = LeafState::new(1);
+
+        // During warmup (< 10 samples), no clipping
+        for i in 0..9 {
+            let val = if i == 8 { 1000.0 } else { 1.0 };
+            let clipped = clip_gradient(&mut state, val, 2.0);
+            assert_eq!(clipped, val, "warmup should not clip");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Monotonic constraints filter invalid splits
+    // -----------------------------------------------------------------------
+    #[test]
+    fn monotonic_constraint_splits_respected() {
+        // Train with +1 constraint on feature 0 (increasing).
+        // Use a dataset where feature 0 has a negative relationship.
+        let config = TreeConfig::new()
+            .grace_period(30)
+            .max_depth(4)
+            .n_bins(16)
+            .monotone_constraints(vec![1]); // feature 0 must be increasing
+
+        let mut tree = HoeffdingTree::new(config);
+
+        let mut rng_state = 42u64;
+        for _ in 0..500 {
+            let x = test_rand_f64(&mut rng_state) * 10.0;
+            // Negative relationship: high x → low y → positive gradient
+            let grad = x * 0.5 - 2.5;
+            tree.train_one(&[x], grad, 1.0);
+        }
+
+        // Any split that occurred should satisfy: left_value <= right_value
+        // for the monotone +1 constraint. Verify prediction is non-decreasing.
+        let pred_low = tree.predict(&[0.0]);
+        let pred_mid = tree.predict(&[5.0]);
+        let pred_high = tree.predict(&[10.0]);
+
+        // Due to constraint, prediction must be non-decreasing
+        assert!(
+            pred_low <= pred_mid + 1e-10 && pred_mid <= pred_high + 1e-10,
+            "monotonic +1 violated: pred(0)={}, pred(5)={}, pred(10)={}",
+            pred_low,
+            pred_mid,
+            pred_high,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: predict_with_variance returns finite values
+    // -----------------------------------------------------------------------
+    #[test]
+    fn predict_with_variance_finite() {
+        let config = TreeConfig::new().grace_period(10);
+        let mut tree = HoeffdingTree::new(config);
+
+        // Train a few samples
+        for i in 0..30 {
+            let x = i as f64 * 0.1;
+            tree.train_one(&[x], x - 1.0, 1.0);
+        }
+
+        let (value, variance) = tree.predict_with_variance(&[1.0]);
+        assert!(value.is_finite(), "value should be finite");
+        assert!(variance.is_finite(), "variance should be finite");
+        assert!(variance > 0.0, "variance should be positive");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: predict_with_variance decreases with more data
+    // -----------------------------------------------------------------------
+    #[test]
+    fn predict_with_variance_decreases_with_data() {
+        let config = TreeConfig::new().grace_period(10);
+        let mut tree = HoeffdingTree::new(config);
+
+        // Train 20 samples, check variance
+        for i in 0..20 {
+            tree.train_one(&[1.0], 0.5, 1.0);
+            if i == 0 {
+                continue;
+            }
+        }
+        let (_, var_20) = tree.predict_with_variance(&[1.0]);
+
+        // Train 200 more samples
+        for _ in 0..200 {
+            tree.train_one(&[1.0], 0.5, 1.0);
+        }
+        let (_, var_220) = tree.predict_with_variance(&[1.0]);
+
+        assert!(
+            var_220 < var_20,
+            "variance should decrease with more data: var@20={} vs var@220={}",
+            var_20,
+            var_220,
         );
     }
 }

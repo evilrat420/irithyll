@@ -222,6 +222,36 @@ pub struct SGBTConfig {
     /// `None` (default) treats all features as continuous.
     #[serde(default)]
     pub feature_types: Option<Vec<FeatureType>>,
+
+    /// Gradient clipping threshold in standard deviations per leaf.
+    ///
+    /// When enabled, each leaf tracks an EWMA of gradient mean and variance.
+    /// Incoming gradients that exceed `mean ± sigma * gradient_clip_sigma` are
+    /// clamped to the boundary. This prevents outlier samples from corrupting
+    /// leaf statistics, which is critical in streaming settings where sudden
+    /// label floods can destabilize the model.
+    ///
+    /// Typical value: 3.0 (3-sigma clipping).
+    /// `None` (default) disables gradient clipping.
+    #[serde(default)]
+    pub gradient_clip_sigma: Option<f64>,
+
+    /// Per-feature monotonic constraints.
+    ///
+    /// Each element specifies the monotonic relationship between a feature and
+    /// the prediction:
+    /// - `+1`: prediction must be non-decreasing as feature value increases.
+    /// - `-1`: prediction must be non-increasing as feature value increases.
+    /// - `0`: no constraint (unconstrained).
+    ///
+    /// During split evaluation, candidate splits that would violate monotonicity
+    /// (left child value > right child value for +1 constraints, or vice versa)
+    /// are rejected.
+    ///
+    /// Length must match the number of features in training data.
+    /// `None` (default) means no monotonic constraints.
+    #[serde(default)]
+    pub monotone_constraints: Option<Vec<i8>>,
 }
 
 impl Default for SGBTConfig {
@@ -245,6 +275,8 @@ impl Default for SGBTConfig {
             split_reeval_interval: None,
             feature_names: None,
             feature_types: None,
+            gradient_clip_sigma: None,
+            monotone_constraints: None,
         }
     }
 }
@@ -411,6 +443,27 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Set per-leaf gradient clipping threshold (in standard deviations).
+    ///
+    /// Each leaf tracks an EWMA of gradient mean and variance. Gradients
+    /// exceeding `mean ± sigma * n` are clamped. Prevents outlier labels
+    /// from corrupting streaming model stability.
+    ///
+    /// Typical value: 3.0 (3-sigma clipping).
+    pub fn gradient_clip_sigma(mut self, sigma: f64) -> Self {
+        self.config.gradient_clip_sigma = Some(sigma);
+        self
+    }
+
+    /// Set per-feature monotonic constraints.
+    ///
+    /// `+1` = non-decreasing, `-1` = non-increasing, `0` = unconstrained.
+    /// Candidate splits violating monotonicity are rejected during tree growth.
+    pub fn monotone_constraints(mut self, constraints: Vec<i8>) -> Self {
+        self.config.monotone_constraints = Some(constraints);
+        self
+    }
+
     /// Validate and build the configuration.
     ///
     /// # Errors
@@ -523,6 +576,28 @@ impl SGBTConfigBuilder {
                             types.len(),
                             names.len()
                         ),
+                    )
+                    .into());
+                }
+            }
+        }
+
+        // -- Gradient clipping --
+        if let Some(sigma) = c.gradient_clip_sigma {
+            if sigma <= 0.0 {
+                return Err(
+                    ConfigError::out_of_range("gradient_clip_sigma", "must be > 0", sigma).into(),
+                );
+            }
+        }
+
+        // -- Monotonic constraints --
+        if let Some(ref mc) = c.monotone_constraints {
+            for (i, &v) in mc.iter().enumerate() {
+                if v != -1 && v != 0 && v != 1 {
+                    return Err(ConfigError::invalid(
+                        "monotone_constraints",
+                        format!("feature {}: must be -1, 0, or +1, got {}", i, v),
                     )
                     .into());
                 }

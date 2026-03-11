@@ -86,6 +86,19 @@ pub struct TreeConfig {
     /// Fisher optimal binary partitioning. `None` (default) treats all features
     /// as continuous.
     pub feature_types: Option<Vec<FeatureType>>,
+
+    /// Per-leaf gradient clipping threshold in standard deviations.
+    ///
+    /// When `Some(sigma)`, leaf-level EWMA gradient statistics are tracked and
+    /// incoming gradients are clamped to `mean ± sigma * std_dev`.
+    /// `None` (default) disables clipping.
+    pub gradient_clip_sigma: Option<f64>,
+
+    /// Per-feature monotonic constraints: +1 = increasing, -1 = decreasing, 0 = free.
+    ///
+    /// Candidate splits violating monotonicity are rejected.
+    /// `None` (default) means no constraints.
+    pub monotone_constraints: Option<Vec<i8>>,
 }
 
 impl Default for TreeConfig {
@@ -102,6 +115,8 @@ impl Default for TreeConfig {
             leaf_decay_alpha: None,
             split_reeval_interval: None,
             feature_types: None,
+            gradient_clip_sigma: None,
+            monotone_constraints: None,
         }
     }
 }
@@ -210,6 +225,34 @@ impl TreeConfig {
     #[inline]
     pub fn feature_types_opt(mut self, types: Option<Vec<FeatureType>>) -> Self {
         self.feature_types = types;
+        self
+    }
+
+    /// Set the gradient clipping threshold in standard deviations.
+    #[inline]
+    pub fn gradient_clip_sigma(mut self, sigma: f64) -> Self {
+        self.gradient_clip_sigma = Some(sigma);
+        self
+    }
+
+    /// Optionally set the gradient clipping threshold.
+    #[inline]
+    pub fn gradient_clip_sigma_opt(mut self, sigma: Option<f64>) -> Self {
+        self.gradient_clip_sigma = sigma;
+        self
+    }
+
+    /// Set per-feature monotonic constraints.
+    #[inline]
+    pub fn monotone_constraints(mut self, constraints: Vec<i8>) -> Self {
+        self.monotone_constraints = Some(constraints);
+        self
+    }
+
+    /// Optionally set per-feature monotonic constraints.
+    #[inline]
+    pub fn monotone_constraints_opt(mut self, constraints: Option<Vec<i8>>) -> Self {
+        self.monotone_constraints = constraints;
         self
     }
 }

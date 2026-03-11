@@ -193,6 +193,14 @@ impl TreeSlot {
         self.active.predict(features)
     }
 
+    /// Predict with variance for confidence estimation.
+    ///
+    /// Returns `(leaf_value, variance)` where variance = 1 / (H_sum + lambda).
+    #[inline]
+    pub fn predict_with_variance(&self, features: &[f64]) -> (f64, f64) {
+        self.active.predict_with_variance(features)
+    }
+
     /// Number of leaves in the active tree.
     #[inline]
     pub fn n_leaves(&self) -> usize {

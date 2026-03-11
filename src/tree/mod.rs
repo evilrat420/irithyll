@@ -37,4 +37,14 @@ pub trait StreamingTree: Send + Sync {
     fn split_gains(&self) -> &[f64] {
         &[]
     }
+
+    /// Predict the leaf value and its variance for confidence estimation.
+    ///
+    /// Returns `(leaf_value, variance)` where variance = 1 / (H_sum + lambda).
+    /// A smaller variance indicates higher confidence in the leaf prediction.
+    ///
+    /// Default implementation returns infinite variance (no confidence info).
+    fn predict_with_variance(&self, features: &[f64]) -> (f64, f64) {
+        (self.predict(features), f64::INFINITY)
+    }
 }
