@@ -80,6 +80,29 @@ impl FeatureHistogram {
         self.edges.n_bins()
     }
 
+    /// Accumulate with forward decay: decay all existing bins by `alpha`,
+    /// then add the new sample.
+    ///
+    /// This implements the forward decay scheme (Cormode et al. 2009): older
+    /// observations are exponentially down-weighted so that recent data dominates
+    /// split decisions. The `counts` array is NOT decayed — it tracks the raw
+    /// sample count for the Hoeffding bound computation.
+    ///
+    /// Cost: O(n_bins) per call due to the full-array decay pass.
+    #[inline]
+    pub fn accumulate_with_decay(&mut self, value: f64, gradient: f64, hessian: f64, alpha: f64) {
+        // Decay all bins.
+        for i in 0..self.grad_sums.len() {
+            self.grad_sums[i] *= alpha;
+            self.hess_sums[i] *= alpha;
+        }
+        // Then accumulate the new sample.
+        let bin = self.edges.find_bin(value);
+        self.grad_sums[bin] += gradient;
+        self.hess_sums[bin] += hessian;
+        self.counts[bin] += 1;
+    }
+
     /// Reset all accumulators to zero, preserving the bin edges.
     pub fn reset(&mut self) {
         self.grad_sums.fill(0.0);
@@ -175,6 +198,22 @@ impl LeafHistograms {
         );
         for (hist, &value) in self.histograms.iter_mut().zip(features.iter()) {
             hist.accumulate(value, gradient, hessian);
+        }
+    }
+
+    /// Accumulate a sample with forward decay across all feature histograms.
+    ///
+    /// Each histogram is decayed by `alpha` before accumulating the new sample.
+    pub fn accumulate_with_decay(&mut self, features: &[f64], gradient: f64, hessian: f64, alpha: f64) {
+        debug_assert_eq!(
+            features.len(),
+            self.histograms.len(),
+            "feature count mismatch: got {} features but have {} histograms",
+            features.len(),
+            self.histograms.len(),
+        );
+        for (hist, &value) in self.histograms.iter_mut().zip(features.iter()) {
+            hist.accumulate_with_decay(value, gradient, hessian, alpha);
         }
     }
 
@@ -396,5 +435,31 @@ mod tests {
         assert_eq!(h.counts, vec![2]);
         assert!((h.total_gradient() - 3.0).abs() < 1e-12);
         assert!((h.total_hessian() - 0.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn accumulate_with_decay_recent_dominates() {
+        // 3 bins: edges at [3.0, 7.0] => bins [<3, 3-7, >7]
+        let edges = BinEdges { edges: vec![3.0, 7.0] };
+        let mut h = FeatureHistogram::new(edges);
+        let alpha = 0.9;
+
+        // 100 samples in bin 0 (value=1.0)
+        for _ in 0..100 {
+            h.accumulate_with_decay(1.0, 1.0, 1.0, alpha);
+        }
+
+        // 50 samples in bin 2 (value=8.0) — enough for recent to dominate
+        for _ in 0..50 {
+            h.accumulate_with_decay(8.0, 1.0, 1.0, alpha);
+        }
+
+        // With alpha=0.9, old bin 0 decays rapidly while bin 2 accumulates.
+        // After 50 decay steps, bin 0 ≈ 10 * 0.9^50 ≈ 0.05, bin 2 ≈ 10 * (1 - 0.9^50) / (1 - 0.9) ≈ 9.95
+        assert!(
+            h.grad_sums[2] > h.grad_sums[0],
+            "recent bin should dominate: bin2={} > bin0={}",
+            h.grad_sums[2], h.grad_sums[0],
+        );
     }
 }

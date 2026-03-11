@@ -39,6 +39,8 @@ pub struct TreeSlot {
     detector: Box<dyn DriftDetector>,
     /// Configuration for creating new trees (shared across replacements).
     tree_config: TreeConfig,
+    /// Maximum samples before proactive replacement. `None` = disabled.
+    max_tree_samples: Option<u64>,
 }
 
 impl fmt::Debug for TreeSlot {
@@ -57,12 +59,17 @@ impl TreeSlot {
     ///
     /// The active tree starts as a single-leaf tree (prediction = 0.0).
     /// No alternate tree is created until a Warning signal is received.
-    pub fn new(tree_config: TreeConfig, detector: Box<dyn DriftDetector>) -> Self {
+    pub fn new(
+        tree_config: TreeConfig,
+        detector: Box<dyn DriftDetector>,
+        max_tree_samples: Option<u64>,
+    ) -> Self {
         Self {
             active: HoeffdingTree::new(tree_config.clone()),
             alternate: None,
             detector,
             tree_config,
+            max_tree_samples,
         }
     }
 
@@ -75,12 +82,14 @@ impl TreeSlot {
         alternate: Option<HoeffdingTree>,
         tree_config: TreeConfig,
         detector: Box<dyn DriftDetector>,
+        max_tree_samples: Option<u64>,
     ) -> Self {
         Self {
             active,
             alternate,
             detector,
             tree_config,
+            max_tree_samples,
         }
     }
 
@@ -145,6 +154,20 @@ impl TreeSlot {
                 // Always clear the alternate slot after replacement.
                 self.alternate = None;
                 // Reset the drift detector to monitor the new tree cleanly.
+                self.detector = self.detector.clone_fresh();
+            }
+        }
+
+        // 6. Proactive time-based replacement.
+        //    If the active tree has processed too many samples, replace it
+        //    regardless of drift signal. This prevents stale structure from
+        //    accumulating in slowly-drifting streams.
+        if let Some(max_samples) = self.max_tree_samples {
+            if self.active.n_samples_seen() >= max_samples {
+                self.active = self.alternate.take().unwrap_or_else(|| {
+                    HoeffdingTree::new(self.tree_config.clone())
+                });
+                self.alternate = None;
                 self.detector = self.detector.clone_fresh();
             }
         }
@@ -239,7 +262,7 @@ mod tests {
     // -------------------------------------------------------------------
     #[test]
     fn new_slot_predicts_zero() {
-        let slot = TreeSlot::new(test_tree_config(), test_detector());
+        let slot = TreeSlot::new(test_tree_config(), test_detector(), None);
 
         // A fresh tree with no training data should predict 0.0.
         let pred = slot.predict(&[1.0, 2.0, 3.0]);
@@ -255,7 +278,7 @@ mod tests {
     // -------------------------------------------------------------------
     #[test]
     fn train_and_predict_returns_prediction() {
-        let mut slot = TreeSlot::new(test_tree_config(), test_detector());
+        let mut slot = TreeSlot::new(test_tree_config(), test_detector(), None);
 
         let features = [1.0, 2.0, 3.0];
         let pred = slot.train_and_predict(&features, -0.5, 1.0);
@@ -278,7 +301,7 @@ mod tests {
     // -------------------------------------------------------------------
     #[test]
     fn stable_stream_no_alternate() {
-        let mut slot = TreeSlot::new(test_tree_config(), test_detector());
+        let mut slot = TreeSlot::new(test_tree_config(), test_detector(), None);
         let features = [1.0, 2.0, 3.0];
 
         // Feed many stable samples with small, consistent gradients.
@@ -299,7 +322,7 @@ mod tests {
     // -------------------------------------------------------------------
     #[test]
     fn reset_returns_to_fresh_state() {
-        let mut slot = TreeSlot::new(test_tree_config(), test_detector());
+        let mut slot = TreeSlot::new(test_tree_config(), test_detector(), None);
         let features = [1.0, 2.0, 3.0];
 
         // Train several samples.
@@ -329,7 +352,7 @@ mod tests {
     // -------------------------------------------------------------------
     #[test]
     fn predict_without_training() {
-        let slot = TreeSlot::new(test_tree_config(), test_detector());
+        let slot = TreeSlot::new(test_tree_config(), test_detector(), None);
 
         // Multiple predict calls on a fresh slot should all return 0.0.
         for i in 0..10 {
@@ -351,7 +374,7 @@ mod tests {
     fn drift_replaces_active_tree() {
         // Use a very sensitive detector: small lambda triggers drift quickly.
         let sensitive_detector = Box::new(PageHinkleyTest::with_params(0.005, 5.0));
-        let mut slot = TreeSlot::new(test_tree_config(), sensitive_detector);
+        let mut slot = TreeSlot::new(test_tree_config(), sensitive_detector, None);
         let features = [1.0, 2.0, 3.0];
 
         // Phase 1: stable training with small gradients.
@@ -383,7 +406,7 @@ mod tests {
     // -------------------------------------------------------------------
     #[test]
     fn n_leaves_reflects_active_tree() {
-        let slot = TreeSlot::new(test_tree_config(), test_detector());
+        let slot = TreeSlot::new(test_tree_config(), test_detector(), None);
         assert_eq!(
             slot.n_leaves(),
             1,
@@ -396,11 +419,52 @@ mod tests {
     // -------------------------------------------------------------------
     #[test]
     fn debug_format_does_not_panic() {
-        let slot = TreeSlot::new(test_tree_config(), test_detector());
+        let slot = TreeSlot::new(test_tree_config(), test_detector(), None);
         let debug_str = format!("{:?}", slot);
         assert!(
             debug_str.contains("TreeSlot"),
             "debug output should contain 'TreeSlot'",
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Test 9: Time-based replacement triggers after max_tree_samples.
+    // -------------------------------------------------------------------
+    #[test]
+    fn time_based_replacement_triggers() {
+        let mut slot = TreeSlot::new(test_tree_config(), test_detector(), Some(200));
+        let features = [1.0, 2.0, 3.0];
+
+        // Train up to the limit.
+        for _ in 0..200 {
+            slot.train_and_predict(&features, -0.1, 1.0);
+        }
+
+        // At exactly 200 samples, the tree should have been replaced.
+        // The new tree has 0 samples seen (or the most recently trained sample).
+        assert!(
+            slot.n_samples_seen() < 200,
+            "after 200 samples with max_tree_samples=200, tree should be replaced (got {} samples)",
+            slot.n_samples_seen(),
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Test 10: Time-based replacement disabled (None) never triggers.
+    // -------------------------------------------------------------------
+    #[test]
+    fn time_based_replacement_disabled() {
+        let mut slot = TreeSlot::new(test_tree_config(), test_detector(), None);
+        let features = [1.0, 2.0, 3.0];
+
+        for _ in 0..500 {
+            slot.train_and_predict(&features, -0.1, 1.0);
+        }
+
+        assert_eq!(
+            slot.n_samples_seen(),
+            500,
+            "without max_tree_samples, tree should never be proactively replaced",
         );
     }
 }

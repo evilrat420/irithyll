@@ -71,6 +71,10 @@ impl fmt::Debug for SGBT {
 impl SGBT {
     /// Create a new SGBT ensemble with squared loss (regression).
     pub fn new(config: SGBTConfig) -> Self {
+        let leaf_decay_alpha = config.leaf_half_life.map(|hl| {
+            (-(2.0_f64.ln()) / hl as f64).exp()
+        });
+
         let tree_config = TreeConfig::new()
             .max_depth(config.max_depth)
             .n_bins(config.n_bins)
@@ -78,14 +82,18 @@ impl SGBT {
             .gamma(config.gamma)
             .grace_period(config.grace_period)
             .delta(config.delta)
-            .feature_subsample_rate(config.feature_subsample_rate);
+            .feature_subsample_rate(config.feature_subsample_rate)
+            .leaf_decay_alpha_opt(leaf_decay_alpha)
+            .split_reeval_interval_opt(config.split_reeval_interval);
+
+        let max_tree_samples = config.max_tree_samples;
 
         let steps: Vec<BoostingStep> = (0..config.n_steps)
             .map(|i| {
                 let mut tc = tree_config.clone();
                 tc.seed = config.seed ^ (i as u64);
                 let detector = config.drift_detector.create();
-                BoostingStep::new(tc, detector)
+                BoostingStep::new_with_max_samples(tc, detector, max_tree_samples)
             })
             .collect();
 
@@ -399,6 +407,11 @@ impl SGBT {
 
         let loss = state.loss_type.into_loss();
 
+        let leaf_decay_alpha = state.config.leaf_half_life.map(|hl| {
+            (-(2.0_f64.ln()) / hl as f64).exp()
+        });
+        let max_tree_samples = state.config.max_tree_samples;
+
         let steps = state
             .steps
             .iter()
@@ -412,6 +425,8 @@ impl SGBT {
                     .grace_period(state.config.grace_period)
                     .delta(state.config.delta)
                     .feature_subsample_rate(state.config.feature_subsample_rate)
+                    .leaf_decay_alpha_opt(leaf_decay_alpha)
+                    .split_reeval_interval_opt(state.config.split_reeval_interval)
                     .seed(state.config.seed ^ (i as u64));
 
                 let active = rebuild_tree(&step_snap.tree, tree_config.clone());
@@ -421,7 +436,7 @@ impl SGBT {
                     .map(|snap| rebuild_tree(snap, tree_config.clone()));
 
                 let detector = state.config.drift_detector.create();
-                let slot = TreeSlot::from_trees(active, alternate, tree_config, detector);
+                let slot = TreeSlot::from_trees(active, alternate, tree_config, detector, max_tree_samples);
                 BoostingStep::from_slot(slot)
             })
             .collect();
@@ -587,5 +602,80 @@ mod tests {
         let model = SGBT::with_loss(default_config(), Box::new(LogisticLoss));
         let pred = model.predict_transformed(&[1.0, 2.0]);
         assert!((pred - 0.5).abs() < 1e-6, "sigmoid(0) should be 0.5, got {}", pred);
+    }
+
+    #[test]
+    fn ewma_config_propagates_and_trains() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(3)
+            .n_bins(16)
+            .leaf_half_life(50)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 2.0], x * 3.0));
+        }
+
+        let pred = model.predict(&[1.0, 2.0]);
+        assert!(pred.is_finite(), "EWMA-enabled model should produce finite predictions, got {}", pred);
+    }
+
+    #[test]
+    fn max_tree_samples_config_propagates() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(3)
+            .n_bins(16)
+            .max_tree_samples(200)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..500 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 2.0], x * 3.0));
+        }
+
+        let pred = model.predict(&[1.0, 2.0]);
+        assert!(pred.is_finite(), "max_tree_samples model should produce finite predictions, got {}", pred);
+    }
+
+    #[test]
+    fn split_reeval_config_propagates() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(2)
+            .n_bins(16)
+            .split_reeval_interval(50)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        let mut rng: u64 = 12345;
+        for _ in 0..1000 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let x1 = (rng as f64 / u64::MAX as f64) * 10.0 - 5.0;
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let x2 = (rng as f64 / u64::MAX as f64) * 10.0 - 5.0;
+            let target = 2.0 * x1 + 3.0 * x2;
+            model.train_one(&Sample::new(vec![x1, x2], target));
+        }
+
+        let pred = model.predict(&[1.0, 2.0]);
+        assert!(pred.is_finite(), "split re-eval model should produce finite predictions, got {}", pred);
     }
 }

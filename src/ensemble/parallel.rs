@@ -90,6 +90,10 @@ impl fmt::Debug for ParallelSGBT {
 impl ParallelSGBT {
     /// Create a new parallel SGBT ensemble with squared loss (regression).
     pub fn new(config: SGBTConfig) -> Self {
+        let leaf_decay_alpha = config.leaf_half_life.map(|hl| {
+            (-(2.0_f64.ln()) / hl as f64).exp()
+        });
+
         let tree_config = TreeConfig::new()
             .max_depth(config.max_depth)
             .n_bins(config.n_bins)
@@ -97,14 +101,18 @@ impl ParallelSGBT {
             .gamma(config.gamma)
             .grace_period(config.grace_period)
             .delta(config.delta)
-            .feature_subsample_rate(config.feature_subsample_rate);
+            .feature_subsample_rate(config.feature_subsample_rate)
+            .leaf_decay_alpha_opt(leaf_decay_alpha)
+            .split_reeval_interval_opt(config.split_reeval_interval);
+
+        let max_tree_samples = config.max_tree_samples;
 
         let steps: Vec<BoostingStep> = (0..config.n_steps)
             .map(|i| {
                 let mut tc = tree_config.clone();
                 tc.seed = config.seed ^ (i as u64);
                 let detector = config.drift_detector.create();
-                BoostingStep::new(tc, detector)
+                BoostingStep::new_with_max_samples(tc, detector, max_tree_samples)
             })
             .collect();
 

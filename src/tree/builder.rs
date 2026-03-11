@@ -62,6 +62,21 @@ pub struct TreeConfig {
     /// Set by the ensemble orchestrator to ensure deterministic, diverse
     /// behavior across trees (typically `config.seed ^ step_index`).
     pub seed: u64,
+
+    /// Per-sample decay factor for leaf statistics.
+    ///
+    /// Computed from `leaf_half_life` as `exp(-ln(2) / half_life)`.
+    /// When `Some(alpha)`, leaf gradient/hessian sums and histogram bins
+    /// are decayed by `alpha` before each new accumulation.
+    /// `None` (default) means no decay.
+    pub leaf_decay_alpha: Option<f64>,
+
+    /// Re-evaluation interval for max-depth leaves.
+    ///
+    /// When `Some(n)`, leaves at max depth will re-evaluate potential splits
+    /// every `n` samples, allowing the tree to adapt its structure over time.
+    /// `None` (default) disables re-evaluation.
+    pub split_reeval_interval: Option<usize>,
 }
 
 impl Default for TreeConfig {
@@ -75,6 +90,8 @@ impl Default for TreeConfig {
             delta: 1e-7,
             feature_subsample_rate: 1.0,
             seed: 42,
+            leaf_decay_alpha: None,
+            split_reeval_interval: None,
         }
     }
 }
@@ -141,6 +158,34 @@ impl TreeConfig {
     #[inline]
     pub fn seed(mut self, seed: u64) -> Self {
         self.seed = seed;
+        self
+    }
+
+    /// Set the per-sample decay factor for leaf statistics.
+    #[inline]
+    pub fn leaf_decay_alpha(mut self, alpha: f64) -> Self {
+        self.leaf_decay_alpha = Some(alpha);
+        self
+    }
+
+    /// Optionally set the per-sample decay factor for leaf statistics.
+    #[inline]
+    pub fn leaf_decay_alpha_opt(mut self, alpha: Option<f64>) -> Self {
+        self.leaf_decay_alpha = alpha;
+        self
+    }
+
+    /// Set the re-evaluation interval for max-depth leaves.
+    #[inline]
+    pub fn split_reeval_interval(mut self, interval: usize) -> Self {
+        self.split_reeval_interval = Some(interval);
+        self
+    }
+
+    /// Optionally set the re-evaluation interval for max-depth leaves.
+    #[inline]
+    pub fn split_reeval_interval_opt(mut self, interval: Option<usize>) -> Self {
+        self.split_reeval_interval = interval;
         self
     }
 }

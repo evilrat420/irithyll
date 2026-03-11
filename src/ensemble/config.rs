@@ -98,6 +98,9 @@ impl DriftDetectorType {
 /// | `variant`                | Standard             |
 /// | `seed`                   | 0xDEAD_BEEF_CAFE_4242 |
 /// | `initial_target_count`   | 50                   |
+/// | `leaf_half_life`         | None (disabled)      |
+/// | `max_tree_samples`       | None (disabled)      |
+/// | `split_reeval_interval`  | None (disabled)      |
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SGBTConfig {
     /// Number of boosting steps (trees in the ensemble). Default 100.
@@ -130,6 +133,38 @@ pub struct SGBTConfig {
     /// Number of initial targets to collect before computing the base prediction.
     /// Default: 50.
     pub initial_target_count: usize,
+
+    /// Half-life for exponential leaf decay (in samples per leaf).
+    ///
+    /// After `leaf_half_life` samples, a leaf's accumulated gradient/hessian
+    /// statistics have half the weight of the most recent sample. This causes
+    /// the model to continuously adapt to changing data distributions rather
+    /// than freezing on early observations.
+    ///
+    /// `None` (default) disables decay — traditional monotonic accumulation.
+    #[serde(default)]
+    pub leaf_half_life: Option<usize>,
+
+    /// Maximum samples a single tree processes before proactive replacement.
+    ///
+    /// After this many samples, the tree is replaced with a fresh one regardless
+    /// of drift detector state. Prevents stale tree structure from persisting
+    /// when the drift detector is not sensitive enough.
+    ///
+    /// `None` (default) disables time-based replacement.
+    #[serde(default)]
+    pub max_tree_samples: Option<u64>,
+
+    /// Interval (in samples per leaf) at which max-depth leaves re-evaluate
+    /// whether a split would improve them.
+    ///
+    /// Inspired by EFDT (Manapragada et al. 2018). When a leaf has accumulated
+    /// `split_reeval_interval` samples since its last evaluation and has reached
+    /// max depth, it re-evaluates whether a split should be performed.
+    ///
+    /// `None` (default) disables re-evaluation — max-depth leaves are permanent.
+    #[serde(default)]
+    pub split_reeval_interval: Option<usize>,
 }
 
 impl Default for SGBTConfig {
@@ -148,6 +183,9 @@ impl Default for SGBTConfig {
             variant: SGBTVariant::default(),
             seed: 0xDEAD_BEEF_CAFE_4242,
             initial_target_count: 50,
+            leaf_half_life: None,
+            max_tree_samples: None,
+            split_reeval_interval: None,
         }
     }
 }
@@ -269,6 +307,32 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Set the half-life for exponential leaf decay (in samples per leaf).
+    ///
+    /// After `n` samples, a leaf's accumulated statistics have half the weight
+    /// of the most recent sample. Enables continuous adaptation to concept drift.
+    pub fn leaf_half_life(mut self, n: usize) -> Self {
+        self.config.leaf_half_life = Some(n);
+        self
+    }
+
+    /// Set the maximum samples a single tree processes before proactive replacement.
+    ///
+    /// After `n` samples, the tree is replaced regardless of drift detector state.
+    pub fn max_tree_samples(mut self, n: u64) -> Self {
+        self.config.max_tree_samples = Some(n);
+        self
+    }
+
+    /// Set the split re-evaluation interval for max-depth leaves.
+    ///
+    /// Every `n` samples per leaf, max-depth leaves re-evaluate whether a split
+    /// would improve them. Inspired by EFDT (Manapragada et al. 2018).
+    pub fn split_reeval_interval(mut self, n: usize) -> Self {
+        self.config.split_reeval_interval = Some(n);
+        self
+    }
+
     /// Validate and build the configuration.
     ///
     /// # Errors
@@ -321,6 +385,32 @@ impl SGBTConfigBuilder {
             return Err(IrithyllError::InvalidConfig(
                 "initial_target_count must be > 0".into(),
             ));
+        }
+
+        // -- Streaming adaptation parameters --
+        if let Some(hl) = c.leaf_half_life {
+            if hl == 0 {
+                return Err(IrithyllError::InvalidConfig(
+                    "leaf_half_life must be >= 1".into(),
+                ));
+            }
+        }
+        if let Some(max) = c.max_tree_samples {
+            if max < 100 {
+                return Err(IrithyllError::InvalidConfig(
+                    "max_tree_samples must be >= 100".into(),
+                ));
+            }
+        }
+        if let Some(interval) = c.split_reeval_interval {
+            if interval < c.grace_period {
+                return Err(IrithyllError::InvalidConfig(
+                    format!(
+                        "split_reeval_interval ({}) must be >= grace_period ({})",
+                        interval, c.grace_period
+                    ),
+                ));
+            }
         }
 
         // -- Drift detector parameters --

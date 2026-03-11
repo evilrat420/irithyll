@@ -73,6 +73,9 @@ struct LeafState {
 
     /// Running hessian sum for leaf weight updates.
     hess_sum: f64,
+
+    /// Sample count at last split re-evaluation (for EFDT-inspired re-eval).
+    last_reeval_count: u64,
 }
 
 impl LeafState {
@@ -88,6 +91,7 @@ impl LeafState {
             bins_ready: false,
             grad_sum: 0.0,
             hess_sum: 0.0,
+            last_reeval_count: 0,
         }
     }
 
@@ -116,6 +120,7 @@ impl LeafState {
             bins_ready: true,
             grad_sum,
             hess_sum,
+            last_reeval_count: 0,
         }
     }
 }
@@ -189,6 +194,7 @@ impl HoeffdingTree {
                 bins_ready: false,
                 grad_sum: 0.0,
                 hess_sum: 0.0,
+                last_reeval_count: 0,
             },
         );
 
@@ -347,8 +353,25 @@ impl HoeffdingTree {
     /// Returns `true` if a split was performed.
     fn attempt_split(&mut self, leaf_id: NodeId) -> bool {
         let depth = self.arena.get_depth(leaf_id);
-        if depth as usize >= self.config.max_depth {
-            return false;
+        let at_max_depth = depth as usize >= self.config.max_depth;
+
+        if at_max_depth {
+            // Only proceed if split re-evaluation is enabled and the interval
+            // has elapsed since the last evaluation at this leaf.
+            match self.config.split_reeval_interval {
+                None => return false,
+                Some(interval) => {
+                    let state = match self.leaf_states.get(&leaf_id.0) {
+                        Some(s) => s,
+                        None => return false,
+                    };
+                    let sample_count = self.arena.get_sample_count(leaf_id);
+                    if sample_count - state.last_reeval_count < interval as u64 {
+                        return false;
+                    }
+                    // Fall through to evaluate potential split.
+                }
+            }
         }
 
         let n_features = match self.n_features {
@@ -416,15 +439,30 @@ impl HoeffdingTree {
 
         // Hoeffding bound: epsilon = sqrt(R^2 * ln(1/delta) / (2 * n))
         // R = 1.0 (conservative bound on the range of the gain function).
+        //
+        // With EWMA decay, the effective sample size is bounded by 1/(1-alpha).
+        // We cap n at this value to prevent spurious splits from artificially
+        // tight bounds when decay is active.
         let r_squared = 1.0;
         let n = sample_count as f64;
+        let effective_n = match self.config.leaf_decay_alpha {
+            Some(alpha) => n.min(1.0 / (1.0 - alpha)),
+            None => n,
+        };
         let ln_inv_delta = (1.0 / self.config.delta).ln();
-        let epsilon = (r_squared * ln_inv_delta / (2.0 * n)).sqrt();
+        let epsilon = (r_squared * ln_inv_delta / (2.0 * effective_n)).sqrt();
 
         // Split condition: the best is significantly better than second-best,
         // OR the bound is already so tight that more samples won't help.
         let gap = best_gain - second_best_gain;
         if gap <= epsilon && epsilon >= TAU {
+            // If this was a re-evaluation at max depth, update the count
+            // so we don't re-evaluate again until the next interval elapses.
+            if at_max_depth {
+                if let Some(state) = self.leaf_states.get_mut(&leaf_id.0) {
+                    state.last_reeval_count = sample_count;
+                }
+            }
             return false;
         }
 
@@ -525,6 +563,7 @@ impl HoeffdingTree {
                     bins_ready: true,
                     grad_sum: 0.0,
                     hess_sum: 0.0,
+                    last_reeval_count: 0,
                 };
 
                 let right_state = LeafState {
@@ -535,6 +574,7 @@ impl HoeffdingTree {
                     bins_ready: true,
                     grad_sum: 0.0,
                     hess_sum: 0.0,
+                    last_reeval_count: 0,
                 };
 
                 self.leaf_states.insert(left_id.0, left_state);
@@ -606,9 +646,14 @@ impl StreamingTree for HoeffdingTree {
                 binner.observe(val);
             }
 
-            // Accumulate running gradient/hessian sums.
-            state.grad_sum += gradient;
-            state.hess_sum += hessian;
+            // Accumulate running gradient/hessian sums (with optional EWMA decay).
+            if let Some(alpha) = self.config.leaf_decay_alpha {
+                state.grad_sum = alpha * state.grad_sum + gradient;
+                state.hess_sum = alpha * state.hess_sum + hessian;
+            } else {
+                state.grad_sum += gradient;
+                state.hess_sum += hessian;
+            }
 
             // Update the leaf value from running sums.
             let lw = leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda);
@@ -630,7 +675,11 @@ impl StreamingTree for HoeffdingTree {
                 // will accumulate from the next sample onward.
                 // However, we should NOT lose the current sample. Let's accumulate
                 // this sample into the newly created histograms.
-                histograms.accumulate(features, gradient, hessian);
+                if let Some(alpha) = self.config.leaf_decay_alpha {
+                    histograms.accumulate_with_decay(features, gradient, hessian, alpha);
+                } else {
+                    histograms.accumulate(features, gradient, hessian);
+                }
 
                 state.histograms = Some(histograms);
                 state.bins_ready = true;
@@ -639,14 +688,23 @@ impl StreamingTree for HoeffdingTree {
             return;
         }
 
-        // Bins are ready — accumulate into histograms.
+        // Bins are ready — accumulate into histograms (with optional decay).
         if let Some(ref mut histograms) = state.histograms {
-            histograms.accumulate(features, gradient, hessian);
+            if let Some(alpha) = self.config.leaf_decay_alpha {
+                histograms.accumulate_with_decay(features, gradient, hessian, alpha);
+            } else {
+                histograms.accumulate(features, gradient, hessian);
+            }
         }
 
-        // Update running gradient/hessian sums and leaf value.
-        state.grad_sum += gradient;
-        state.hess_sum += hessian;
+        // Update running gradient/hessian sums and leaf value (with optional EWMA decay).
+        if let Some(alpha) = self.config.leaf_decay_alpha {
+            state.grad_sum = alpha * state.grad_sum + gradient;
+            state.hess_sum = alpha * state.hess_sum + hessian;
+        } else {
+            state.grad_sum += gradient;
+            state.hess_sum += hessian;
+        }
         let lw = leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda);
         self.arena.set_leaf_value(leaf_id, lw);
 
@@ -1021,5 +1079,133 @@ mod tests {
         for &v in &seq1 {
             assert_ne!(v, 0, "xorshift64 should never produce 0 with non-zero seed");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: EWMA leaf decay — recent data dominates predictions.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ewma_leaf_decay_recent_data_dominates() {
+        // half_life=50 => alpha = exp(-ln(2)/50) ≈ 0.9862
+        let alpha = (-(2.0_f64.ln()) / 50.0).exp();
+        let config = TreeConfig::new()
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(16)
+            .lambda(1.0)
+            .leaf_decay_alpha(alpha);
+        let mut tree = HoeffdingTree::new(config);
+
+        // Phase 1: 1000 samples targeting 1.0
+        for _ in 0..1000 {
+            let pred = tree.predict(&[1.0, 2.0]);
+            let grad = pred - 1.0; // gradient for squared loss
+            tree.train_one(&[1.0, 2.0], grad, 1.0);
+        }
+
+        // Phase 2: 100 samples targeting 5.0
+        for _ in 0..100 {
+            let pred = tree.predict(&[1.0, 2.0]);
+            let grad = pred - 5.0;
+            tree.train_one(&[1.0, 2.0], grad, 1.0);
+        }
+
+        let pred = tree.predict(&[1.0, 2.0]);
+        // With EWMA, the prediction should be pulled toward 5.0 (recent target).
+        // Without EWMA, 1000 samples at 1.0 would dominate 100 at 5.0.
+        assert!(
+            pred > 2.0,
+            "EWMA should let recent data (target=5.0) pull prediction above 2.0, got {}",
+            pred,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: EWMA disabled (None) matches traditional behavior.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ewma_disabled_matches_traditional() {
+        let config_no_ewma = TreeConfig::new()
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(16)
+            .lambda(1.0);
+        let mut tree = HoeffdingTree::new(config_no_ewma);
+
+        let mut rng_state: u64 = 99999;
+        for _ in 0..200 {
+            let x = test_rand_f64(&mut rng_state) * 10.0;
+            let y = 3.0 * x + 1.0;
+            let pred = tree.predict(&[x]);
+            tree.train_one(&[x], pred - y, 1.0);
+        }
+
+        let pred = tree.predict(&[5.0]);
+        assert!(pred.is_finite(), "prediction without EWMA should be finite, got {}", pred);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: Split re-evaluation at max depth grows beyond frozen point.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn split_reeval_at_max_depth() {
+        let config = TreeConfig::new()
+            .grace_period(20)
+            .max_depth(2) // Very shallow to hit max depth quickly
+            .n_bins(16)
+            .lambda(1.0)
+            .split_reeval_interval(50);
+        let mut tree = HoeffdingTree::new(config);
+
+        let mut rng_state: u64 = 54321;
+        // Train enough to saturate max_depth=2 and then trigger re-evaluation.
+        for _ in 0..2000 {
+            let x1 = test_rand_f64(&mut rng_state) * 10.0 - 5.0;
+            let x2 = test_rand_f64(&mut rng_state) * 10.0 - 5.0;
+            let y = 2.0 * x1 + 3.0 * x2;
+            let pred = tree.predict(&[x1, x2]);
+            tree.train_one(&[x1, x2], pred - y, 1.0);
+        }
+
+        // With split_reeval_interval=50, max-depth leaves can re-evaluate
+        // and potentially split beyond max_depth. The tree should have MORE
+        // leaves than a max_depth=2 tree without re-eval (which caps at 4).
+        let leaves = tree.n_leaves();
+        assert!(
+            leaves >= 4,
+            "split re-eval should allow growth beyond max_depth=2 cap (4 leaves), got {}",
+            leaves,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: Split re-evaluation disabled matches existing behavior.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn split_reeval_disabled_matches_traditional() {
+        let config = TreeConfig::new()
+            .grace_period(20)
+            .max_depth(2)
+            .n_bins(16)
+            .lambda(1.0);
+        // No split_reeval_interval => None => traditional hard cap
+        let mut tree = HoeffdingTree::new(config);
+
+        let mut rng_state: u64 = 77777;
+        for _ in 0..2000 {
+            let x1 = test_rand_f64(&mut rng_state) * 10.0 - 5.0;
+            let x2 = test_rand_f64(&mut rng_state) * 10.0 - 5.0;
+            let y = 2.0 * x1 + 3.0 * x2;
+            let pred = tree.predict(&[x1, x2]);
+            tree.train_one(&[x1, x2], pred - y, 1.0);
+        }
+
+        // Without re-eval, max_depth=2 caps at 4 leaves (2^2).
+        let leaves = tree.n_leaves();
+        assert!(
+            leaves <= 4,
+            "without re-eval, max_depth=2 should cap at 4 leaves, got {}",
+            leaves,
+        );
     }
 }

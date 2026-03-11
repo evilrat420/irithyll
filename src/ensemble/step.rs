@@ -47,7 +47,18 @@ impl BoostingStep {
     /// Create a new boosting step with a fresh tree and drift detector.
     pub fn new(tree_config: TreeConfig, detector: Box<dyn DriftDetector>) -> Self {
         Self {
-            slot: TreeSlot::new(tree_config, detector),
+            slot: TreeSlot::new(tree_config, detector, None),
+        }
+    }
+
+    /// Create a new boosting step with optional time-based tree replacement.
+    pub fn new_with_max_samples(
+        tree_config: TreeConfig,
+        detector: Box<dyn DriftDetector>,
+        max_tree_samples: Option<u64>,
+    ) -> Self {
+        Self {
+            slot: TreeSlot::new(tree_config, detector, max_tree_samples),
         }
     }
 
