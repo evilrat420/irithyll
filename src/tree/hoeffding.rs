@@ -387,6 +387,18 @@ impl HoeffdingTree {
         // Generate the feature mask for this split evaluation.
         self.generate_feature_mask(n_features);
 
+        // Materialize pending lazy decay before reading histogram data.
+        // This converts un-decayed coordinates to true decayed values so
+        // split evaluation sees correct gradient/hessian sums. O(n_features * n_bins)
+        // but amortized over grace_period samples — not per-sample cost.
+        if self.config.leaf_decay_alpha.is_some() {
+            if let Some(state) = self.leaf_states.get_mut(&leaf_id.0) {
+                if let Some(ref mut histograms) = state.histograms {
+                    histograms.materialize_decay();
+                }
+            }
+        }
+
         // Evaluate splits for each feature in the mask.
         // We need to borrow leaf_states immutably while feature_mask is borrowed.
         // Collect candidates first.

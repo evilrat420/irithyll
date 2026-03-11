@@ -12,13 +12,26 @@ use crate::histogram::BinEdges;
 #[derive(Debug, Clone)]
 pub struct FeatureHistogram {
     /// Gradient sums per bin.
+    ///
+    /// When `decay_scale != 1.0`, these are stored in un-decayed coordinates.
+    /// Multiply by `decay_scale` to recover effective (decayed) values.
     pub grad_sums: Vec<f64>,
-    /// Hessian sums per bin.
+    /// Hessian sums per bin (same scaling convention as `grad_sums`).
     pub hess_sums: Vec<f64>,
-    /// Sample counts per bin.
+    /// Sample counts per bin (never decayed).
     pub counts: Vec<u64>,
     /// Bin edges for this feature.
     pub edges: BinEdges,
+    /// Accumulated decay factor for lazy forward decay.
+    ///
+    /// Instead of decaying all bins on every sample (O(n_bins)), we track
+    /// a running scale factor and store new samples in un-decayed coordinates.
+    /// The decay is materialized (applied to all bins) only when the histogram
+    /// is read — typically at split evaluation time, every `grace_period` samples.
+    ///
+    /// Invariant: `effective_value[i] = grad_sums[i] * decay_scale`.
+    /// Value is 1.0 when no decay is pending (default, or after [`materialize_decay`]).
+    decay_scale: f64,
 }
 
 impl FeatureHistogram {
@@ -30,6 +43,7 @@ impl FeatureHistogram {
             hess_sums: vec![0.0; n],
             counts: vec![0; n],
             edges,
+            decay_scale: 1.0,
         }
     }
 
@@ -46,27 +60,37 @@ impl FeatureHistogram {
     }
 
     /// Sum of all gradient accumulators across bins.
+    ///
+    /// Accounts for any pending lazy decay by multiplying by `decay_scale`.
     pub fn total_gradient(&self) -> f64 {
-        #[cfg(feature = "simd")]
-        {
-            crate::histogram::simd::sum_f64(&self.grad_sums)
-        }
-        #[cfg(not(feature = "simd"))]
-        {
-            self.grad_sums.iter().sum()
-        }
+        let raw = {
+            #[cfg(feature = "simd")]
+            {
+                crate::histogram::simd::sum_f64(&self.grad_sums)
+            }
+            #[cfg(not(feature = "simd"))]
+            {
+                self.grad_sums.iter().sum::<f64>()
+            }
+        };
+        raw * self.decay_scale
     }
 
     /// Sum of all hessian accumulators across bins.
+    ///
+    /// Accounts for any pending lazy decay by multiplying by `decay_scale`.
     pub fn total_hessian(&self) -> f64 {
-        #[cfg(feature = "simd")]
-        {
-            crate::histogram::simd::sum_f64(&self.hess_sums)
-        }
-        #[cfg(not(feature = "simd"))]
-        {
-            self.hess_sums.iter().sum()
-        }
+        let raw = {
+            #[cfg(feature = "simd")]
+            {
+                crate::histogram::simd::sum_f64(&self.hess_sums)
+            }
+            #[cfg(not(feature = "simd"))]
+            {
+                self.hess_sums.iter().sum::<f64>()
+            }
+        };
+        raw * self.decay_scale
     }
 
     /// Total sample count across all bins.
@@ -80,27 +104,50 @@ impl FeatureHistogram {
         self.edges.n_bins()
     }
 
-    /// Accumulate with forward decay: decay all existing bins by `alpha`,
-    /// then add the new sample.
+    /// Accumulate with lazy forward decay: O(1) per sample.
     ///
-    /// This implements the forward decay scheme (Cormode et al. 2009): older
-    /// observations are exponentially down-weighted so that recent data dominates
-    /// split decisions. The `counts` array is NOT decayed — it tracks the raw
-    /// sample count for the Hoeffding bound computation.
+    /// Implements the forward decay scheme (Cormode et al. 2009) using a
+    /// deferred scaling technique. Instead of decaying all bins on every
+    /// sample, we track a running `decay_scale` and store new samples in
+    /// un-decayed coordinates. The actual bin values are materialized only
+    /// when read (see [`materialize_decay`]).
     ///
-    /// Cost: O(n_bins) per call due to the full-array decay pass.
+    /// Mathematically equivalent to eager decay: a gradient `g` added at
+    /// epoch `t` contributes `g * alpha^(T - t)` at read time `T`.
+    ///
+    /// The `counts` array is NOT decayed — it tracks the raw sample count
+    /// for the Hoeffding bound computation.
     #[inline]
     pub fn accumulate_with_decay(&mut self, value: f64, gradient: f64, hessian: f64, alpha: f64) {
-        // Decay all bins.
-        for i in 0..self.grad_sums.len() {
-            self.grad_sums[i] *= alpha;
-            self.hess_sums[i] *= alpha;
-        }
-        // Then accumulate the new sample.
+        self.decay_scale *= alpha;
+        let inv_scale = 1.0 / self.decay_scale;
         let bin = self.edges.find_bin(value);
-        self.grad_sums[bin] += gradient;
-        self.hess_sums[bin] += hessian;
+        self.grad_sums[bin] += gradient * inv_scale;
+        self.hess_sums[bin] += hessian * inv_scale;
         self.counts[bin] += 1;
+
+        // Renormalize when scale underflows to prevent precision loss.
+        // With alpha ≈ 0.986 (half_life = 50), this fires roughly every
+        // 16K samples per leaf — negligible amortized cost.
+        if self.decay_scale < 1e-100 {
+            self.materialize_decay();
+        }
+    }
+
+    /// Apply the pending decay factor to all bins and reset the scale.
+    ///
+    /// After calling this, `grad_sums` and `hess_sums` contain the true
+    /// decayed values and can be passed directly to split evaluation.
+    /// O(n_bins) — called at split evaluation time, not per sample.
+    #[inline]
+    pub fn materialize_decay(&mut self) {
+        if (self.decay_scale - 1.0).abs() > f64::EPSILON {
+            for i in 0..self.grad_sums.len() {
+                self.grad_sums[i] *= self.decay_scale;
+                self.hess_sums[i] *= self.decay_scale;
+            }
+            self.decay_scale = 1.0;
+        }
     }
 
     /// Reset all accumulators to zero, preserving the bin edges.
@@ -108,6 +155,7 @@ impl FeatureHistogram {
         self.grad_sums.fill(0.0);
         self.hess_sums.fill(0.0);
         self.counts.fill(0);
+        self.decay_scale = 1.0;
     }
 
     /// Histogram subtraction trick: `self - child = sibling`.
@@ -117,6 +165,9 @@ impl FeatureHistogram {
     /// re-scanning the data. This halves the histogram-building cost at each
     /// split.
     ///
+    /// Scale-aware: if either operand has pending lazy decay, the effective
+    /// (decayed) values are used. The result has `decay_scale = 1.0`.
+    ///
     /// The returned histogram uses edges cloned from `self`.
     pub fn subtract(&self, child: &FeatureHistogram) -> FeatureHistogram {
         debug_assert_eq!(
@@ -125,41 +176,50 @@ impl FeatureHistogram {
             "cannot subtract histograms with different bin counts"
         );
         let n = self.n_bins();
+        let s_self = self.decay_scale;
+        let s_child = child.decay_scale;
+
+        // Fast path: both scales are 1.0, use existing SIMD logic directly.
+        let scales_trivial = (s_self - 1.0).abs() <= f64::EPSILON
+            && (s_child - 1.0).abs() <= f64::EPSILON;
 
         #[cfg(feature = "simd")]
         {
-            let mut grad_sums = vec![0.0; n];
-            let mut hess_sums = vec![0.0; n];
-            let mut counts = vec![0u64; n];
-            crate::histogram::simd::subtract_f64(&self.grad_sums, &child.grad_sums, &mut grad_sums);
-            crate::histogram::simd::subtract_f64(&self.hess_sums, &child.hess_sums, &mut hess_sums);
-            crate::histogram::simd::subtract_u64(&self.counts, &child.counts, &mut counts);
-            FeatureHistogram {
-                grad_sums,
-                hess_sums,
-                counts,
-                edges: self.edges.clone(),
+            if scales_trivial {
+                let mut grad_sums = vec![0.0; n];
+                let mut hess_sums = vec![0.0; n];
+                let mut counts = vec![0u64; n];
+                crate::histogram::simd::subtract_f64(&self.grad_sums, &child.grad_sums, &mut grad_sums);
+                crate::histogram::simd::subtract_f64(&self.hess_sums, &child.hess_sums, &mut hess_sums);
+                crate::histogram::simd::subtract_u64(&self.counts, &child.counts, &mut counts);
+                return FeatureHistogram {
+                    grad_sums,
+                    hess_sums,
+                    counts,
+                    edges: self.edges.clone(),
+                    decay_scale: 1.0,
+                };
             }
         }
 
-        #[cfg(not(feature = "simd"))]
-        {
-            let mut grad_sums = Vec::with_capacity(n);
-            let mut hess_sums = Vec::with_capacity(n);
-            let mut counts = Vec::with_capacity(n);
+        // Scale-aware scalar path (also used as non-SIMD fallback).
+        let _ = scales_trivial; // suppress unused warning in non-SIMD builds
+        let mut grad_sums = Vec::with_capacity(n);
+        let mut hess_sums = Vec::with_capacity(n);
+        let mut counts = Vec::with_capacity(n);
 
-            for i in 0..n {
-                grad_sums.push(self.grad_sums[i] - child.grad_sums[i]);
-                hess_sums.push(self.hess_sums[i] - child.hess_sums[i]);
-                counts.push(self.counts[i].saturating_sub(child.counts[i]));
-            }
+        for i in 0..n {
+            grad_sums.push(self.grad_sums[i] * s_self - child.grad_sums[i] * s_child);
+            hess_sums.push(self.hess_sums[i] * s_self - child.hess_sums[i] * s_child);
+            counts.push(self.counts[i].saturating_sub(child.counts[i]));
+        }
 
-            FeatureHistogram {
-                grad_sums,
-                hess_sums,
-                counts,
-                edges: self.edges.clone(),
-            }
+        FeatureHistogram {
+            grad_sums,
+            hess_sums,
+            counts,
+            edges: self.edges.clone(),
+            decay_scale: 1.0,
         }
     }
 }
@@ -231,6 +291,16 @@ impl LeafHistograms {
     #[inline]
     pub fn n_features(&self) -> usize {
         self.histograms.len()
+    }
+
+    /// Materialize pending lazy decay across all feature histograms.
+    ///
+    /// Call before reading raw bin values (e.g., split evaluation).
+    /// O(n_features * n_bins) — called at split evaluation time, not per sample.
+    pub fn materialize_decay(&mut self) {
+        for hist in &mut self.histograms {
+            hist.materialize_decay();
+        }
     }
 
     /// Reset all histograms to zero, preserving bin edges.
@@ -454,12 +524,133 @@ mod tests {
             h.accumulate_with_decay(8.0, 1.0, 1.0, alpha);
         }
 
+        // Materialize to get true decayed values.
+        h.materialize_decay();
+
         // With alpha=0.9, old bin 0 decays rapidly while bin 2 accumulates.
-        // After 50 decay steps, bin 0 ≈ 10 * 0.9^50 ≈ 0.05, bin 2 ≈ 10 * (1 - 0.9^50) / (1 - 0.9) ≈ 9.95
         assert!(
             h.grad_sums[2] > h.grad_sums[0],
             "recent bin should dominate: bin2={} > bin0={}",
             h.grad_sums[2], h.grad_sums[0],
+        );
+    }
+
+    #[test]
+    fn lazy_decay_matches_eager() {
+        // Compare lazy decay (new) against a manual eager implementation.
+        // They must produce identical results (within f64 precision).
+        let edges = BinEdges { edges: vec![3.0, 6.0] }; // 3 bins
+        let alpha = 0.95;
+
+        // Lazy histogram (our implementation).
+        let mut lazy = FeatureHistogram::new(edges.clone());
+
+        // Manual eager: track expected values by applying alpha to all bins
+        // each step, then accumulating.
+        let n = 3;
+        let mut eager_grad = vec![0.0; n];
+        let mut eager_hess = vec![0.0; n];
+
+        let samples: Vec<(f64, f64, f64)> = vec![
+            (1.0, 0.5, 1.0),   // bin 0
+            (4.0, -0.3, 0.8),  // bin 1
+            (1.0, 0.7, 1.2),   // bin 0
+            (8.0, -1.0, 0.5),  // bin 2
+            (5.0, 0.2, 0.9),   // bin 1
+            (1.0, 0.1, 1.1),   // bin 0
+            (8.0, 0.4, 0.6),   // bin 2
+            (4.0, -0.5, 1.0),  // bin 1
+        ];
+
+        let edge_vals = vec![3.0, 6.0];
+        for &(value, gradient, hessian) in &samples {
+            // Eager: decay all bins, then accumulate.
+            for i in 0..n {
+                eager_grad[i] *= alpha;
+                eager_hess[i] *= alpha;
+            }
+            let bin = if value <= edge_vals[0] { 0 }
+                      else if value <= edge_vals[1] { 1 }
+                      else { 2 };
+            eager_grad[bin] += gradient;
+            eager_hess[bin] += hessian;
+
+            // Lazy: our O(1) implementation.
+            lazy.accumulate_with_decay(value, gradient, hessian, alpha);
+        }
+
+        // Materialize lazy to get comparable values.
+        lazy.materialize_decay();
+
+        for i in 0..n {
+            assert!(
+                (lazy.grad_sums[i] - eager_grad[i]).abs() < 1e-10,
+                "grad_sums[{}]: lazy={}, eager={}", i, lazy.grad_sums[i], eager_grad[i],
+            );
+            assert!(
+                (lazy.hess_sums[i] - eager_hess[i]).abs() < 1e-10,
+                "hess_sums[{}]: lazy={}, eager={}", i, lazy.hess_sums[i], eager_hess[i],
+            );
+        }
+    }
+
+    #[test]
+    fn lazy_decay_total_gradient_without_materialize() {
+        // total_gradient() should return correct decayed value even
+        // WITHOUT explicit materialize_decay() call.
+        let edges = BinEdges { edges: vec![5.0] }; // 2 bins
+        let alpha = 0.9;
+        let mut h = FeatureHistogram::new(edges);
+
+        h.accumulate_with_decay(1.0, 1.0, 1.0, alpha); // bin 0
+        h.accumulate_with_decay(7.0, 1.0, 1.0, alpha); // bin 1
+
+        // Expected: first sample decayed once more = 1.0 * 0.9 = 0.9
+        // Second sample = 1.0, total = 1.9
+        let total = h.total_gradient();
+        assert!(
+            (total - 1.9).abs() < 1e-10,
+            "total_gradient should account for decay_scale: got {}", total,
+        );
+    }
+
+    #[test]
+    fn materialize_is_idempotent() {
+        let edges = BinEdges { edges: vec![5.0] };
+        let mut h = FeatureHistogram::new(edges);
+        let alpha = 0.95;
+
+        for _ in 0..50 {
+            h.accumulate_with_decay(1.0, 1.0, 1.0, alpha);
+        }
+
+        h.materialize_decay();
+        let grad_after_first = h.grad_sums.clone();
+
+        h.materialize_decay(); // second call should be no-op
+        assert_eq!(h.grad_sums, grad_after_first, "second materialize should be a no-op");
+    }
+
+    #[test]
+    fn lazy_decay_renormalization() {
+        // Use a very aggressive alpha to trigger renormalization quickly.
+        let edges = BinEdges { edges: vec![5.0] };
+        let mut h = FeatureHistogram::new(edges);
+        let alpha = 0.5; // decay_scale halves each step, hits 1e-100 at ~332 steps
+
+        for _ in 0..500 {
+            h.accumulate_with_decay(1.0, 1.0, 1.0, alpha);
+        }
+
+        // Should not have NaN or Inf despite extreme decay.
+        let total = h.total_gradient();
+        assert!(total.is_finite(), "gradient should be finite after renormalization, got {}", total);
+        assert!(total > 0.0, "gradient should be positive, got {}", total);
+
+        // With alpha=0.5, geometric sum converges to 1/(1-0.5) = 2.0
+        assert!(
+            (total - 2.0).abs() < 0.1,
+            "total gradient should converge to ~2.0, got {}", total,
         );
     }
 }
