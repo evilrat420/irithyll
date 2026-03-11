@@ -18,10 +18,17 @@ The paper laid the foundation, but deploying streaming trees in long-running sys
 - **True online learning** with `train_one()`, one sample at a time
 - **Concept drift detection** via Page-Hinkley, ADWIN, or DDM, with automatic tree replacement
 - **Multi-class support** through `MulticlassSGBT` with one-vs-rest committees
+- **Multi-target regression** via `MultiTargetSGBT` with T independent models
 - **Three SGBT variants** from the paper: Standard, Skip (SGBT-SK), and MultipleIterations (SGBT-MI)
 - **Pluggable loss functions**: squared, logistic, softmax, Huber, or implement the `Loss` trait yourself
 - **Hoeffding tree splitting** with configurable confidence bounds
 - **XGBoost-style regularization**: L2 (`lambda`) and minimum gain (`gamma`)
+
+### Interpretability
+- **TreeSHAP explanations** via `explain()` with path-dependent SHAP values (Lundberg et al., 2020)
+- **Named features** with `explain_named()` for human-readable per-feature contributions
+- **StreamingShap** for online running-mean |SHAP| feature importance without storing past data
+- **Feature importance** from accumulated split gain across the ensemble
 
 ### Streaming Adaptation
 These go beyond the original paper to handle the realities of long-running, non-stationary systems:
@@ -33,10 +40,10 @@ These go beyond the original paper to handle the realities of long-running, non-
 
 ### Production Infrastructure
 - **Async streaming** via `AsyncSGBT` with tokio channels, concurrent `Predictor` handles, and backpressure
-- **Model checkpointing** with `save_model()` / `load_model()` for JSON-based checkpoint and restore
+- **Model checkpointing** with `save_model()` / `load_model()` — drift detector state is preserved across save/load
 - **Online metrics**: incremental MAE, MSE, RMSE, R-squared, accuracy, precision, recall, F1, log loss
-- **Feature importance** from accumulated split gain across the ensemble
 - **Deterministic seeding** for reproducible results
+- **Python bindings** via the `irithyll-python` crate (PyO3 + numpy, GIL-released train/predict)
 
 ### Optional Accelerators
 - **Parallel training** (`parallel`): Rayon-based data-parallel tree training
@@ -90,7 +97,7 @@ fn main() {
         .build()
         .expect("valid config");
 
-    let mut model = SGBT::with_loss(config, Box::new(LogisticLoss));
+    let mut model = SGBT::with_loss(config, LogisticLoss);
 
     // Class 0 near (-2, -2), class 1 near (2, 2)
     for _ in 0..500 {
@@ -100,6 +107,64 @@ fn main() {
 
     let prob = model.predict_proba(&[1.5, 1.5]);
     println!("P(class=1 | [1.5, 1.5]) = {:.4}", prob);
+}
+```
+
+### Explanations
+
+```rust
+use irithyll::{SGBTConfig, SGBT, Sample};
+
+fn main() {
+    let config = SGBTConfig::builder()
+        .n_steps(20)
+        .learning_rate(0.1)
+        .feature_names(vec!["price".into(), "volume".into()])
+        .build()
+        .expect("valid config");
+
+    let mut model = SGBT::new(config);
+
+    for i in 0..500 {
+        let price = i as f64 * 0.1;
+        let volume = 100.0 - price;
+        model.train_one(&Sample::new(vec![price, volume], price * 2.0));
+    }
+
+    // TreeSHAP: per-feature contributions
+    let shap = model.explain(&[5.0, 50.0]);
+    // Invariant: shap.base_value + sum(shap.values) == model.predict(&[5.0, 50.0])
+
+    // Named explanations (sorted by |contribution|)
+    if let Some(named) = model.explain_named(&[5.0, 50.0]) {
+        for (name, value) in &named.values {
+            println!("{}: {:.4}", name, value);
+        }
+    }
+}
+```
+
+### Multi-Target Regression
+
+```rust
+use irithyll::{SGBTConfig, MultiTargetSGBT};
+
+fn main() {
+    let config = SGBTConfig::builder()
+        .n_steps(20)
+        .learning_rate(0.1)
+        .build()
+        .expect("valid config");
+
+    let mut model = MultiTargetSGBT::new(config, 3).unwrap();
+
+    for i in 0..500 {
+        let x = i as f64 * 0.01;
+        model.train_one(&[x, x * 2.0], &[x * 3.0, x * -1.0, x + 1.0]);
+    }
+
+    let preds = model.predict(&[1.0, 2.0]);
+    assert_eq!(preds.len(), 3);
 }
 ```
 
@@ -140,36 +205,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Streaming Adaptation
+### Python
 
-```rust
-use irithyll::{SGBTConfig, SGBT, Sample};
+```python
+import numpy as np
+from irithyll_python import StreamingGBTConfig, StreamingGBT
 
-fn main() {
-    let config = SGBTConfig::builder()
-        .n_steps(50)
-        .learning_rate(0.1)
-        // EWMA: leaf statistics half-life of 500 samples
-        .leaf_half_life(500)
-        // Replace trees after 10K samples regardless of drift
-        .max_tree_samples(10_000)
-        // Re-evaluate max-depth leaves every 1000 samples
-        .split_reeval_interval(1000)
-        .build()
-        .expect("valid config");
+config = StreamingGBTConfig().n_steps(50).learning_rate(0.1)
+model = StreamingGBT(config)
 
-    let mut model = SGBT::new(config);
+for i in range(500):
+    x = np.array([i * 0.01])
+    model.train_one(x, 2.0 * x[0] + 1.0)
 
-    // The model now continuously adapts through three mechanisms:
-    // 1. Leaf statistics decay exponentially (recent data weighted more)
-    // 2. Trees are proactively replaced to prevent staleness
-    // 3. Max-depth leaves re-evaluate whether splitting would help
-    for i in 0..10_000 {
-        let x = i as f64 * 0.001;
-        let target = if i < 5000 { 2.0 * x } else { -x + 10.0 };
-        model.train_one(&Sample::new(vec![x], target));
-    }
-}
+pred = model.predict(np.array([3.0]))
+
+# SHAP explanations
+shap = model.explain(np.array([3.0]))
+print(shap.values, shap.base_value)
+
+# Save/load
+model.save("model.json")
+restored = StreamingGBT.load("model.json")
 ```
 
 ## Architecture
@@ -179,11 +236,14 @@ irithyll/
   loss/          Differentiable loss functions (squared, logistic, softmax, huber)
   histogram/     Streaming histogram binning (uniform, quantile, optional k-means)
   tree/          Hoeffding-bound streaming decision trees
-  drift/         Concept drift detectors (Page-Hinkley, ADWIN, DDM)
-  ensemble/      SGBT boosting loop, config, variants, multi-class, parallel training
+  drift/         Concept drift detectors (Page-Hinkley, ADWIN, DDM) with serializable state
+  ensemble/      SGBT boosting loop, config, variants, multi-class, multi-target, parallel
+  explain/       TreeSHAP explanations and StreamingShap online importance
   stream/        Async tokio channel-based training runner and predictor handles
   metrics/       Online regression and classification metric trackers
   serde_support/ Model checkpoint/restore serialization
+
+irithyll-python/   PyO3 Python bindings (StreamingGBT, MultiTargetGBT, ShapExplanation)
 ```
 
 ## Configuration
@@ -203,6 +263,7 @@ let config = SGBTConfig::builder()
     .gamma(0.0)                // Minimum split gain
     .grace_period(200)         // Samples before evaluating splits
     .delta(1e-7)               // Hoeffding bound confidence
+    .feature_names(vec!["price".into(), "volume".into()])
     .build()
     .expect("valid config");
 ```
@@ -220,6 +281,7 @@ let config = SGBTConfig::builder()
 | `delta`                  | 1e-7                       | Hoeffding bound confidence parameter           |
 | `drift_detector`         | PageHinkley(0.005, 50.0)   | Drift detection algorithm for tree replacement |
 | `variant`                | Standard                   | Computational variant (Standard, Skip, MI)     |
+| `feature_names`          | None                       | Optional feature names for named explanations  |
 | `leaf_half_life`         | None (disabled)            | EWMA decay half-life for leaf statistics       |
 | `max_tree_samples`       | None (disabled)            | Proactive tree replacement threshold           |
 | `split_reeval_interval`  | None (disabled)            | Re-evaluation interval for max-depth leaves    |
@@ -260,6 +322,8 @@ The MSRV is **1.75**. This is checked in CI and will only be raised in minor ver
 ## References
 
 > Gunasekara, N., Pfahringer, B., Gomes, H. M., & Bifet, A. (2024). *Gradient boosted trees for evolving data streams.* Machine Learning, 113, 3325-3352.
+
+> Lundberg, S. M., Erion, G., Chen, H., DeGrave, A., Prutkin, J. M., Nair, B., Katz, R., Himmelfarb, J., Banber, N., & Lee, S.-I. (2020). *From local explanations to global understanding with explainable AI for trees.* Nature Machine Intelligence, 2, 56-67.
 
 ## License
 
