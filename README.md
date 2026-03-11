@@ -10,7 +10,7 @@
 
 Irithyll implements the SGBT algorithm ([Gunasekara et al., 2024](https://doi.org/10.1007/s10994-024-06517-y)) in pure Rust, providing incremental gradient boosted tree ensembles that learn one sample at a time. Trees use Hoeffding-bound split decisions and are automatically replaced when concept drift is detected, making the model suitable for non-stationary environments where the data distribution shifts over time.
 
-**No competing Rust crate exists for streaming gradient boosted trees.** Irithyll fills this gap with a production-ready, high-performance implementation that goes beyond the original paper.
+Built for systems where data never stops — algorithmic trading, IoT telemetry, real-time anomaly detection — and extends the original paper with continuous adaptation mechanisms for production use.
 
 ## Features
 
