@@ -1,11 +1,13 @@
 [package]
 name = "irithyll"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Streaming Gradient Boosted Trees for evolving data streams"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/evilrat420/irithyll"
+readme = "README.md"
+documentation = "https://docs.rs/irithyll"
 keywords = ["machine-learning", "gradient-boosting", "streaming", "online-learning", "decision-trees"]
 categories = ["algorithms", "science"]
 

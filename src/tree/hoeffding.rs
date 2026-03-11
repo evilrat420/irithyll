@@ -733,14 +733,16 @@ impl StreamingTree for HoeffdingTree {
     /// the leaf's current weight.
     fn predict(&self, features: &[f64]) -> f64 {
         let leaf_id = self.route_to_leaf(features);
-        // The leaf value is stored via set_leaf_value / split_leaf.
-        // We compute it from the leaf state's grad/hess sums.
-        // Actually, we already update it in the arena via set_leaf_value,
-        // but TreeArena may not expose get_leaf_value. Let's use the leaf state.
         if let Some(state) = self.leaf_states.get(&leaf_id.0) {
-            leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda)
+            if state.hess_sum != 0.0 {
+                // Compute live prediction from accumulated statistics.
+                leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda)
+            } else {
+                // Leaf has no accumulated data yet (e.g. freshly restored from
+                // a serialized snapshot). Fall back to the stored leaf value.
+                self.arena.leaf_value[leaf_id.0 as usize]
+            }
         } else {
-            // Leaf has no state — return 0.0 (initial prediction).
             0.0
         }
     }

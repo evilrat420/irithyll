@@ -110,7 +110,7 @@ impl FeatureHistogram {
     /// deferred scaling technique. Instead of decaying all bins on every
     /// sample, we track a running `decay_scale` and store new samples in
     /// un-decayed coordinates. The actual bin values are materialized only
-    /// when read (see [`materialize_decay`]).
+    /// when read (see `materialize_decay()`).
     ///
     /// Mathematically equivalent to eager decay: a gradient `g` added at
     /// epoch `t` contributes `g * alpha^(T - t)` at read time `T`.
@@ -562,7 +562,7 @@ mod tests {
             (4.0, -0.5, 1.0),  // bin 1
         ];
 
-        let edge_vals = vec![3.0, 6.0];
+        let edge_vals = [3.0, 6.0];
         for &(value, gradient, hessian) in &samples {
             // Eager: decay all bins, then accumulate.
             for i in 0..n {
