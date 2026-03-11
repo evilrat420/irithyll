@@ -222,8 +222,8 @@ impl BinningStrategy for KMeansBinning {
             for &x in data.iter() {
                 let mut best_j = 0;
                 let mut best_dist = (x - centers[0]).abs();
-                for j in 1..k {
-                    let d = (x - centers[j]).abs();
+                for (j, &center) in centers.iter().enumerate().skip(1) {
+                    let d = (x - center).abs();
                     if d < best_dist {
                         best_dist = d;
                         best_j = j;

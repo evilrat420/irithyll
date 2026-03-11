@@ -308,9 +308,10 @@ impl LeafModel for MLPLeafModel {
 /// Describes which leaf model architecture to use.
 ///
 /// Used by tree builders to construct fresh leaf models when creating new leaves.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum LeafModelType {
     /// Standard closed-form leaf weight.
+    #[default]
     ClosedForm,
     /// Online ridge regression with the given learning rate.
     Linear { learning_rate: f64 },
@@ -321,11 +322,6 @@ pub enum LeafModelType {
     },
 }
 
-impl Default for LeafModelType {
-    fn default() -> Self {
-        Self::ClosedForm
-    }
-}
 
 impl LeafModelType {
     /// Create a fresh boxed leaf model of this type.
