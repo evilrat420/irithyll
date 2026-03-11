@@ -64,6 +64,9 @@ pub struct TreeArena {
     pub depth: Vec<u16>,
     /// Number of samples routed through this node.
     pub sample_count: Vec<u64>,
+    /// Categorical split bitmask. For categorical splits, bit `i` set means
+    /// category `i` routes left. `None` for continuous splits (threshold-based).
+    pub categorical_mask: Vec<Option<u64>>,
 }
 
 impl TreeArena {
@@ -78,6 +81,7 @@ impl TreeArena {
             is_leaf: Vec::new(),
             depth: Vec::new(),
             sample_count: Vec::new(),
+            categorical_mask: Vec::new(),
         }
     }
 
@@ -94,6 +98,7 @@ impl TreeArena {
             is_leaf: Vec::with_capacity(cap),
             depth: Vec::with_capacity(cap),
             sample_count: Vec::with_capacity(cap),
+            categorical_mask: Vec::with_capacity(cap),
         }
     }
 
@@ -110,6 +115,7 @@ impl TreeArena {
         self.is_leaf.push(true);
         self.depth.push(depth);
         self.sample_count.push(0);
+        self.categorical_mask.push(None);
         NodeId(id)
     }
 
@@ -160,6 +166,36 @@ impl TreeArena {
         self.right[i] = right_id;
 
         (left_id, right_id)
+    }
+
+    /// Split a leaf using a categorical bitmask instead of a threshold.
+    ///
+    /// The `mask` is a `u64` where bit `i` set means category `i` goes left.
+    /// The `threshold` is still stored as the midpoint of the split partition
+    /// for backward compatibility, but routing uses the bitmask.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `leaf_id` does not reference a current leaf node.
+    pub fn split_leaf_categorical(
+        &mut self,
+        leaf_id: NodeId,
+        feature_idx: u32,
+        threshold: f64,
+        left_value: f64,
+        right_value: f64,
+        mask: u64,
+    ) -> (NodeId, NodeId) {
+        let (left_id, right_id) =
+            self.split_leaf(leaf_id, feature_idx, threshold, left_value, right_value);
+        self.categorical_mask[leaf_id.idx()] = Some(mask);
+        (left_id, right_id)
+    }
+
+    /// Return the categorical bitmask for a split node, if it's a categorical split.
+    #[inline]
+    pub fn get_categorical_mask(&self, id: NodeId) -> Option<u64> {
+        self.categorical_mask[id.idx()]
     }
 
     /// Returns `true` if the node at `id` is a leaf.
@@ -262,6 +298,7 @@ impl TreeArena {
         self.is_leaf.clear();
         self.depth.clear();
         self.sample_count.clear();
+        self.categorical_mask.clear();
     }
 }
 

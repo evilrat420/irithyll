@@ -12,6 +12,45 @@ use crate::ensemble::variants::SGBTVariant;
 use crate::error::{ConfigError, Result};
 
 // ---------------------------------------------------------------------------
+// FeatureType
+// ---------------------------------------------------------------------------
+
+/// Declares whether a feature is continuous (default) or categorical.
+///
+/// Categorical features are handled differently in the tree construction:
+/// - **Binning:** One bin per observed category value instead of equal-width bins.
+/// - **Split evaluation:** Fisher optimal binary partitioning — categories are sorted
+///   by gradient_sum/hessian_sum ratio, then the best contiguous partition is found
+///   using the same left-to-right XGBoost gain scan.
+/// - **Routing:** Categorical splits use a `u64` bitmask where bit `i` set means
+///   category `i` goes left. This supports up to 64 distinct category values per feature.
+///
+/// # Example
+///
+/// ```
+/// use irithyll::ensemble::config::FeatureType;
+/// use irithyll::SGBTConfig;
+///
+/// let config = SGBTConfig::builder()
+///     .feature_types(vec![FeatureType::Continuous, FeatureType::Categorical])
+///     .build()
+///     .unwrap();
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FeatureType {
+    /// Numeric feature split by threshold comparisons (default).
+    Continuous,
+    /// Categorical feature split by bitmask partitioning.
+    Categorical,
+}
+
+impl Default for FeatureType {
+    fn default() -> Self {
+        FeatureType::Continuous
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DriftDetectorType
 // ---------------------------------------------------------------------------
 
@@ -177,6 +216,17 @@ pub struct SGBTConfig {
     /// Length must match the number of features in training data.
     #[serde(default)]
     pub feature_names: Option<Vec<String>>,
+
+    /// Optional per-feature type declarations.
+    ///
+    /// When set, declares which features are categorical vs continuous.
+    /// Categorical features use one-bin-per-category binning and Fisher
+    /// optimal binary partitioning for split evaluation.
+    /// Length must match the number of features in training data.
+    ///
+    /// `None` (default) treats all features as continuous.
+    #[serde(default)]
+    pub feature_types: Option<Vec<FeatureType>>,
 }
 
 impl Default for SGBTConfig {
@@ -199,6 +249,7 @@ impl Default for SGBTConfig {
             max_tree_samples: None,
             split_reeval_interval: None,
             feature_names: None,
+            feature_types: None,
         }
     }
 }
@@ -355,6 +406,16 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Set per-feature type declarations.
+    ///
+    /// Declares which features are categorical vs continuous. Categorical features
+    /// use one-bin-per-category binning and Fisher optimal binary partitioning.
+    /// Supports up to 64 distinct category values per categorical feature.
+    pub fn feature_types(mut self, types: Vec<FeatureType>) -> Self {
+        self.config.feature_types = Some(types);
+        self
+    }
+
     /// Validate and build the configuration.
     ///
     /// # Errors
@@ -450,6 +511,23 @@ impl SGBTConfigBuilder {
                     return Err(ConfigError::invalid(
                         "feature_names",
                         format!("duplicate feature name: '{}'", name),
+                    )
+                    .into());
+                }
+            }
+        }
+
+        // -- Feature types --
+        if let Some(ref types) = c.feature_types {
+            if let Some(ref names) = c.feature_names {
+                if !names.is_empty() && !types.is_empty() && names.len() != types.len() {
+                    return Err(ConfigError::invalid(
+                        "feature_types",
+                        format!(
+                            "length ({}) must match feature_names length ({})",
+                            types.len(),
+                            names.len()
+                        ),
                     )
                     .into());
                 }

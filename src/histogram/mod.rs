@@ -5,6 +5,7 @@
 //! statistics per bin, enabling efficient split evaluation.
 
 pub mod bins;
+pub mod categorical;
 pub mod kmeans;
 pub mod quantile;
 #[cfg(feature = "simd")]
@@ -67,6 +68,9 @@ pub enum BinnerKind {
     /// Equal-width binning (default).
     Uniform(uniform::UniformBinning),
 
+    /// Categorical binning — one bin per observed distinct value.
+    Categorical(categorical::CategoricalBinning),
+
     /// K-means binning (feature-gated).
     #[cfg(feature = "kmeans-binning")]
     KMeans(kmeans::KMeansBinning),
@@ -77,6 +81,12 @@ impl BinnerKind {
     #[inline]
     pub fn uniform() -> Self {
         BinnerKind::Uniform(uniform::UniformBinning::new())
+    }
+
+    /// Create a new categorical binner.
+    #[inline]
+    pub fn categorical() -> Self {
+        BinnerKind::Categorical(categorical::CategoricalBinning::new())
     }
 
     /// Create a new k-means binner.
@@ -91,6 +101,7 @@ impl BinnerKind {
     pub fn observe(&mut self, value: f64) {
         match self {
             BinnerKind::Uniform(b) => b.observe(value),
+            BinnerKind::Categorical(b) => b.observe(value),
             #[cfg(feature = "kmeans-binning")]
             BinnerKind::KMeans(b) => b.observe(value),
         }
@@ -101,6 +112,7 @@ impl BinnerKind {
     pub fn compute_edges(&self, n_bins: usize) -> BinEdges {
         match self {
             BinnerKind::Uniform(b) => b.compute_edges(n_bins),
+            BinnerKind::Categorical(b) => b.compute_edges(n_bins),
             #[cfg(feature = "kmeans-binning")]
             BinnerKind::KMeans(b) => b.compute_edges(n_bins),
         }
@@ -111,15 +123,25 @@ impl BinnerKind {
     pub fn reset(&mut self) {
         match self {
             BinnerKind::Uniform(b) => b.reset(),
+            BinnerKind::Categorical(b) => b.reset(),
             #[cfg(feature = "kmeans-binning")]
             BinnerKind::KMeans(b) => b.reset(),
         }
+    }
+
+    /// Whether this binner is for a categorical feature.
+    #[inline]
+    pub fn is_categorical(&self) -> bool {
+        matches!(self, BinnerKind::Categorical(_))
     }
 
     /// Create a fresh instance with the same variant but no data.
     pub fn clone_fresh(&self) -> Self {
         match self {
             BinnerKind::Uniform(_) => BinnerKind::Uniform(uniform::UniformBinning::new()),
+            BinnerKind::Categorical(_) => {
+                BinnerKind::Categorical(categorical::CategoricalBinning::new())
+            }
             #[cfg(feature = "kmeans-binning")]
             BinnerKind::KMeans(_) => BinnerKind::KMeans(kmeans::KMeansBinning::new()),
         }

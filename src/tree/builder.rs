@@ -4,6 +4,8 @@
 //! depth limits, regularization, binning granularity, and the Hoeffding bound
 //! confidence parameter that controls when splits are committed.
 
+use crate::ensemble::config::FeatureType;
+
 /// Configuration for a single streaming decision tree.
 ///
 /// These parameters control tree growth, regularization, and the statistical
@@ -77,6 +79,13 @@ pub struct TreeConfig {
     /// every `n` samples, allowing the tree to adapt its structure over time.
     /// `None` (default) disables re-evaluation.
     pub split_reeval_interval: Option<usize>,
+
+    /// Per-feature type declarations (continuous vs categorical).
+    ///
+    /// When `Some`, categorical features use one-bin-per-category binning and
+    /// Fisher optimal binary partitioning. `None` (default) treats all features
+    /// as continuous.
+    pub feature_types: Option<Vec<FeatureType>>,
 }
 
 impl Default for TreeConfig {
@@ -92,6 +101,7 @@ impl Default for TreeConfig {
             seed: 42,
             leaf_decay_alpha: None,
             split_reeval_interval: None,
+            feature_types: None,
         }
     }
 }
@@ -186,6 +196,20 @@ impl TreeConfig {
     #[inline]
     pub fn split_reeval_interval_opt(mut self, interval: Option<usize>) -> Self {
         self.split_reeval_interval = interval;
+        self
+    }
+
+    /// Set the per-feature type declarations.
+    #[inline]
+    pub fn feature_types(mut self, types: Vec<FeatureType>) -> Self {
+        self.feature_types = Some(types);
+        self
+    }
+
+    /// Optionally set the per-feature type declarations.
+    #[inline]
+    pub fn feature_types_opt(mut self, types: Option<Vec<FeatureType>>) -> Self {
+        self.feature_types = types;
         self
     }
 }

@@ -16,10 +16,12 @@
 //! 3. The ensemble adapts incrementally, with each tree targeting the residual
 //!    of all preceding trees.
 
+pub mod bagged;
 pub mod config;
 pub mod multi_target;
 pub mod multiclass;
 pub mod parallel;
+pub mod quantile_regressor;
 pub mod replacement;
 pub mod step;
 pub mod variants;
@@ -164,7 +166,8 @@ impl<L: Loss> SGBT<L> {
             .delta(config.delta)
             .feature_subsample_rate(config.feature_subsample_rate)
             .leaf_decay_alpha_opt(leaf_decay_alpha)
-            .split_reeval_interval_opt(config.split_reeval_interval);
+            .split_reeval_interval_opt(config.split_reeval_interval)
+            .feature_types_opt(config.feature_types.clone());
 
         let max_tree_samples = config.max_tree_samples;
 
@@ -497,6 +500,7 @@ impl<L: Loss> SGBT<L> {
                 n_features: tree.n_features(),
                 samples_seen: tree.n_samples_seen(),
                 rng_state: tree.rng_state(),
+                categorical_mask: arena.categorical_mask.clone(),
             }
         }
 
@@ -567,6 +571,9 @@ impl SGBT<Box<dyn Loss>> {
                 arena.is_leaf.push(snapshot.is_leaf[i]);
                 arena.depth.push(snapshot.depth[i]);
                 arena.sample_count.push(snapshot.sample_count[i]);
+                // Backward compat: old snapshots have empty categorical_mask
+                let mask = snapshot.categorical_mask.get(i).copied().flatten();
+                arena.categorical_mask.push(mask);
             }
 
             HoeffdingTree::from_arena(
@@ -601,6 +608,7 @@ impl SGBT<Box<dyn Loss>> {
                     .feature_subsample_rate(state.config.feature_subsample_rate)
                     .leaf_decay_alpha_opt(leaf_decay_alpha)
                     .split_reeval_interval_opt(state.config.split_reeval_interval)
+                    .feature_types_opt(state.config.feature_types.clone())
                     .seed(state.config.seed ^ (i as u64));
 
                 let active = rebuild_tree(&step_snap.tree, tree_config.clone());

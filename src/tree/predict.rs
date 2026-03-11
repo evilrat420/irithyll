@@ -101,6 +101,7 @@ mod tests {
             is_leaf: Vec::new(),
             depth: Vec::new(),
             sample_count: Vec::new(),
+            categorical_mask: Vec::new(),
         }
     }
 
@@ -115,6 +116,7 @@ mod tests {
         arena.is_leaf.push(true);
         arena.depth.push(depth);
         arena.sample_count.push(0);
+        arena.categorical_mask.push(None);
         id
     }
 

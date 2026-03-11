@@ -18,6 +18,7 @@
 //! 5. When splitting, use the histogram subtraction trick to initialize one
 //!    child's histograms for free.
 
+use crate::ensemble::config::FeatureType;
 use crate::histogram::bins::LeafHistograms;
 use crate::histogram::{BinEdges, BinnerKind};
 use crate::tree::builder::TreeConfig;
@@ -77,10 +78,29 @@ struct LeafState {
     last_reeval_count: u64,
 }
 
+/// Create binners according to feature types.
+fn make_binners(n_features: usize, feature_types: Option<&[FeatureType]>) -> Vec<BinnerKind> {
+    (0..n_features)
+        .map(|i| {
+            if let Some(ft) = feature_types {
+                if i < ft.len() && ft[i] == FeatureType::Categorical {
+                    return BinnerKind::categorical();
+                }
+            }
+            BinnerKind::uniform()
+        })
+        .collect()
+}
+
 impl LeafState {
     /// Create a fresh leaf state for a leaf with `n_features` features.
     fn new(n_features: usize) -> Self {
-        let binners: Vec<BinnerKind> = (0..n_features).map(|_| BinnerKind::uniform()).collect();
+        Self::new_with_types(n_features, None)
+    }
+
+    /// Create a fresh leaf state respecting per-feature type declarations.
+    fn new_with_types(n_features: usize, feature_types: Option<&[FeatureType]>) -> Self {
+        let binners = make_binners(n_features, feature_types);
 
         Self {
             histograms: None,
@@ -310,11 +330,27 @@ impl HoeffdingTree {
         let mut current = self.root;
         while !self.arena.is_leaf(current) {
             let feat_idx = self.arena.get_feature_idx(current) as usize;
-            let threshold = self.arena.get_threshold(current);
-            current = if features[feat_idx] <= threshold {
-                self.arena.get_left(current)
+            current = if let Some(mask) = self.arena.get_categorical_mask(current) {
+                // Categorical split: use bitmask routing.
+                // The feature value is cast to a bin index. If that bin's bit is set
+                // in the mask, go left; otherwise go right.
+                // For categorical features, the bin index in the histogram corresponds
+                // to the sorted category position, but for bitmask routing we use
+                // the original bin index directly.
+                let cat_val = features[feat_idx] as u64;
+                if cat_val < 64 && (mask >> cat_val) & 1 == 1 {
+                    self.arena.get_left(current)
+                } else {
+                    self.arena.get_right(current)
+                }
             } else {
-                self.arena.get_right(current)
+                // Continuous split: standard threshold comparison.
+                let threshold = self.arena.get_threshold(current);
+                if features[feat_idx] <= threshold {
+                    self.arena.get_left(current)
+                } else {
+                    self.arena.get_right(current)
+                }
             };
         }
         current
@@ -444,8 +480,11 @@ impl HoeffdingTree {
             None => return false,
         };
 
-        // Collect (feature_idx, best_split_candidate) for each feature in the mask.
-        let mut candidates: Vec<(usize, SplitCandidate)> = Vec::new();
+        // Collect (feature_idx, best_split_candidate, optional_fisher_order) for
+        // each feature in the mask. For categorical features, we reorder bins by
+        // Fisher optimal binary partitioning before evaluation.
+        let feature_types = &self.config.feature_types;
+        let mut candidates: Vec<(usize, SplitCandidate, Option<Vec<usize>>)> = Vec::new();
 
         for &feat_idx in &self.feature_mask {
             if feat_idx >= histograms.n_features() {
@@ -455,15 +494,64 @@ impl HoeffdingTree {
             let total_grad = hist.total_gradient();
             let total_hess = hist.total_hessian();
 
-            if let Some(candidate) = self.split_criterion.evaluate(
-                &hist.grad_sums,
-                &hist.hess_sums,
-                total_grad,
-                total_hess,
-                self.config.gamma,
-                self.config.lambda,
-            ) {
-                candidates.push((feat_idx, candidate));
+            let is_categorical = feature_types.as_ref().is_some_and(|ft| {
+                feat_idx < ft.len() && ft[feat_idx] == FeatureType::Categorical
+            });
+
+            if is_categorical {
+                // Fisher optimal binary partitioning:
+                // 1. Compute gradient_sum/hessian_sum ratio per bin
+                // 2. Sort bins by this ratio
+                // 3. Evaluate splits on the sorted order
+                let n_bins = hist.grad_sums.len();
+                if n_bins < 2 {
+                    continue;
+                }
+
+                // Build (bin_index, ratio) pairs, filtering out empty bins
+                let mut bin_order: Vec<usize> = (0..n_bins)
+                    .filter(|&i| hist.hess_sums[i].abs() > 1e-15)
+                    .collect();
+
+                if bin_order.len() < 2 {
+                    continue;
+                }
+
+                // Sort by grad_sum / hess_sum ratio (ascending)
+                bin_order.sort_by(|&a, &b| {
+                    let ratio_a = hist.grad_sums[a] / hist.hess_sums[a];
+                    let ratio_b = hist.grad_sums[b] / hist.hess_sums[b];
+                    ratio_a
+                        .partial_cmp(&ratio_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                // Reorder grad/hess sums according to Fisher order
+                let sorted_grads: Vec<f64> = bin_order.iter().map(|&i| hist.grad_sums[i]).collect();
+                let sorted_hess: Vec<f64> = bin_order.iter().map(|&i| hist.hess_sums[i]).collect();
+
+                if let Some(candidate) = self.split_criterion.evaluate(
+                    &sorted_grads,
+                    &sorted_hess,
+                    total_grad,
+                    total_hess,
+                    self.config.gamma,
+                    self.config.lambda,
+                ) {
+                    candidates.push((feat_idx, candidate, Some(bin_order)));
+                }
+            } else {
+                // Standard continuous feature — evaluate as-is
+                if let Some(candidate) = self.split_criterion.evaluate(
+                    &hist.grad_sums,
+                    &hist.hess_sums,
+                    total_grad,
+                    total_hess,
+                    self.config.gamma,
+                    self.config.lambda,
+                ) {
+                    candidates.push((feat_idx, candidate, None));
+                }
             }
         }
 
@@ -519,7 +607,7 @@ impl HoeffdingTree {
         }
 
         // --- Execute the split ---
-        let (best_feat_idx, best_candidate) = candidates[0];
+        let (best_feat_idx, ref best_candidate, ref fisher_order) = candidates[0];
 
         // Track split gain for feature importance.
         if best_feat_idx < self.split_gains.len() {
@@ -527,17 +615,6 @@ impl HoeffdingTree {
         }
 
         let best_hist = &histograms.histograms[best_feat_idx];
-
-        // Determine the threshold from the bin edge.
-        // The split is at bin_idx: bins [0..=bin_idx] go left.
-        // The threshold is the upper edge of bin_idx.
-        let threshold = if best_candidate.bin_idx < best_hist.edges.edges.len() {
-            best_hist.edges.edges[best_candidate.bin_idx]
-        } else {
-            // Last bin — use a very large threshold (everything goes left).
-            // This shouldn't happen with a well-formed split, but handle it.
-            f64::MAX
-        };
 
         let left_value = leaf_weight(
             best_candidate.left_grad,
@@ -550,14 +627,49 @@ impl HoeffdingTree {
             self.config.lambda,
         );
 
-        // Perform the split in the arena.
-        let (left_id, right_id) = self.arena.split_leaf(
-            leaf_id,
-            best_feat_idx as u32,
-            threshold,
-            left_value,
-            right_value,
-        );
+        // Perform the split — categorical or continuous.
+        let (left_id, right_id) = if let Some(ref order) = fisher_order {
+            // Categorical split: build a bitmask from the Fisher-sorted partition.
+            // bin_idx in the sorted order means bins order[0..=bin_idx] go left.
+            // We need to map those back to original bin indices and set their bits.
+            //
+            // For categorical features, bin index = category value (since we use
+            // one bin per category with midpoint edges).
+            let mut mask: u64 = 0;
+            for &sorted_pos in order.iter().take(best_candidate.bin_idx + 1) {
+                // sorted_pos is the original bin index; for categorical features,
+                // bin index corresponds to the category's position in sorted categories.
+                // The actual category value is stored as an integer that maps to this bin.
+                if sorted_pos < 64 {
+                    mask |= 1u64 << sorted_pos;
+                }
+            }
+
+            // Threshold stores 0.0 for categorical splits (routing uses mask).
+            self.arena.split_leaf_categorical(
+                leaf_id,
+                best_feat_idx as u32,
+                0.0,
+                left_value,
+                right_value,
+                mask,
+            )
+        } else {
+            // Continuous split: standard threshold from bin edge.
+            let threshold = if best_candidate.bin_idx < best_hist.edges.edges.len() {
+                best_hist.edges.edges[best_candidate.bin_idx]
+            } else {
+                f64::MAX
+            };
+
+            self.arena.split_leaf(
+                leaf_id,
+                best_feat_idx as u32,
+                threshold,
+                left_value,
+                right_value,
+            )
+        };
 
         // Build child histograms using the subtraction trick.
         // The "left" child gets a fresh histogram set built from the parent's
@@ -616,9 +728,13 @@ impl HoeffdingTree {
                 let left_hists = LeafHistograms::new(&edges_per_feature);
                 let right_hists = LeafHistograms::new(&edges_per_feature);
 
+                let ft = self.config.feature_types.as_deref();
+                let child_binners_l = make_binners(nf, ft);
+                let child_binners_r = make_binners(nf, ft);
+
                 let left_state = LeafState {
                     histograms: Some(left_hists),
-                    binners: (0..nf).map(|_| BinnerKind::uniform()).collect(),
+                    binners: child_binners_l,
                     bins_ready: true,
                     grad_sum: 0.0,
                     hess_sum: 0.0,
@@ -627,7 +743,7 @@ impl HoeffdingTree {
 
                 let right_state = LeafState {
                     histograms: Some(right_hists),
-                    binners: (0..nf).map(|_| BinnerKind::uniform()).collect(),
+                    binners: child_binners_r,
                     bins_ready: true,
                     grad_sum: 0.0,
                     hess_sum: 0.0,
@@ -638,13 +754,15 @@ impl HoeffdingTree {
                 self.leaf_states[right_id.0 as usize] = Some(right_state);
             } else {
                 // Parent didn't have histograms (shouldn't happen if bins_ready).
-                self.leaf_states[left_id.0 as usize] = Some(LeafState::new(nf));
-                self.leaf_states[right_id.0 as usize] = Some(LeafState::new(nf));
+                let ft = self.config.feature_types.as_deref();
+                self.leaf_states[left_id.0 as usize] = Some(LeafState::new_with_types(nf, ft));
+                self.leaf_states[right_id.0 as usize] = Some(LeafState::new_with_types(nf, ft));
             }
         } else {
             // No parent state found (shouldn't happen).
-            self.leaf_states[left_id.0 as usize] = Some(LeafState::new(nf));
-            self.leaf_states[right_id.0 as usize] = Some(LeafState::new(nf));
+            let ft = self.config.feature_types.as_deref();
+            self.leaf_states[left_id.0 as usize] = Some(LeafState::new_with_types(nf, ft));
+            self.leaf_states[right_id.0 as usize] = Some(LeafState::new_with_types(nf, ft));
         }
 
         true
@@ -673,7 +791,7 @@ impl StreamingTree for HoeffdingTree {
                 .get_mut(self.root.0 as usize)
                 .and_then(|o| o.as_mut())
             {
-                state.binners = (0..n).map(|_| BinnerKind::uniform()).collect();
+                state.binners = make_binners(n, self.config.feature_types.as_deref());
             }
             n
         };
@@ -699,7 +817,10 @@ impl StreamingTree for HoeffdingTree {
             self.leaf_states.resize_with(idx + 1, || None);
         }
         if self.leaf_states[idx].is_none() {
-            self.leaf_states[idx] = Some(LeafState::new(n_features));
+            self.leaf_states[idx] = Some(LeafState::new_with_types(
+                n_features,
+                self.config.feature_types.as_deref(),
+            ));
         }
         let state = self.leaf_states[idx].as_mut().unwrap();
 
@@ -825,7 +946,10 @@ impl StreamingTree for HoeffdingTree {
         // Insert a placeholder leaf state for the new root.
         let n_features = self.n_features.unwrap_or(0);
         self.leaf_states.resize_with(root.0 as usize + 1, || None);
-        self.leaf_states[root.0 as usize] = Some(LeafState::new(n_features));
+        self.leaf_states[root.0 as usize] = Some(LeafState::new_with_types(
+            n_features,
+            self.config.feature_types.as_deref(),
+        ));
 
         self.samples_seen = 0;
         self.feature_mask.clear();

@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.0.0] - 2026-03-11
+
+### Added
+
+- **Categorical feature handling** -- Fisher optimal binary partitioning for categorical
+  splits in Hoeffding trees. Categories are sorted by gradient/hessian ratio, then the
+  existing XGBoostGain evaluator finds the best contiguous partition. Split routing uses
+  a `u64` bitmask (up to 64 categories per feature). Configure via
+  `SGBTConfig::builder().feature_types(vec![FeatureType::Categorical, FeatureType::Continuous])`.
+  `CategoricalBinning` strategy creates one bin per observed distinct value.
+- **BaggedSGBT (Oza online bagging)** -- `BaggedSGBT` wraps M independent `SGBT<L>`
+  instances with Poisson(1) weighting per bag per sample. Implements the SGB(Oza)
+  algorithm from Gunasekara et al. (2025) for variance reduction in streaming gradient
+  boosted regression. Final prediction is the mean across all bags. Deterministic
+  seeding with xorshift64 PRNG and Knuth's Poisson sampling.
+- **Non-crossing multi-quantile regression** -- `QuantileRegressorSGBT` trains K
+  independent `SGBT<QuantileLoss>` models (one per quantile level) with PAVA (Pool
+  Adjacent Violators Algorithm) post-prediction to enforce monotonicity. O(K) isotonic
+  regression guarantees `predict(tau_i) <= predict(tau_j)` for `tau_i < tau_j`.
+  `predict_interval(features, lower_tau, upper_tau)` returns calibrated prediction
+  intervals. Auto-sorts and validates quantile levels at construction time.
+- **`FeatureType` enum** -- `FeatureType::Continuous` and `FeatureType::Categorical`
+  propagated from `SGBTConfig` through `TreeConfig` to leaf state binner creation.
+  Backward-compatible: `feature_types` defaults to `None` (all continuous).
+- **Categorical bitmask routing in `TreeArena`** -- `categorical_mask: Vec<Option<u64>>`
+  stored per node. `split_leaf_categorical()` sets bitmask; `route_to_leaf()` dispatches
+  via `(mask >> cat_val) & 1`. Serializable with `#[serde(default)]` for backward compat.
+
 ## [4.0.0] - 2026-03-11
 
 ### Added
@@ -174,6 +202,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[5.0.0]: https://github.com/evilrat420/irithyll/compare/v4.0.0...v5.0.0
 [4.0.0]: https://github.com/evilrat420/irithyll/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/evilrat420/irithyll/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/evilrat420/irithyll/compare/v1.0.0...v2.0.0

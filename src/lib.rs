@@ -89,9 +89,11 @@ pub mod onnx_export;
 
 // Re-exports — core types
 pub use drift::{DriftDetector, DriftSignal};
-pub use ensemble::config::SGBTConfig;
+pub use ensemble::bagged::BaggedSGBT;
+pub use ensemble::config::{FeatureType, SGBTConfig};
 pub use ensemble::multi_target::MultiTargetSGBT;
 pub use ensemble::multiclass::MulticlassSGBT;
+pub use ensemble::quantile_regressor::QuantileRegressorSGBT;
 pub use ensemble::{DynSGBT, SGBT};
 pub use error::{ConfigError, IrithyllError};
 pub use histogram::{BinnerKind, BinningStrategy};

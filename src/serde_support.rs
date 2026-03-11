@@ -101,6 +101,9 @@ pub struct TreeSnapshot {
     pub n_features: Option<usize>,
     pub samples_seen: u64,
     pub rng_state: u64,
+    /// Categorical split bitmasks (v5+). `None` entries are continuous splits.
+    #[serde(default)]
+    pub categorical_mask: Vec<Option<u64>>,
 }
 
 /// Serializable snapshot of a single boosting step.
