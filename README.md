@@ -8,40 +8,42 @@
 
 **Streaming Gradient Boosted Trees for evolving data streams.**
 
-Irithyll implements the SGBT algorithm ([Gunasekara et al., 2024](https://doi.org/10.1007/s10994-024-06517-y)) in pure Rust, providing incremental gradient boosted tree ensembles that learn one sample at a time. Trees use Hoeffding-bound split decisions and are automatically replaced when concept drift is detected, making the model suitable for non-stationary environments where the data distribution shifts over time.
+Irithyll is a pure Rust implementation of the SGBT algorithm ([Gunasekara et al., 2024](https://doi.org/10.1007/s10994-024-06517-y)). It learns one sample at a time. No batches, no windows, no retraining. Each tree in the ensemble uses Hoeffding-bound split decisions to grow incrementally, and when the data distribution shifts, concept drift detectors trigger automatic tree replacement so the model stays current.
 
-Built for systems where data never stops — algorithmic trading, IoT telemetry, real-time anomaly detection — and extends the original paper with continuous adaptation mechanisms for production use.
+This started as a real need: a gradient boosted tree that could sit inside a live trading system, ingesting samples as they arrive and adapting when markets change regime. The paper laid the foundation, but production use required going further. So irithyll adds EWMA leaf decay for continuous forgetting, lazy O(1) histogram decay (because decaying every bin on every sample doesn't scale), proactive tree replacement on a timer, and EFDT-style split re-evaluation at max-depth leaves. These aren't cosmetic extras; they're what makes the difference between a research prototype and something you can actually deploy.
 
 ## Features
 
 ### Core Algorithm
-- **True online learning** -- train one sample at a time with `train_one()`, no batching required
-- **Concept drift detection** -- automatic tree replacement via Page-Hinkley, ADWIN, or DDM detectors
-- **Multi-class support** -- `MulticlassSGBT` with one-vs-rest committees and softmax normalization
-- **Three SGBT variants** -- Standard, Skip (SGBT-SK), and MultipleIterations (SGBT-MI) per the paper
-- **Pluggable loss functions** -- squared, logistic, softmax, Huber, or bring your own via the `Loss` trait
-- **Hoeffding tree splitting** -- statistically-grounded split decisions with configurable confidence
-- **XGBoost-style regularization** -- L2 (`lambda`) and minimum gain (`gamma`) on leaf weights
+- **True online learning** with `train_one()`, one sample at a time
+- **Concept drift detection** via Page-Hinkley, ADWIN, or DDM, with automatic tree replacement
+- **Multi-class support** through `MulticlassSGBT` with one-vs-rest committees
+- **Three SGBT variants** from the paper: Standard, Skip (SGBT-SK), and MultipleIterations (SGBT-MI)
+- **Pluggable loss functions**: squared, logistic, softmax, Huber, or implement the `Loss` trait yourself
+- **Hoeffding tree splitting** with configurable confidence bounds
+- **XGBoost-style regularization**: L2 (`lambda`) and minimum gain (`gamma`)
 
-### Streaming Adaptation (beyond the paper)
-- **EWMA leaf decay** -- exponential moving average on leaf statistics via `leaf_half_life`, enabling continuous adaptation without tree replacement
-- **Lazy histogram decay** -- O(1) amortized forward decay per sample (not O(n_bins)), mathematically exact with automatic renormalization
-- **Proactive tree replacement** -- time-based tree cycling via `max_tree_samples`, independent of drift detectors
-- **Split re-evaluation** -- EFDT-inspired re-evaluation of max-depth leaves via `split_reeval_interval`
+### Streaming Adaptation
+These go beyond the original paper to handle the realities of long-running, non-stationary systems:
+
+- **EWMA leaf decay** (`leaf_half_life`): exponential moving average on leaf statistics so the model gradually forgets old data without needing to replace entire trees
+- **Lazy histogram decay**: the decay math is O(1) per sample instead of O(n_bins), with exact results. The trick is storing samples in un-decayed coordinates and only materializing the decay when bins are actually read at split evaluation time
+- **Proactive tree replacement** (`max_tree_samples`): cycle trees on a timer, independent of drift detectors. Useful when drift is gradual and detectors don't fire
+- **Split re-evaluation** (`split_reeval_interval`): EFDT-inspired re-checking of max-depth leaves to see if splitting would now help
 
 ### Production Infrastructure
-- **Async tokio-native streaming** -- `AsyncSGBT` with bounded channels, concurrent `Predictor` handles, and backpressure
-- **Model checkpointing** -- `save_model()` / `load_model()` for JSON checkpoint/restore with backward-compatible deserialization
-- **Online metrics** -- incremental MAE, MSE, RMSE, R-squared, accuracy, precision, recall, F1, and log loss with O(1) state
-- **Feature importance** -- accumulated split gain per feature across the ensemble
-- **Deterministic seeding** -- reproducible results via `SGBTConfig::seed`
+- **Async streaming** via `AsyncSGBT` with tokio channels, concurrent `Predictor` handles, and backpressure
+- **Model checkpointing** with `save_model()` / `load_model()` for JSON-based checkpoint and restore
+- **Online metrics**: incremental MAE, MSE, RMSE, R-squared, accuracy, precision, recall, F1, log loss
+- **Feature importance** from accumulated split gain across the ensemble
+- **Deterministic seeding** for reproducible results
 
 ### Optional Accelerators
-- **Parallel training** (`parallel`) -- Rayon-based data-parallel tree training
-- **SIMD histograms** (`simd`) -- AVX2 intrinsics for histogram gradient summation
-- **Arrow integration** (`arrow`) -- train from `RecordBatch`, predict to arrays
-- **Parquet I/O** (`parquet`) -- bulk training directly from Parquet files
-- **ONNX export** (`onnx`) -- export trained models for cross-platform inference
+- **Parallel training** (`parallel`): Rayon-based data-parallel tree training
+- **SIMD histograms** (`simd`): AVX2 intrinsics for histogram gradient summation
+- **Arrow integration** (`arrow`): train from `RecordBatch`, predict to arrays
+- **Parquet I/O** (`parquet`): bulk training directly from Parquet files
+- **ONNX export** (`onnx`): export trained models for cross-platform inference
 
 ## Quick Start
 
@@ -186,7 +188,7 @@ irithyll/
 
 ## Configuration
 
-All hyperparameters are set via the builder pattern with validation on `build()`:
+All hyperparameters go through the builder pattern, validated on `build()`:
 
 ```rust
 use irithyll::SGBTConfig;
@@ -257,7 +259,7 @@ The MSRV is **1.75**. This is checked in CI and will only be raised in minor ver
 
 ## References
 
-> Gunasekara, N., Pfahringer, B., Gomes, H. M., & Bifet, A. (2024). *Gradient boosted trees for evolving data streams.* Machine Learning, 113, 3325--3352.
+> Gunasekara, N., Pfahringer, B., Gomes, H. M., & Bifet, A. (2024). *Gradient boosted trees for evolving data streams.* Machine Learning, 113, 3325-3352.
 
 ## License
 
