@@ -68,9 +68,9 @@ fn enforce_monotonicity(values: &mut [f64]) {
     let mut block_counts: Vec<usize> = Vec::with_capacity(n);
     let mut block_starts: Vec<usize> = Vec::with_capacity(n);
 
-    for i in 0..n {
+    for (i, &val) in values.iter().enumerate() {
         // Push new singleton block
-        block_sums.push(values[i]);
+        block_sums.push(val);
         block_counts.push(1);
         block_starts.push(i);
 

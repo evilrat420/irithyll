@@ -36,18 +36,13 @@ use crate::error::{ConfigError, Result};
 ///     .build()
 ///     .unwrap();
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum FeatureType {
     /// Numeric feature split by threshold comparisons (default).
+    #[default]
     Continuous,
     /// Categorical feature split by bitmask partitioning.
     Categorical,
-}
-
-impl Default for FeatureType {
-    fn default() -> Self {
-        FeatureType::Continuous
-    }
 }
 
 // ---------------------------------------------------------------------------

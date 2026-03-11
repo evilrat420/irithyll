@@ -494,9 +494,9 @@ impl HoeffdingTree {
             let total_grad = hist.total_gradient();
             let total_hess = hist.total_hessian();
 
-            let is_categorical = feature_types.as_ref().is_some_and(|ft| {
-                feat_idx < ft.len() && ft[feat_idx] == FeatureType::Categorical
-            });
+            let is_categorical = feature_types
+                .as_ref()
+                .is_some_and(|ft| feat_idx < ft.len() && ft[feat_idx] == FeatureType::Categorical);
 
             if is_categorical {
                 // Fisher optimal binary partitioning:
