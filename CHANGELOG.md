@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] - 2026-03-11
+
+### Added
+
+- **Expectile loss** -- `ExpectileLoss { tau }` for asymmetric L2 regression. Natively
+  compatible with second-order boosting (well-defined positive Hessian for all tau).
+  `tau > 0.5` penalizes under-prediction; `tau < 0.5` penalizes over-prediction.
+- **Quantile (pinball) loss** -- `QuantileLoss { tau }` for conditional quantile
+  regression. Uses hessian=1 pseudo-Huber trick for streaming tree compatibility,
+  matching the approach used by LightGBM and XGBoost internally.
+- **Rolling metrics** -- `RollingRegressionMetrics` and `RollingClassificationMetrics`
+  with sliding window + revert pattern. Sliding Welford for O(1) R-squared over
+  finite windows. MAE, MSE, RMSE, accuracy, precision, recall, F1, log loss.
+- **EWMA metrics** -- `EwmaRegressionMetrics` and `EwmaClassificationMetrics` for
+  exponentially weighted metric tracking. O(1) memory, no buffer needed.
+- **Adaptive Conformal Intervals** -- `AdaptiveConformalInterval` implements ACI
+  (Gibbs & Candes, 2021) for distribution-free prediction intervals under drift.
+  Adapts miscoverage rate online to maintain target coverage probability.
+- **Feature importance drift monitor** -- `ImportanceDriftMonitor` feeds per-feature
+  |SHAP| values into drift detectors (PHT, ADWIN, or DDM). Detects reasoning shifts
+  before accuracy drops. Configurable sample rate for amortized SHAP cost. No
+  existing open-source library offers this capability.
+- **Bincode serialization** -- `serde-bincode` feature flag now functional with
+  `to_bincode`, `from_bincode`, `save_model_bincode`, `load_model_bincode` for
+  compact binary model persistence (typically 3-5x smaller than JSON).
+
 ## [3.0.0] - 2026-03-11
 
 ### Added
@@ -148,6 +174,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[4.0.0]: https://github.com/evilrat420/irithyll/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/evilrat420/irithyll/compare/v2.0.0...v3.0.0
 [2.0.0]: https://github.com/evilrat420/irithyll/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/evilrat420/irithyll/compare/v0.1.0...v1.0.0

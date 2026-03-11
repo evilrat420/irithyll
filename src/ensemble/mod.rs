@@ -460,7 +460,7 @@ impl<L: Loss> SGBT<L> {
     /// Returns [`IrithyllError::Serialization`](crate::IrithyllError::Serialization)
     /// if the loss does not implement `loss_type()` (returns `None`). For custom
     /// losses, use [`to_model_state_with`](Self::to_model_state_with) instead.
-    #[cfg(feature = "serde-json")]
+    #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
     pub fn to_model_state(&self) -> crate::error::Result<crate::serde_support::ModelState> {
         let loss_type = self.loss.loss_type().ok_or_else(|| {
             crate::error::IrithyllError::Serialization(
@@ -475,7 +475,7 @@ impl<L: Loss> SGBT<L> {
     /// Serialize the model with an explicit [`LossType`](crate::loss::LossType) tag.
     ///
     /// Use this for custom loss functions that don't implement `loss_type()`.
-    #[cfg(feature = "serde-json")]
+    #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
     pub fn to_model_state_with(
         &self,
         loss_type: crate::loss::LossType,
@@ -536,7 +536,7 @@ impl<L: Loss> SGBT<L> {
 // DynSGBT: deserialization returns a dynamically-dispatched model
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "serde-json")]
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
 impl SGBT<Box<dyn Loss>> {
     /// Reconstruct an SGBT model from a [`ModelState`](crate::serde_support::ModelState).
     ///

@@ -100,6 +100,7 @@ pub use sample::{Observation, Sample, SampleRef};
 pub use tree::StreamingTree;
 
 // Re-exports — explainability
+pub use explain::importance_drift::ImportanceDriftMonitor;
 pub use explain::streaming::StreamingShap;
 pub use explain::treeshap::ShapValues;
 
@@ -111,4 +112,7 @@ pub use ensemble::parallel::ParallelSGBT;
 pub use stream::{AsyncSGBT, Prediction, PredictionStream, Predictor, SampleSender};
 
 // Re-exports — metrics
+pub use metrics::conformal::AdaptiveConformalInterval;
+pub use metrics::ewma::{EwmaClassificationMetrics, EwmaRegressionMetrics};
+pub use metrics::rolling::{RollingClassificationMetrics, RollingRegressionMetrics};
 pub use metrics::{ClassificationMetrics, FeatureImportance, MetricSet, RegressionMetrics};

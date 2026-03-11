@@ -3,8 +3,10 @@
 //! Each loss provides gradient and hessian computations used by the boosting
 //! loop to compute pseudo-residuals for tree fitting.
 
+pub mod expectile;
 pub mod huber;
 pub mod logistic;
+pub mod quantile;
 pub mod softmax;
 pub mod squared;
 
@@ -21,7 +23,10 @@ pub mod squared;
 /// Custom losses return `None` from `loss_type()` and must be handled manually
 /// during serialization (see [`SGBT::to_model_state_with`](crate::SGBT::to_model_state_with)).
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "serde-json", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    any(feature = "serde-json", feature = "serde-bincode"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub enum LossType {
     /// Squared error loss (regression).
     Squared,
@@ -37,6 +42,16 @@ pub enum LossType {
         /// Number of classes.
         n_classes: usize,
     },
+    /// Expectile loss with asymmetry parameter.
+    Expectile {
+        /// Asymmetry parameter tau in (0, 1).
+        tau: f64,
+    },
+    /// Quantile (pinball) loss with target quantile.
+    Quantile {
+        /// Target quantile tau in (0, 1).
+        tau: f64,
+    },
 }
 
 impl LossType {
@@ -47,6 +62,8 @@ impl LossType {
             LossType::Logistic => Box::new(logistic::LogisticLoss),
             LossType::Huber { delta } => Box::new(huber::HuberLoss { delta }),
             LossType::Softmax { n_classes } => Box::new(softmax::SoftmaxLoss { n_classes }),
+            LossType::Expectile { tau } => Box::new(expectile::ExpectileLoss::new(tau)),
+            LossType::Quantile { tau } => Box::new(quantile::QuantileLoss::new(tau)),
         }
     }
 }

@@ -9,8 +9,11 @@
 //! - [`MetricSet`] -- Convenience wrapper combining regression and classification.
 
 pub mod classification;
+pub mod conformal;
+pub mod ewma;
 pub mod importance;
 pub mod regression;
+pub mod rolling;
 
 pub use classification::ClassificationMetrics;
 pub use importance::FeatureImportance;

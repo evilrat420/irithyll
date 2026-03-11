@@ -12,6 +12,7 @@
 //! base_value + sum(shap_values) ≈ f.predict(x)
 //! ```
 
+pub mod importance_drift;
 pub mod streaming;
 pub mod treeshap;
 

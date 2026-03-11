@@ -71,15 +71,15 @@ pub fn from_json_bytes<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T
 // Model checkpoint/restore serialization
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "serde-json")]
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
 use crate::ensemble::config::SGBTConfig;
-#[cfg(feature = "serde-json")]
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
 use crate::ensemble::SGBT;
-#[cfg(feature = "serde-json")]
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
 use crate::loss::Loss;
 
 // Re-export LossType from the loss module for backwards compatibility.
-#[cfg(feature = "serde-json")]
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
 pub use crate::loss::LossType;
 
 /// Serializable snapshot of the tree arena structure.
@@ -87,7 +87,7 @@ pub use crate::loss::LossType;
 /// Captures the minimal state needed to reconstruct a tree for prediction:
 /// node topology, split decisions, and leaf values. Histogram accumulators
 /// are NOT serialized -- they rebuild naturally from continued training.
-#[cfg(feature = "serde-json")]
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeSnapshot {
     pub feature_idx: Vec<u32>,
@@ -104,7 +104,7 @@ pub struct TreeSnapshot {
 }
 
 /// Serializable snapshot of a single boosting step.
-#[cfg(feature = "serde-json")]
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepSnapshot {
     pub tree: TreeSnapshot,
@@ -121,7 +121,7 @@ pub struct StepSnapshot {
 ///
 /// Captures everything needed to reconstruct a trained model for prediction
 /// and continued training. The loss function is stored as a [`LossType`] tag.
-#[cfg(feature = "serde-json")]
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelState {
     pub config: SGBTConfig,
@@ -172,6 +172,65 @@ pub fn save_model_with<L: Loss>(model: &SGBT<L>, loss_type: LossType) -> Result<
 #[cfg(feature = "serde-json")]
 pub fn load_model(json: &str) -> Result<crate::ensemble::DynSGBT> {
     let state: ModelState = from_json(json)?;
+    Ok(SGBT::from_model_state(state))
+}
+
+// ---------------------------------------------------------------------------
+// Bincode serialization (compact binary format)
+// ---------------------------------------------------------------------------
+
+/// Serialize a value to bincode bytes.
+///
+/// Requires the `serde-bincode` feature.
+///
+/// # Errors
+///
+/// Returns [`IrithyllError::Serialization`] if serialization fails.
+#[cfg(feature = "serde-bincode")]
+pub fn to_bincode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
+    bincode::serde::encode_to_vec(value, bincode::config::standard())
+        .map_err(|e| IrithyllError::Serialization(e.to_string()))
+}
+
+/// Deserialize a value from bincode bytes.
+///
+/// Requires the `serde-bincode` feature.
+///
+/// # Errors
+///
+/// Returns [`IrithyllError::Serialization`] if deserialization fails.
+#[cfg(feature = "serde-bincode")]
+pub fn from_bincode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
+    let (val, _) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())
+        .map_err(|e| IrithyllError::Serialization(e.to_string()))?;
+    Ok(val)
+}
+
+/// Save an SGBT model to bincode bytes.
+///
+/// Compact binary format -- typically 3-5x smaller than JSON.
+///
+/// # Errors
+///
+/// Returns [`IrithyllError::Serialization`] if the loss type cannot be
+/// auto-detected or if serialization fails.
+#[cfg(feature = "serde-bincode")]
+pub fn save_model_bincode<L: Loss>(model: &SGBT<L>) -> Result<Vec<u8>> {
+    let state = model.to_model_state()?;
+    to_bincode(&state)
+}
+
+/// Load an SGBT model from bincode bytes.
+///
+/// Returns a [`DynSGBT`](crate::ensemble::DynSGBT) because the concrete
+/// loss type is determined at runtime.
+///
+/// # Errors
+///
+/// Returns [`IrithyllError::Serialization`] if deserialization fails.
+#[cfg(feature = "serde-bincode")]
+pub fn load_model_bincode(bytes: &[u8]) -> Result<crate::ensemble::DynSGBT> {
+    let state: ModelState = from_bincode(bytes)?;
     Ok(SGBT::from_model_state(state))
 }
 
