@@ -1,18 +1,18 @@
 //! Streaming learner implementations for polymorphic model composition.
 //!
-//! Each learner in this module implements the [`StreamingLearner`] trait,
+//! Each learner in this module implements the [`crate::learner::StreamingLearner`] trait,
 //! enabling runtime-polymorphic stacking via `Box<dyn StreamingLearner>`.
 //!
 //! # Learners
 //!
 //! | Module | Type | Algorithm |
 //! |--------|------|-----------|
-//! | [`linear`] | [`StreamingLinearModel`](linear::StreamingLinearModel) | SGD with L1/L2/ElasticNet regularization |
-//! | [`naive_bayes`] | [`GaussianNB`](naive_bayes::GaussianNB) | Incremental Gaussian Naive Bayes classifier |
-//! | [`mondrian`] | [`MondrianForest`](mondrian::MondrianForest) | Online random forest with lifetime-based splits |
-//! | [`rls`] | [`RecursiveLeastSquares`](rls::RecursiveLeastSquares) | Exact streaming OLS via Sherman-Morrison |
-//! | [`rls`] | [`StreamingPolynomialRegression`](rls::StreamingPolynomialRegression) | RLS with polynomial feature expansion |
-//! | [`rls`] | [`LocallyWeightedRegression`](rls::LocallyWeightedRegression) | Nadaraya-Watson with circular buffer |
+//! | [`linear`] | [`StreamingLinearModel`] | SGD with L1/L2/ElasticNet regularization |
+//! | [`naive_bayes`] | [`GaussianNB`] | Incremental Gaussian Naive Bayes classifier |
+//! | [`mondrian`] | [`MondrianForest`] | Online random forest with lifetime-based splits |
+//! | [`rls`] | [`RecursiveLeastSquares`] | Exact streaming OLS via Sherman-Morrison |
+//! | [`rls`] | [`StreamingPolynomialRegression`] | RLS with polynomial feature expansion |
+//! | [`rls`] | [`LocallyWeightedRegression`] | Nadaraya-Watson with circular buffer |
 
 pub mod linear;
 pub mod mondrian;

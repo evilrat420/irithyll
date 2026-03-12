@@ -444,7 +444,7 @@ impl fmt::Debug for MondrianTree {
 /// Online random forest for streaming regression.
 ///
 /// The ensemble averages predictions across `n_trees` independently grown
-/// [`MondrianTree`]s. Each tree learns incrementally, splitting leaves when
+/// `MondrianTree`s. Each tree learns incrementally, splitting leaves when
 /// they accumulate enough samples and the feature range is non-trivial.
 ///
 /// # Example
