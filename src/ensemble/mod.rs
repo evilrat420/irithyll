@@ -19,11 +19,14 @@
 pub mod bagged;
 pub mod config;
 pub mod distributional;
+pub mod lr_schedule;
+pub mod moe;
 pub mod multi_target;
 pub mod multiclass;
 pub mod parallel;
 pub mod quantile_regressor;
 pub mod replacement;
+pub mod stacked;
 pub mod step;
 pub mod variants;
 
@@ -526,6 +529,19 @@ impl<L: Loss> SGBT<L> {
     /// Access the configuration.
     pub fn config(&self) -> &SGBTConfig {
         &self.config
+    }
+
+    /// Set the learning rate for future boosting rounds.
+    ///
+    /// This allows external schedulers (e.g., [`lr_schedule::LRScheduler`]) to
+    /// adapt the rate over time without rebuilding the model.
+    ///
+    /// # Arguments
+    ///
+    /// * `lr` — New learning rate (should be positive and finite)
+    #[inline]
+    pub fn set_learning_rate(&mut self, lr: f64) {
+        self.config.learning_rate = lr;
     }
 
     /// Immutable access to the boosting steps.

@@ -3,7 +3,7 @@ members = [".", "irithyll-python"]
 
 [package]
 name = "irithyll"
-version = "6.0.0"
+version = "6.1.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Streaming Gradient Boosted Trees for evolving data streams"

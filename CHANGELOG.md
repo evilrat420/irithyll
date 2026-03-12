@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.0] - 2026-03-12
+
+### Added
+
+- **StreamingLearner trait** -- object-safe `StreamingLearner` trait for polymorphic model
+  composition. `train_one()`, `predict()`, `n_samples_seen()`, `reset()` with default
+  `train()` (unit weight) and `predict_batch()`. `SGBTLearner<L>` adapter wraps any
+  `SGBT<L>` into the trait. Supports `Box<dyn StreamingLearner>` for runtime-polymorphic
+  stacking ensembles.
+- **Mixture of Experts** -- `MoESGBT` with K specialist SGBT experts and a learned
+  linear softmax gating network. Gate updated via online SGD cross-entropy toward the
+  best-performing expert. Soft gating (all experts weighted) and Hard gating (top-k only).
+  Methods: `predict_with_gating()`, `gating_probabilities()`, `expert_losses()`.
+- **Model stacking meta-learner** -- `StackedEnsemble` combining heterogeneous
+  `Box<dyn StreamingLearner>` base learners through a trainable meta-learner. Temporal
+  holdout prevents leakage: base predictions collected before training bases. Optional
+  feature passthrough. Itself implements `StreamingLearner` for recursive stacking.
+- **Learning rate scheduling** -- `LRScheduler` trait with 5 implementations:
+  `ConstantLR`, `LinearDecayLR`, `ExponentialDecayLR`, `CosineAnnealingLR`, `PlateauLR`.
+  `SGBT::set_learning_rate()` method for external scheduler integration.
+- **Streaming linear model** -- `StreamingLinearModel` with SGD and pluggable
+  regularization: `None`, `Ridge` (L2 weight decay), `Lasso` (L1 proximal/soft-threshold),
+  `ElasticNet` (combined L1+L2). Lazy feature initialization. Implements `StreamingLearner`.
+- **Gaussian Naive Bayes** -- `GaussianNB` incremental classifier with per-class Welford
+  mean/variance tracking. Weighted samples, automatic class discovery, sklearn-style
+  `var_smoothing`. `predict_proba()` and `predict_log_proba()` for probability output.
+  Implements `StreamingLearner`.
+- **Mondrian Forest** -- `MondrianForest` online random forest with arena-based SoA storage.
+  Feature-range-proportional random splits, configurable via `MondrianForestConfig` builder
+  (n_trees, max_depth, lifetime, seed). Implements `StreamingLearner`.
+- **Recursive Least Squares** -- `RecursiveLeastSquares` exact streaming OLS via
+  Sherman-Morrison matrix inversion lemma. O(d²) per sample, forgetting factor for
+  non-stationary environments. Implements `StreamingLearner`.
+- **Streaming polynomial regression** -- `StreamingPolynomialRegression` wrapping RLS
+  with online polynomial feature expansion up to arbitrary degree.
+  Implements `StreamingLearner`.
+- **Locally weighted regression** -- `LocallyWeightedRegression` Nadaraya-Watson kernel
+  regression over a fixed-capacity circular buffer with Gaussian kernel weighting.
+  Implements `StreamingLearner`.
+- **Incremental normalizer** -- `IncrementalNormalizer` with Welford online mean/variance
+  per feature. `update()`, `transform()`, `update_and_transform()`, `transform_in_place()`.
+  Lazy feature count initialization.
+- **Online feature selector** -- `OnlineFeatureSelector` with EWMA importance tracking
+  and configurable `keep_fraction`. Masks low-importance features after warmup period.
+
 ## [6.0.0] - 2026-03-12
 
 ### Added

@@ -80,6 +80,9 @@ pub mod tree;
 
 pub mod anomaly;
 pub mod explain;
+pub mod learner;
+pub mod learners;
+pub mod preprocessing;
 pub mod serde_support;
 
 #[cfg(feature = "arrow")]
@@ -123,3 +126,18 @@ pub use metrics::{ClassificationMetrics, FeatureImportance, MetricSet, Regressio
 
 // Re-exports — anomaly detection
 pub use anomaly::hst::{AnomalyScore, HSTConfig, HalfSpaceTree};
+
+// Re-exports — streaming learner trait
+pub use learner::{SGBTLearner, StreamingLearner};
+
+// Re-exports — preprocessing
+pub use preprocessing::{IncrementalNormalizer, OnlineFeatureSelector};
+
+// Re-exports — learning rate scheduling
+pub use ensemble::lr_schedule::LRScheduler;
+
+// Re-exports — streaming learners
+pub use learners::{
+    GaussianNB, LocallyWeightedRegression, MondrianForest, RecursiveLeastSquares,
+    StreamingLinearModel, StreamingPolynomialRegression,
+};

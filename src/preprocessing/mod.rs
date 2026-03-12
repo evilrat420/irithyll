@@ -1,0 +1,28 @@
+//! Streaming preprocessing utilities for feature transformation.
+//!
+//! These transformers process features incrementally, maintaining running
+//! statistics that update with each sample — no batch recomputation needed.
+//!
+//! # Modules
+//!
+//! - [`normalizer`] — Welford-based online standardization (zero-mean, unit-variance).
+//! - [`feature_selector`] — EWMA importance tracking with dynamic feature masking.
+//!
+//! # Example
+//!
+//! ```
+//! use irithyll::preprocessing::{IncrementalNormalizer, OnlineFeatureSelector};
+//!
+//! let mut norm = IncrementalNormalizer::new();
+//! let standardized = norm.update_and_transform(&[100.0, 0.5, -3.0]);
+//!
+//! let mut selector = OnlineFeatureSelector::new(3, 0.5, 0.1, 10);
+//! selector.update_importances(&[0.9, 0.1, 0.8]);
+//! let masked = selector.mask_features(&standardized);
+//! ```
+
+pub mod feature_selector;
+pub mod normalizer;
+
+pub use feature_selector::OnlineFeatureSelector;
+pub use normalizer::IncrementalNormalizer;
