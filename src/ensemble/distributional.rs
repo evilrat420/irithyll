@@ -693,7 +693,11 @@ mod tests {
         let (mu, sigma, sigma_ratio) = model.predict_distributional(&[5.0]);
         assert!(mu.is_finite());
         assert!(sigma > 0.0);
-        assert!(sigma_ratio >= 0.1 && sigma_ratio <= 10.0, "sigma_ratio={}", sigma_ratio);
+        assert!(
+            sigma_ratio >= 0.1 && sigma_ratio <= 10.0,
+            "sigma_ratio={}",
+            sigma_ratio
+        );
     }
 
     #[test]
@@ -707,7 +711,10 @@ mod tests {
         }
 
         let (_mu, _sigma, sigma_ratio) = model.predict_distributional(&[5.0]);
-        assert!((sigma_ratio - 1.0).abs() < 1e-12, "should be 1.0 when disabled");
+        assert!(
+            (sigma_ratio - 1.0).abs() < 1e-12,
+            "should be 1.0 when disabled"
+        );
     }
 
     #[test]
