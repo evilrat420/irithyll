@@ -694,7 +694,7 @@ mod tests {
         assert!(mu.is_finite());
         assert!(sigma > 0.0);
         assert!(
-            sigma_ratio >= 0.1 && sigma_ratio <= 10.0,
+            (0.1..=10.0).contains(&sigma_ratio),
             "sigma_ratio={}",
             sigma_ratio
         );
