@@ -97,6 +97,13 @@ pub struct DistributionalSGBT {
     samples_seen: u64,
     /// RNG state for variant logic.
     rng_state: u64,
+    /// Whether σ-modulated learning rate is enabled.
+    uncertainty_modulated_lr: bool,
+    /// EWMA of the model's predicted σ — used as the denominator in σ-ratio.
+    ///
+    /// Updated with alpha = 0.001 (slow adaptation) after each training step.
+    /// Initialized from the standard deviation of the initial target collection.
+    rolling_sigma_mean: f64,
 }
 
 impl Clone for DistributionalSGBT {
@@ -112,19 +119,24 @@ impl Clone for DistributionalSGBT {
             initial_target_count: self.initial_target_count,
             samples_seen: self.samples_seen,
             rng_state: self.rng_state,
+            uncertainty_modulated_lr: self.uncertainty_modulated_lr,
+            rolling_sigma_mean: self.rolling_sigma_mean,
         }
     }
 }
 
 impl std::fmt::Debug for DistributionalSGBT {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DistributionalSGBT")
-            .field("n_steps", &self.location_steps.len())
+        let mut s = f.debug_struct("DistributionalSGBT");
+        s.field("n_steps", &self.location_steps.len())
             .field("samples_seen", &self.samples_seen)
             .field("location_base", &self.location_base)
             .field("scale_base", &self.scale_base)
-            .field("base_initialized", &self.base_initialized)
-            .finish()
+            .field("base_initialized", &self.base_initialized);
+        if self.uncertainty_modulated_lr {
+            s.field("rolling_sigma_mean", &self.rolling_sigma_mean);
+        }
+        s.finish()
     }
 }
 
@@ -176,6 +188,7 @@ impl DistributionalSGBT {
 
         let seed = config.seed;
         let initial_target_count = config.initial_target_count;
+        let uncertainty_modulated_lr = config.uncertainty_modulated_lr;
         Self {
             config,
             location_steps,
@@ -187,6 +200,8 @@ impl DistributionalSGBT {
             initial_target_count,
             samples_seen: 0,
             rng_state: seed,
+            uncertainty_modulated_lr,
+            rolling_sigma_mean: 1.0, // overwritten during base initialization
         }
     }
 
@@ -212,7 +227,11 @@ impl DistributionalSGBT {
                     .map(|&y| (y - mean) * (y - mean))
                     .sum::<f64>()
                     / self.initial_targets.len() as f64;
-                self.scale_base = (var.sqrt().max(1e-6)).ln();
+                let initial_std = var.sqrt().max(1e-6);
+                self.scale_base = initial_std.ln();
+
+                // Initialize rolling sigma mean from initial targets std
+                self.rolling_sigma_mean = initial_std;
 
                 self.base_initialized = true;
                 self.initial_targets.clear();
@@ -224,6 +243,24 @@ impl DistributionalSGBT {
         // Current predictions
         let mut mu = self.location_base;
         let mut log_sigma = self.scale_base;
+
+        // Compute σ-ratio for uncertainty-modulated learning rate.
+        // Only computed once per sample (uses current ensemble σ before the step loop).
+        let sigma_ratio = if self.uncertainty_modulated_lr {
+            let current_sigma = log_sigma.exp().max(1e-8);
+            let ratio = (current_sigma / self.rolling_sigma_mean).clamp(0.1, 10.0);
+
+            // Update rolling sigma mean with slow EWMA (alpha = 0.001)
+            const SIGMA_EWMA_ALPHA: f64 = 0.001;
+            self.rolling_sigma_mean = (1.0 - SIGMA_EWMA_ALPHA) * self.rolling_sigma_mean
+                + SIGMA_EWMA_ALPHA * current_sigma;
+
+            ratio
+        } else {
+            1.0
+        };
+
+        let base_lr = self.config.learning_rate;
 
         // Sequential boosting: both ensembles target their respective residuals
         for s in 0..self.location_steps.len() {
@@ -240,15 +277,17 @@ impl DistributionalSGBT {
 
             let train_count = self.config.variant.train_count(h_mu, &mut self.rng_state);
 
-            // Train location step
+            // Train location step — σ-modulated LR when enabled
             let loc_pred =
                 self.location_steps[s].train_and_predict(features, g_mu, h_mu, train_count);
-            mu += self.config.learning_rate * loc_pred;
+            mu += (base_lr * sigma_ratio) * loc_pred;
 
-            // Train scale step
+            // Train scale step — ALWAYS at unmodulated base rate.
+            // Critical: modulating σ's own LR by σ creates a positive feedback loop
+            // (σ high → learn σ faster → σ changes faster → instability).
             let scale_pred =
                 self.scale_steps[s].train_and_predict(features, g_sigma, h_sigma, train_count);
-            log_sigma += self.config.learning_rate * scale_pred;
+            log_sigma += base_lr * scale_pred;
         }
     }
 
@@ -268,6 +307,27 @@ impl DistributionalSGBT {
             sigma,
             log_sigma,
         }
+    }
+
+    /// Predict with σ-ratio diagnostic exposed.
+    ///
+    /// Returns `(mu, sigma, sigma_ratio)` where `sigma_ratio` is
+    /// `current_sigma / rolling_sigma_mean` — the multiplier applied to the
+    /// location learning rate when [`uncertainty_modulated_lr`](SGBTConfig::uncertainty_modulated_lr)
+    /// is enabled.
+    ///
+    /// When σ-modulation is disabled, `sigma_ratio` is always `1.0`.
+    ///
+    /// Use this to monitor the effective learning rate in real-time and verify
+    /// the model's uncertainty behavior.
+    pub fn predict_distributional(&self, features: &[f64]) -> (f64, f64, f64) {
+        let pred = self.predict(features);
+        let sigma_ratio = if self.uncertainty_modulated_lr {
+            (pred.sigma / self.rolling_sigma_mean).clamp(0.1, 10.0)
+        } else {
+            1.0
+        };
+        (pred.mu, pred.sigma, sigma_ratio)
     }
 
     /// Predict the mean (location parameter) only.
@@ -339,6 +399,7 @@ impl DistributionalSGBT {
         self.initial_targets.clear();
         self.samples_seen = 0;
         self.rng_state = self.config.seed;
+        self.rolling_sigma_mean = 1.0;
     }
 
     /// Total samples trained.
@@ -387,6 +448,20 @@ impl DistributionalSGBT {
     #[inline]
     pub fn config(&self) -> &SGBTConfig {
         &self.config
+    }
+
+    /// Current rolling σ mean (EWMA of predicted σ).
+    ///
+    /// Returns `1.0` if the model hasn't been initialized yet.
+    #[inline]
+    pub fn rolling_sigma_mean(&self) -> f64 {
+        self.rolling_sigma_mean
+    }
+
+    /// Whether σ-modulated learning rate is active.
+    #[inline]
+    pub fn is_uncertainty_modulated(&self) -> bool {
+        self.uncertainty_modulated_lr
     }
 }
 
@@ -570,5 +645,107 @@ mod tests {
         let model = DistributionalSGBT::new(test_config());
         // 10 location + 10 scale = 20 trees minimum
         assert!(model.n_trees() >= 20);
+    }
+
+    // -- σ-modulated learning rate tests --
+
+    fn modulated_config() -> SGBTConfig {
+        SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(16)
+            .initial_target_count(10)
+            .uncertainty_modulated_lr(true)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn sigma_modulated_initializes_rolling_mean() {
+        let mut model = DistributionalSGBT::new(modulated_config());
+        assert!(model.is_uncertainty_modulated());
+
+        // Before initialization, rolling_sigma_mean is 1.0 (placeholder)
+        assert!((model.rolling_sigma_mean() - 1.0).abs() < 1e-12);
+
+        // Train past initialization
+        for i in 0..200 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + 1.0));
+        }
+
+        // After training, rolling_sigma_mean should have adapted from initial std
+        assert!(model.rolling_sigma_mean() > 0.0);
+        assert!(model.rolling_sigma_mean().is_finite());
+    }
+
+    #[test]
+    fn predict_distributional_returns_sigma_ratio() {
+        let mut model = DistributionalSGBT::new(modulated_config());
+
+        for i in 0..200 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x], x * 2.0 + 1.0));
+        }
+
+        let (mu, sigma, sigma_ratio) = model.predict_distributional(&[5.0]);
+        assert!(mu.is_finite());
+        assert!(sigma > 0.0);
+        assert!(sigma_ratio >= 0.1 && sigma_ratio <= 10.0, "sigma_ratio={}", sigma_ratio);
+    }
+
+    #[test]
+    fn predict_distributional_without_modulation_returns_one() {
+        let mut model = DistributionalSGBT::new(test_config());
+        assert!(!model.is_uncertainty_modulated());
+
+        for i in 0..200 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x], x * 2.0));
+        }
+
+        let (_mu, _sigma, sigma_ratio) = model.predict_distributional(&[5.0]);
+        assert!((sigma_ratio - 1.0).abs() < 1e-12, "should be 1.0 when disabled");
+    }
+
+    #[test]
+    fn modulated_model_sigma_finite_under_varying_noise() {
+        let mut model = DistributionalSGBT::new(modulated_config());
+
+        let mut rng: u64 = 123;
+        for i in 0..500 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let noise = (rng % 1000) as f64 / 100.0 - 5.0; // [-5, 5]
+            let x = i as f64 * 0.1;
+            // Regime shift at i=250: noise amplitude increases
+            let scale = if i < 250 { 1.0 } else { 5.0 };
+            model.train_one(&(vec![x], x * 2.0 + noise * scale));
+        }
+
+        let pred = model.predict(&[10.0]);
+        assert!(pred.mu.is_finite());
+        assert!(pred.sigma.is_finite());
+        assert!(pred.sigma > 0.0);
+        assert!(model.rolling_sigma_mean().is_finite());
+    }
+
+    #[test]
+    fn reset_clears_rolling_sigma_mean() {
+        let mut model = DistributionalSGBT::new(modulated_config());
+
+        for i in 0..200 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x], x * 2.0));
+        }
+
+        let sigma_before = model.rolling_sigma_mean();
+        assert!(sigma_before > 0.0);
+
+        model.reset();
+        assert!((model.rolling_sigma_mean() - 1.0).abs() < 1e-12);
     }
 }

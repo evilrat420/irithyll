@@ -302,6 +302,20 @@ pub struct SGBTConfig {
     /// Suggested value: 0.01.
     #[serde(default)]
     pub error_weight_alpha: Option<f64>,
+
+    /// Enable σ-modulated learning rate for [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
+    ///
+    /// When `true`, the **location** (μ) ensemble's learning rate is scaled by
+    /// `sigma_ratio = current_sigma / rolling_sigma_mean`, where `rolling_sigma_mean`
+    /// is an EWMA of the model's predicted σ (alpha = 0.001).
+    ///
+    /// This means the model learns μ **faster** when σ is elevated (high uncertainty)
+    /// and **slower** when σ is low (confident regime). The scale (σ) ensemble always
+    /// trains at the unmodulated base rate to prevent positive feedback loops.
+    ///
+    /// Default: `false`.
+    #[serde(default)]
+    pub uncertainty_modulated_lr: bool,
 }
 
 fn default_quality_prune_threshold() -> f64 {
@@ -339,6 +353,7 @@ impl Default for SGBTConfig {
             quality_prune_threshold: 1e-6,
             quality_prune_patience: 500,
             error_weight_alpha: None,
+            uncertainty_modulated_lr: false,
         }
     }
 }
@@ -558,6 +573,16 @@ impl SGBTConfigBuilder {
     /// Suggested alpha: 0.01.
     pub fn error_weight_alpha(mut self, alpha: f64) -> Self {
         self.config.error_weight_alpha = Some(alpha);
+        self
+    }
+
+    /// Enable σ-modulated learning rate for distributional models.
+    ///
+    /// Scales the location (μ) learning rate by `current_sigma / rolling_sigma_mean`,
+    /// so the model adapts faster during high-uncertainty regimes and conserves
+    /// during stable periods. Only affects [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
+    pub fn uncertainty_modulated_lr(mut self, enabled: bool) -> Self {
+        self.config.uncertainty_modulated_lr = enabled;
         self
     }
 

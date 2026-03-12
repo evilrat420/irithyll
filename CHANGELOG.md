@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.1] - 2026-03-13
+
+### Added
+
+- **σ-modulated learning rate** for `DistributionalSGBT` -- when `uncertainty_modulated_lr`
+  is enabled, the location (μ) ensemble's learning rate is scaled by
+  `sigma_ratio = current_sigma / rolling_sigma_mean`. The model learns μ faster during
+  high-uncertainty regimes and conserves during stable periods. The scale (σ) ensemble
+  always trains at the unmodulated base rate to prevent positive feedback loops.
+  Rolling sigma mean uses slow EWMA (alpha = 0.001), initialized from initial targets std.
+- `predict_distributional()` method on `DistributionalSGBT` returning `(mu, sigma, sigma_ratio)`
+  for real-time monitoring of the effective learning rate.
+- `rolling_sigma_mean()` and `is_uncertainty_modulated()` accessors on `DistributionalSGBT`.
+- `uncertainty_modulated_lr()` builder method on `SGBTConfigBuilder`.
+
+### Fixed
+
+- Rustdoc warnings causing CI Documentation job failure: unresolved `StreamingLearner` link,
+  private `MondrianTree` link, and redundant explicit link targets in learners module.
+
 ## [6.1.0] - 2026-03-12
 
 ### Added
