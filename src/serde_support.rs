@@ -136,6 +136,15 @@ pub struct ModelState {
     pub samples_seen: u64,
     pub rng_state: u64,
     pub steps: Vec<StepSnapshot>,
+    /// Rolling mean absolute error for error-weighted sample importance (v6+).
+    #[serde(default)]
+    pub rolling_mean_error: f64,
+    /// Per-step EWMA of contribution magnitude for quality pruning (v6+).
+    #[serde(default)]
+    pub contribution_ewma: Vec<f64>,
+    /// Per-step consecutive low-contribution count for quality pruning (v6+).
+    #[serde(default)]
+    pub low_contrib_count: Vec<u64>,
 }
 
 /// Save an SGBT model to a JSON string.

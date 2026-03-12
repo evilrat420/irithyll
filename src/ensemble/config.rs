@@ -252,6 +252,64 @@ pub struct SGBTConfig {
     /// `None` (default) means no monotonic constraints.
     #[serde(default)]
     pub monotone_constraints: Option<Vec<i8>>,
+
+    /// EWMA smoothing factor for quality-based tree pruning.
+    ///
+    /// When `Some(alpha)`, each boosting step tracks an exponentially weighted
+    /// moving average of its marginal contribution to the ensemble. Trees whose
+    /// contribution drops below [`quality_prune_threshold`](Self::quality_prune_threshold)
+    /// for [`quality_prune_patience`](Self::quality_prune_patience) consecutive
+    /// samples are replaced with a fresh tree that can learn the current regime.
+    ///
+    /// This prevents "dead wood" — trees from a past regime that no longer
+    /// contribute meaningfully to ensemble accuracy.
+    ///
+    /// `None` (default) disables quality-based pruning.
+    /// Suggested value: 0.01.
+    #[serde(default)]
+    pub quality_prune_alpha: Option<f64>,
+
+    /// Minimum contribution threshold for quality-based pruning.
+    ///
+    /// A tree's EWMA contribution must stay above this value to avoid being
+    /// flagged as dead wood. Only used when `quality_prune_alpha` is `Some`.
+    ///
+    /// Default: 1e-6.
+    #[serde(default = "default_quality_prune_threshold")]
+    pub quality_prune_threshold: f64,
+
+    /// Consecutive low-contribution samples before a tree is replaced.
+    ///
+    /// After this many consecutive samples where a tree's EWMA contribution
+    /// is below `quality_prune_threshold`, the tree is reset. Only used when
+    /// `quality_prune_alpha` is `Some`.
+    ///
+    /// Default: 500.
+    #[serde(default = "default_quality_prune_patience")]
+    pub quality_prune_patience: u64,
+
+    /// EWMA smoothing factor for error-weighted sample importance.
+    ///
+    /// When `Some(alpha)`, samples the model predicted poorly get higher
+    /// effective weight during histogram accumulation. The weight is:
+    /// `1.0 + |error| / (rolling_mean_error + epsilon)`, capped at 10x.
+    ///
+    /// This is a streaming version of AdaBoost's reweighting applied at the
+    /// gradient level — learning capacity focuses on hard/novel patterns,
+    /// enabling faster adaptation to regime changes.
+    ///
+    /// `None` (default) disables error weighting.
+    /// Suggested value: 0.01.
+    #[serde(default)]
+    pub error_weight_alpha: Option<f64>,
+}
+
+fn default_quality_prune_threshold() -> f64 {
+    1e-6
+}
+
+fn default_quality_prune_patience() -> u64 {
+    500
 }
 
 impl Default for SGBTConfig {
@@ -277,6 +335,10 @@ impl Default for SGBTConfig {
             feature_types: None,
             gradient_clip_sigma: None,
             monotone_constraints: None,
+            quality_prune_alpha: None,
+            quality_prune_threshold: 1e-6,
+            quality_prune_patience: 500,
+            error_weight_alpha: None,
         }
     }
 }
@@ -464,6 +526,41 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Enable quality-based tree pruning with the given EWMA smoothing factor.
+    ///
+    /// Trees whose marginal contribution drops below the threshold for
+    /// `patience` consecutive samples are replaced with fresh trees.
+    /// Suggested alpha: 0.01.
+    pub fn quality_prune_alpha(mut self, alpha: f64) -> Self {
+        self.config.quality_prune_alpha = Some(alpha);
+        self
+    }
+
+    /// Set the minimum contribution threshold for quality-based pruning.
+    ///
+    /// Default: 1e-6. Only relevant when `quality_prune_alpha` is set.
+    pub fn quality_prune_threshold(mut self, threshold: f64) -> Self {
+        self.config.quality_prune_threshold = threshold;
+        self
+    }
+
+    /// Set the patience (consecutive low-contribution samples) before pruning.
+    ///
+    /// Default: 500. Only relevant when `quality_prune_alpha` is set.
+    pub fn quality_prune_patience(mut self, patience: u64) -> Self {
+        self.config.quality_prune_patience = patience;
+        self
+    }
+
+    /// Enable error-weighted sample importance with the given EWMA smoothing factor.
+    ///
+    /// Samples the model predicted poorly get higher effective weight.
+    /// Suggested alpha: 0.01.
+    pub fn error_weight_alpha(mut self, alpha: f64) -> Self {
+        self.config.error_weight_alpha = Some(alpha);
+        self
+    }
+
     /// Validate and build the configuration.
     ///
     /// # Errors
@@ -601,6 +698,46 @@ impl SGBTConfigBuilder {
                     )
                     .into());
                 }
+            }
+        }
+
+        // -- Quality-based pruning parameters --
+        if let Some(alpha) = c.quality_prune_alpha {
+            if alpha <= 0.0 || alpha >= 1.0 {
+                return Err(ConfigError::out_of_range(
+                    "quality_prune_alpha",
+                    "must be in (0, 1)",
+                    alpha,
+                )
+                .into());
+            }
+        }
+        if c.quality_prune_threshold <= 0.0 {
+            return Err(ConfigError::out_of_range(
+                "quality_prune_threshold",
+                "must be > 0",
+                c.quality_prune_threshold,
+            )
+            .into());
+        }
+        if c.quality_prune_patience == 0 {
+            return Err(ConfigError::out_of_range(
+                "quality_prune_patience",
+                "must be > 0",
+                c.quality_prune_patience,
+            )
+            .into());
+        }
+
+        // -- Error-weighted sample importance --
+        if let Some(alpha) = c.error_weight_alpha {
+            if alpha <= 0.0 || alpha >= 1.0 {
+                return Err(ConfigError::out_of_range(
+                    "error_weight_alpha",
+                    "must be in (0, 1)",
+                    alpha,
+                )
+                .into());
             }
         }
 

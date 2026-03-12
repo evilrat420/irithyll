@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.0.0] - 2026-03-12
+
+### Added
+
+- **NGBoost distributional output** -- `DistributionalSGBT` maintains two independent
+  streaming tree ensembles (location + scale) to output a full Gaussian N(mu, sigma^2)
+  predictive distribution. Scale parameterized in log-space for positivity. Gradients
+  derived from Gaussian NLL (Duan et al., 2020). Enables per-prediction uncertainty
+  quantification with `predict() -> GaussianPrediction { mu, sigma, log_sigma }` and
+  `predict_interval(alpha)` for calibrated prediction intervals.
+- **Error-weighted sample importance** -- streaming AdaBoost-style gradient reweighting.
+  Samples with high absolute error (relative to a rolling EWMA mean) receive amplified
+  gradients, forcing the ensemble to focus on hard examples. Configurable via
+  `SGBTConfig::builder().error_weight_alpha(0.01)`. Weight capped at 10x to prevent
+  instability.
+- **Quality-based tree pruning** -- per-step EWMA tracking of |marginal contribution|.
+  Trees contributing below a threshold for `patience` consecutive samples are reset,
+  eliminating dead wood from extinct regimes. Configurable via `quality_prune_alpha`,
+  `quality_prune_threshold`, `quality_prune_patience` in SGBTConfig.
+- **Half-Space Trees anomaly detection** -- `HalfSpaceTree` implements the HS-Tree
+  algorithm (Tan, Ting & Liu, 2011) for streaming anomaly detection. Random axis-aligned
+  partitions with mass-based scoring, window rotation for reference/latest profiles.
+  `score_and_update()` returns normalized anomaly scores in [0, 1]. Configurable via
+  `HSTConfig` with n_trees, max_depth, window_size, and explicit feature ranges.
+- **Serde state for v6 fields** -- `ModelState` now persists `rolling_mean_error`,
+  `contribution_ewma`, and `low_contrib_count` across save/load cycles with
+  `#[serde(default)]` for backward compatibility with v5 checkpoints.
+
+## [5.1.0] - 2026-03-12
+
+### Added
+
+- **Gradient clipping per leaf** -- `SGBTConfig::builder().gradient_clip_sigma(3.0)` clips
+  gradient/hessian outliers beyond N standard deviations, preventing explosive leaf weights
+  from noisy streams.
+- **`predict_with_confidence()`** -- returns `(prediction, variance)` using per-leaf
+  variance estimates. Enables lightweight uncertainty quantification without the full
+  distributional model.
+- **Monotonic constraints** -- `SGBTConfig::builder().monotone_constraints(vec![1, -1, 0])`
+  enforces feature-level monotonicity during tree growth. +1 = increasing, -1 = decreasing,
+  0 = unconstrained.
+- **`train_batch_with_callback()`** -- train on a slice of samples with a user-supplied
+  callback invoked every N samples for logging, metrics, checkpointing, etc.
+- **`train_batch_subsampled()`** -- train on a batch with probabilistic subsampling per
+  sample, useful for large-batch streaming scenarios.
+
 ## [5.0.0] - 2026-03-11
 
 ### Added

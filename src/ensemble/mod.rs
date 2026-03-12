@@ -18,6 +18,7 @@
 
 pub mod bagged;
 pub mod config;
+pub mod distributional;
 pub mod multi_target;
 pub mod multiclass;
 pub mod parallel;
@@ -92,6 +93,15 @@ pub struct SGBT<L: Loss = SquaredLoss> {
     samples_seen: u64,
     /// RNG state for variant skip logic.
     rng_state: u64,
+    /// Per-step EWMA of |marginal contribution| for quality-based pruning.
+    /// Empty when `quality_prune_alpha` is `None`.
+    contribution_ewma: Vec<f64>,
+    /// Per-step consecutive low-contribution sample counter.
+    /// Empty when `quality_prune_alpha` is `None`.
+    low_contrib_count: Vec<u64>,
+    /// Rolling mean absolute error for error-weighted sample importance.
+    /// Only used when `error_weight_alpha` is `Some`.
+    rolling_mean_error: f64,
 }
 
 impl<L: Loss + Clone> Clone for SGBT<L> {
@@ -106,6 +116,9 @@ impl<L: Loss + Clone> Clone for SGBT<L> {
             initial_target_count: self.initial_target_count,
             samples_seen: self.samples_seen,
             rng_state: self.rng_state,
+            contribution_ewma: self.contribution_ewma.clone(),
+            low_contrib_count: self.low_contrib_count.clone(),
+            rolling_mean_error: self.rolling_mean_error,
         }
     }
 }
@@ -184,6 +197,8 @@ impl<L: Loss> SGBT<L> {
 
         let seed = config.seed;
         let initial_target_count = config.initial_target_count;
+        let n = config.n_steps;
+        let has_pruning = config.quality_prune_alpha.is_some();
         Self {
             config,
             steps,
@@ -194,6 +209,13 @@ impl<L: Loss> SGBT<L> {
             initial_target_count,
             samples_seen: 0,
             rng_state: seed,
+            contribution_ewma: if has_pruning {
+                vec![0.0; n]
+            } else {
+                Vec::new()
+            },
+            low_contrib_count: if has_pruning { vec![0; n] } else { Vec::new() },
+            rolling_mean_error: 0.0,
         }
     }
 
@@ -221,18 +243,57 @@ impl<L: Loss> SGBT<L> {
         // Current prediction starts from base
         let mut current_pred = self.base_prediction;
 
+        let prune_alpha = self.config.quality_prune_alpha;
+        let prune_threshold = self.config.quality_prune_threshold;
+        let prune_patience = self.config.quality_prune_patience;
+
+        // Error-weighted sample importance: compute weight from prediction error
+        let error_weight = if let Some(ew_alpha) = self.config.error_weight_alpha {
+            let abs_error = (target - current_pred).abs();
+            if self.rolling_mean_error > 1e-15 {
+                let w = (1.0 + abs_error / (self.rolling_mean_error + 1e-15)).min(10.0);
+                self.rolling_mean_error =
+                    ew_alpha * abs_error + (1.0 - ew_alpha) * self.rolling_mean_error;
+                w
+            } else {
+                self.rolling_mean_error = abs_error.max(1e-15);
+                1.0 // first sample, no reweighting
+            }
+        } else {
+            1.0
+        };
+
         // Sequential boosting: each step targets the residual of all prior steps
-        for step in &mut self.steps {
-            let gradient = self.loss.gradient(target, current_pred);
-            let hessian = self.loss.hessian(target, current_pred);
+        for s in 0..self.steps.len() {
+            let gradient = self.loss.gradient(target, current_pred) * error_weight;
+            let hessian = self.loss.hessian(target, current_pred) * error_weight;
             let train_count = self
                 .config
                 .variant
                 .train_count(hessian, &mut self.rng_state);
 
-            let step_pred = step.train_and_predict(features, gradient, hessian, train_count);
+            let step_pred =
+                self.steps[s].train_and_predict(features, gradient, hessian, train_count);
 
             current_pred += self.config.learning_rate * step_pred;
+
+            // Quality-based tree pruning: track contribution and replace dead wood
+            if let Some(alpha) = prune_alpha {
+                let contribution = (self.config.learning_rate * step_pred).abs();
+                self.contribution_ewma[s] =
+                    alpha * contribution + (1.0 - alpha) * self.contribution_ewma[s];
+
+                if self.contribution_ewma[s] < prune_threshold {
+                    self.low_contrib_count[s] += 1;
+                    if self.low_contrib_count[s] >= prune_patience {
+                        self.steps[s].reset();
+                        self.contribution_ewma[s] = 0.0;
+                        self.low_contrib_count[s] = 0;
+                    }
+                } else {
+                    self.low_contrib_count[s] = 0;
+                }
+            }
         }
     }
 
@@ -699,6 +760,9 @@ impl<L: Loss> SGBT<L> {
             samples_seen: self.samples_seen,
             rng_state: self.rng_state,
             steps,
+            rolling_mean_error: self.rolling_mean_error,
+            contribution_ewma: self.contribution_ewma.clone(),
+            low_contrib_count: self.low_contrib_count.clone(),
         }
     }
 }
@@ -760,7 +824,7 @@ impl SGBT<Box<dyn Loss>> {
             .map(|hl| (-(2.0_f64.ln()) / hl as f64).exp());
         let max_tree_samples = state.config.max_tree_samples;
 
-        let steps = state
+        let steps: Vec<BoostingStep> = state
             .steps
             .iter()
             .enumerate()
@@ -806,6 +870,25 @@ impl SGBT<Box<dyn Loss>> {
             })
             .collect();
 
+        let n = steps.len();
+        let has_pruning = state.config.quality_prune_alpha.is_some();
+
+        // Restore pruning state if available, otherwise initialize
+        let contribution_ewma = if !state.contribution_ewma.is_empty() {
+            state.contribution_ewma
+        } else if has_pruning {
+            vec![0.0; n]
+        } else {
+            Vec::new()
+        };
+        let low_contrib_count = if !state.low_contrib_count.is_empty() {
+            state.low_contrib_count
+        } else if has_pruning {
+            vec![0; n]
+        } else {
+            Vec::new()
+        };
+
         Self {
             config: state.config,
             steps,
@@ -816,6 +899,9 @@ impl SGBT<Box<dyn Loss>> {
             initial_target_count: state.initial_target_count,
             samples_seen: state.samples_seen,
             rng_state: state.rng_state,
+            contribution_ewma,
+            low_contrib_count,
+            rolling_mean_error: state.rolling_mean_error,
         }
     }
 }

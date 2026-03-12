@@ -78,6 +78,7 @@ pub mod metrics;
 pub mod stream;
 pub mod tree;
 
+pub mod anomaly;
 pub mod explain;
 pub mod serde_support;
 
@@ -91,6 +92,7 @@ pub mod onnx_export;
 pub use drift::{DriftDetector, DriftSignal};
 pub use ensemble::bagged::BaggedSGBT;
 pub use ensemble::config::{FeatureType, SGBTConfig};
+pub use ensemble::distributional::{DistributionalSGBT, GaussianPrediction};
 pub use ensemble::multi_target::MultiTargetSGBT;
 pub use ensemble::multiclass::MulticlassSGBT;
 pub use ensemble::quantile_regressor::QuantileRegressorSGBT;
@@ -118,3 +120,6 @@ pub use metrics::conformal::AdaptiveConformalInterval;
 pub use metrics::ewma::{EwmaClassificationMetrics, EwmaRegressionMetrics};
 pub use metrics::rolling::{RollingClassificationMetrics, RollingRegressionMetrics};
 pub use metrics::{ClassificationMetrics, FeatureImportance, MetricSet, RegressionMetrics};
+
+// Re-exports — anomaly detection
+pub use anomaly::hst::{AnomalyScore, HSTConfig, HalfSpaceTree};
