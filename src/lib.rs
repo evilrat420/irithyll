@@ -134,15 +134,15 @@ pub use learner::{SGBTLearner, StreamingLearner};
 
 // Re-exports — preprocessing & pipeline
 pub use pipeline::{Pipeline, PipelineBuilder, StreamingPreprocessor};
-pub use preprocessing::{IncrementalNormalizer, OnlineFeatureSelector};
+pub use preprocessing::{IncrementalNormalizer, OnlineFeatureSelector, CCIPCA};
 
 // Re-exports — learning rate scheduling
 pub use ensemble::lr_schedule::LRScheduler;
 
 // Re-exports — streaming learners
 pub use learners::{
-    GaussianNB, LocallyWeightedRegression, MondrianForest, RecursiveLeastSquares,
-    StreamingLinearModel, StreamingPolynomialRegression,
+    GaussianNB, Kernel, LinearKernel, LocallyWeightedRegression, MondrianForest, PolynomialKernel,
+    RBFKernel, RecursiveLeastSquares, StreamingLinearModel, StreamingPolynomialRegression, KRLS,
 };
 
 // ---------------------------------------------------------------------------
@@ -245,6 +245,31 @@ pub fn normalizer() -> IncrementalNormalizer {
 /// ```
 pub fn pipe(preprocessor: impl StreamingPreprocessor + 'static) -> PipelineBuilder {
     PipelineBuilder::new().pipe(preprocessor)
+}
+
+/// Create a kernel recursive least squares model with an RBF kernel.
+///
+/// ```
+/// use irithyll::{krls, StreamingLearner};
+///
+/// let mut model = krls(1.0, 100, 1e-4);
+/// model.train(&[1.0], 1.0_f64.sin());
+/// ```
+pub fn krls(gamma: f64, budget: usize, ald_threshold: f64) -> KRLS {
+    KRLS::new(Box::new(RBFKernel::new(gamma)), budget, ald_threshold)
+}
+
+/// Create a CCIPCA preprocessor for streaming dimensionality reduction.
+///
+/// ```
+/// use irithyll::{ccipca, StreamingPreprocessor};
+///
+/// let mut pca = ccipca(3);
+/// let reduced = pca.update_and_transform(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+/// assert_eq!(reduced.len(), 3);
+/// ```
+pub fn ccipca(n_components: usize) -> CCIPCA {
+    CCIPCA::new(n_components)
 }
 
 /// Create an adaptive SGBT with a learning rate scheduler.

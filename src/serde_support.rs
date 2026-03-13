@@ -246,6 +246,52 @@ pub fn load_model_bincode(bytes: &[u8]) -> Result<crate::ensemble::DynSGBT> {
     Ok(SGBT::from_model_state(state))
 }
 
+// ---------------------------------------------------------------------------
+// DistributionalSGBT serialization
+// ---------------------------------------------------------------------------
+
+/// Serializable state for [`DistributionalSGBT`](crate::ensemble::distributional::DistributionalSGBT).
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistributionalModelState {
+    pub config: SGBTConfig,
+    pub location_steps: Vec<StepSnapshot>,
+    pub scale_steps: Vec<StepSnapshot>,
+    pub location_base: f64,
+    pub scale_base: f64,
+    pub base_initialized: bool,
+    pub initial_targets: Vec<f64>,
+    pub initial_target_count: usize,
+    pub samples_seen: u64,
+    pub rng_state: u64,
+    pub uncertainty_modulated_lr: bool,
+    pub rolling_sigma_mean: f64,
+}
+
+/// Serialize a [`DistributionalModelState`] to JSON.
+#[cfg(feature = "serde-json")]
+pub fn save_distributional_model(state: &DistributionalModelState) -> Result<String> {
+    to_json_pretty(state)
+}
+
+/// Deserialize a [`DistributionalModelState`] from JSON.
+#[cfg(feature = "serde-json")]
+pub fn load_distributional_model(json: &str) -> Result<DistributionalModelState> {
+    from_json(json)
+}
+
+/// Serialize a [`DistributionalModelState`] to bincode bytes.
+#[cfg(feature = "serde-bincode")]
+pub fn save_distributional_model_bincode(state: &DistributionalModelState) -> Result<Vec<u8>> {
+    to_bincode(state)
+}
+
+/// Deserialize a [`DistributionalModelState`] from bincode bytes.
+#[cfg(feature = "serde-bincode")]
+pub fn load_distributional_model_bincode(bytes: &[u8]) -> Result<DistributionalModelState> {
+    from_bincode(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

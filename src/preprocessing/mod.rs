@@ -5,8 +5,11 @@
 //!
 //! # Modules
 //!
-//! - [`normalizer`] — Welford-based online standardization (zero-mean, unit-variance).
-//! - [`feature_selector`] — EWMA importance tracking with dynamic feature masking.
+//! | Module | Purpose |
+//! |--------|---------|
+//! | [`normalizer`] | Welford-based online standardization (zero-mean, unit-variance) |
+//! | [`feature_selector`] | EWMA importance tracking with dynamic feature masking |
+//! | [`ccipca`] | Candid Covariance-free Incremental PCA — streaming dimensionality reduction |
 //!
 //! # Example
 //!
@@ -21,9 +24,11 @@
 //! let masked = selector.mask_features(&standardized);
 //! ```
 
+pub mod ccipca;
 pub mod feature_selector;
 pub mod normalizer;
 
+pub use ccipca::CCIPCA;
 pub use feature_selector::OnlineFeatureSelector;
 pub use normalizer::IncrementalNormalizer;
 

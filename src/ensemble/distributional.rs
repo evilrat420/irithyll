@@ -463,6 +463,131 @@ impl DistributionalSGBT {
     pub fn is_uncertainty_modulated(&self) -> bool {
         self.uncertainty_modulated_lr
     }
+
+    /// Convert this model into a serializable [`DistributionalModelState`].
+    ///
+    /// Captures the full ensemble state (both location and scale trees) for
+    /// persistence. Histogram accumulators are NOT serialized — they rebuild
+    /// naturally from continued training.
+    #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+    pub fn to_distributional_state(&self) -> crate::serde_support::DistributionalModelState {
+        use super::snapshot_tree;
+        use crate::serde_support::{DistributionalModelState, StepSnapshot};
+
+        fn snapshot_step(step: &BoostingStep) -> StepSnapshot {
+            let slot = step.slot();
+            let tree_snap = snapshot_tree(slot.active_tree());
+            let alt_snap = slot.alternate_tree().map(snapshot_tree);
+            let drift_state = slot.detector().serialize_state();
+            let alt_drift_state = slot.alt_detector().and_then(|d| d.serialize_state());
+            StepSnapshot {
+                tree: tree_snap,
+                alternate_tree: alt_snap,
+                drift_state,
+                alt_drift_state,
+            }
+        }
+
+        DistributionalModelState {
+            config: self.config.clone(),
+            location_steps: self.location_steps.iter().map(snapshot_step).collect(),
+            scale_steps: self.scale_steps.iter().map(snapshot_step).collect(),
+            location_base: self.location_base,
+            scale_base: self.scale_base,
+            base_initialized: self.base_initialized,
+            initial_targets: self.initial_targets.clone(),
+            initial_target_count: self.initial_target_count,
+            samples_seen: self.samples_seen,
+            rng_state: self.rng_state,
+            uncertainty_modulated_lr: self.uncertainty_modulated_lr,
+            rolling_sigma_mean: self.rolling_sigma_mean,
+        }
+    }
+
+    /// Reconstruct a [`DistributionalSGBT`] from a serialized [`DistributionalModelState`].
+    ///
+    /// Rebuilds both location and scale ensembles including tree topology
+    /// and leaf values. Histogram accumulators are left empty and will
+    /// rebuild from continued training.
+    #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+    pub fn from_distributional_state(
+        state: crate::serde_support::DistributionalModelState,
+    ) -> Self {
+        use super::rebuild_tree;
+        use crate::ensemble::replacement::TreeSlot;
+        use crate::serde_support::StepSnapshot;
+
+        let leaf_decay_alpha = state
+            .config
+            .leaf_half_life
+            .map(|hl| (-(2.0_f64.ln()) / hl as f64).exp());
+        let max_tree_samples = state.config.max_tree_samples;
+
+        let base_tree_config = TreeConfig::new()
+            .max_depth(state.config.max_depth)
+            .n_bins(state.config.n_bins)
+            .lambda(state.config.lambda)
+            .gamma(state.config.gamma)
+            .grace_period(state.config.grace_period)
+            .delta(state.config.delta)
+            .feature_subsample_rate(state.config.feature_subsample_rate)
+            .leaf_decay_alpha_opt(leaf_decay_alpha)
+            .split_reeval_interval_opt(state.config.split_reeval_interval)
+            .feature_types_opt(state.config.feature_types.clone())
+            .gradient_clip_sigma_opt(state.config.gradient_clip_sigma)
+            .monotone_constraints_opt(state.config.monotone_constraints.clone());
+
+        // Rebuild a Vec<BoostingStep> from step snapshots with a given seed transform.
+        let rebuild_steps = |snaps: &[StepSnapshot], seed_xor: u64| -> Vec<BoostingStep> {
+            snaps
+                .iter()
+                .enumerate()
+                .map(|(i, snap)| {
+                    let tc = base_tree_config
+                        .clone()
+                        .seed(state.config.seed ^ (i as u64) ^ seed_xor);
+
+                    let active = rebuild_tree(&snap.tree, tc.clone());
+                    let alternate = snap
+                        .alternate_tree
+                        .as_ref()
+                        .map(|s| rebuild_tree(s, tc.clone()));
+
+                    let mut detector = state.config.drift_detector.create();
+                    if let Some(ref ds) = snap.drift_state {
+                        detector.restore_state(ds);
+                    }
+                    let mut slot =
+                        TreeSlot::from_trees(active, alternate, tc, detector, max_tree_samples);
+                    if let Some(ref ads) = snap.alt_drift_state {
+                        if let Some(alt_det) = slot.alt_detector_mut() {
+                            alt_det.restore_state(ads);
+                        }
+                    }
+                    BoostingStep::from_slot(slot)
+                })
+                .collect()
+        };
+
+        // Location: seed offset 0, Scale: seed offset 0x0005_CA1E_0000_0000
+        let location_steps = rebuild_steps(&state.location_steps, 0);
+        let scale_steps = rebuild_steps(&state.scale_steps, 0x0005_CA1E_0000_0000);
+
+        Self {
+            config: state.config,
+            location_steps,
+            scale_steps,
+            location_base: state.location_base,
+            scale_base: state.scale_base,
+            base_initialized: state.base_initialized,
+            initial_targets: state.initial_targets,
+            initial_target_count: state.initial_target_count,
+            samples_seen: state.samples_seen,
+            rng_state: state.rng_state,
+            uncertainty_modulated_lr: state.uncertainty_modulated_lr,
+            rolling_sigma_mean: state.rolling_sigma_mean,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -796,5 +921,82 @@ mod tests {
             (pred - gaussian.mu).abs() < 1e-12,
             "StreamingLearner::predict should return mu"
         );
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "serde-json")]
+mod serde_tests {
+    use super::*;
+    use crate::SGBTConfig;
+
+    fn make_trained_distributional() -> DistributionalSGBT {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .max_depth(3)
+            .grace_period(2)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+        for i in 0..50 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x], x.sin()));
+        }
+        model
+    }
+
+    #[test]
+    fn json_round_trip_preserves_predictions() {
+        let model = make_trained_distributional();
+        let state = model.to_distributional_state();
+        let json = crate::serde_support::save_distributional_model(&state).unwrap();
+        let loaded_state = crate::serde_support::load_distributional_model(&json).unwrap();
+        let restored = DistributionalSGBT::from_distributional_state(loaded_state);
+
+        let test_points = [0.5, 1.0, 2.0, 3.0];
+        for &x in &test_points {
+            let orig = model.predict(&[x]);
+            let rest = restored.predict(&[x]);
+            assert!(
+                (orig.mu - rest.mu).abs() < 1e-10,
+                "JSON round-trip mu mismatch at x={}: {} vs {}",
+                x,
+                orig.mu,
+                rest.mu
+            );
+            assert!(
+                (orig.sigma - rest.sigma).abs() < 1e-10,
+                "JSON round-trip sigma mismatch at x={}: {} vs {}",
+                x,
+                orig.sigma,
+                rest.sigma
+            );
+        }
+    }
+
+    #[test]
+    fn state_preserves_rolling_sigma_mean() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .max_depth(3)
+            .grace_period(2)
+            .initial_target_count(10)
+            .uncertainty_modulated_lr(true)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+        for i in 0..50 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x], x.sin()));
+        }
+        let state = model.to_distributional_state();
+        assert!(state.uncertainty_modulated_lr);
+        assert!(state.rolling_sigma_mean >= 0.0);
+
+        let restored = DistributionalSGBT::from_distributional_state(state);
+        assert_eq!(model.n_samples_seen(), restored.n_samples_seen());
     }
 }

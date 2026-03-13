@@ -728,26 +728,7 @@ impl<L: Loss> SGBT<L> {
         &self,
         loss_type: crate::loss::LossType,
     ) -> crate::serde_support::ModelState {
-        use crate::serde_support::{ModelState, StepSnapshot, TreeSnapshot};
-
-        fn snapshot_tree(tree: &crate::tree::hoeffding::HoeffdingTree) -> TreeSnapshot {
-            use crate::tree::StreamingTree;
-            let arena = tree.arena();
-            TreeSnapshot {
-                feature_idx: arena.feature_idx.clone(),
-                threshold: arena.threshold.clone(),
-                left: arena.left.iter().map(|id| id.0).collect(),
-                right: arena.right.iter().map(|id| id.0).collect(),
-                leaf_value: arena.leaf_value.clone(),
-                is_leaf: arena.is_leaf.clone(),
-                depth: arena.depth.clone(),
-                sample_count: arena.sample_count.clone(),
-                n_features: tree.n_features(),
-                samples_seen: tree.n_samples_seen(),
-                rng_state: tree.rng_state(),
-                categorical_mask: arena.categorical_mask.clone(),
-            }
-        }
+        use crate::serde_support::{ModelState, StepSnapshot};
 
         let steps = self
             .steps
@@ -801,37 +782,6 @@ impl SGBT<Box<dyn Loss>> {
     /// otherwise a fresh detector is created from the config.
     pub fn from_model_state(state: crate::serde_support::ModelState) -> Self {
         use crate::ensemble::replacement::TreeSlot;
-        use crate::serde_support::TreeSnapshot;
-        use crate::tree::hoeffding::HoeffdingTree;
-        use crate::tree::node::{NodeId, TreeArena};
-
-        fn rebuild_tree(snapshot: &TreeSnapshot, tree_config: TreeConfig) -> HoeffdingTree {
-            let mut arena = TreeArena::new();
-            let n = snapshot.feature_idx.len();
-
-            // Rebuild arena from parallel vecs.
-            for i in 0..n {
-                arena.feature_idx.push(snapshot.feature_idx[i]);
-                arena.threshold.push(snapshot.threshold[i]);
-                arena.left.push(NodeId(snapshot.left[i]));
-                arena.right.push(NodeId(snapshot.right[i]));
-                arena.leaf_value.push(snapshot.leaf_value[i]);
-                arena.is_leaf.push(snapshot.is_leaf[i]);
-                arena.depth.push(snapshot.depth[i]);
-                arena.sample_count.push(snapshot.sample_count[i]);
-                // Backward compat: old snapshots have empty categorical_mask
-                let mask = snapshot.categorical_mask.get(i).copied().flatten();
-                arena.categorical_mask.push(mask);
-            }
-
-            HoeffdingTree::from_arena(
-                tree_config,
-                arena,
-                snapshot.n_features,
-                snapshot.samples_seen,
-                snapshot.rng_state,
-            )
-        }
 
         let loss = state.loss_type.into_loss();
 
@@ -921,6 +871,68 @@ impl SGBT<Box<dyn Loss>> {
             rolling_mean_error: state.rolling_mean_error,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared snapshot/rebuild helpers for serde (used by SGBT + DistributionalSGBT)
+// ---------------------------------------------------------------------------
+
+/// Snapshot a [`HoeffdingTree`] into a serializable [`TreeSnapshot`].
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+pub(crate) fn snapshot_tree(
+    tree: &crate::tree::hoeffding::HoeffdingTree,
+) -> crate::serde_support::TreeSnapshot {
+    use crate::serde_support::TreeSnapshot;
+    use crate::tree::StreamingTree;
+    let arena = tree.arena();
+    TreeSnapshot {
+        feature_idx: arena.feature_idx.clone(),
+        threshold: arena.threshold.clone(),
+        left: arena.left.iter().map(|id| id.0).collect(),
+        right: arena.right.iter().map(|id| id.0).collect(),
+        leaf_value: arena.leaf_value.clone(),
+        is_leaf: arena.is_leaf.clone(),
+        depth: arena.depth.clone(),
+        sample_count: arena.sample_count.clone(),
+        n_features: tree.n_features(),
+        samples_seen: tree.n_samples_seen(),
+        rng_state: tree.rng_state(),
+        categorical_mask: arena.categorical_mask.clone(),
+    }
+}
+
+/// Rebuild a [`HoeffdingTree`] from a [`TreeSnapshot`] and a [`TreeConfig`].
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+pub(crate) fn rebuild_tree(
+    snapshot: &crate::serde_support::TreeSnapshot,
+    tree_config: TreeConfig,
+) -> crate::tree::hoeffding::HoeffdingTree {
+    use crate::tree::hoeffding::HoeffdingTree;
+    use crate::tree::node::{NodeId, TreeArena};
+
+    let mut arena = TreeArena::new();
+    let n = snapshot.feature_idx.len();
+
+    for i in 0..n {
+        arena.feature_idx.push(snapshot.feature_idx[i]);
+        arena.threshold.push(snapshot.threshold[i]);
+        arena.left.push(NodeId(snapshot.left[i]));
+        arena.right.push(NodeId(snapshot.right[i]));
+        arena.leaf_value.push(snapshot.leaf_value[i]);
+        arena.is_leaf.push(snapshot.is_leaf[i]);
+        arena.depth.push(snapshot.depth[i]);
+        arena.sample_count.push(snapshot.sample_count[i]);
+        let mask = snapshot.categorical_mask.get(i).copied().flatten();
+        arena.categorical_mask.push(mask);
+    }
+
+    HoeffdingTree::from_arena(
+        tree_config,
+        arena,
+        snapshot.n_features,
+        snapshot.samples_seen,
+        snapshot.rng_state,
+    )
 }
 
 #[cfg(test)]

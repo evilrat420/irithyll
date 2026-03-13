@@ -13,12 +13,15 @@
 //! | [`rls`] | [`RecursiveLeastSquares`] | Exact streaming OLS via Sherman-Morrison |
 //! | [`rls`] | [`StreamingPolynomialRegression`] | RLS with polynomial feature expansion |
 //! | [`rls`] | [`LocallyWeightedRegression`] | Nadaraya-Watson with circular buffer |
+//! | [`krls`] | [`KRLS`] | Kernel RLS with ALD sparsification |
 
+pub mod krls;
 pub mod linear;
 pub mod mondrian;
 pub mod naive_bayes;
 pub mod rls;
 
+pub use krls::{Kernel, LinearKernel, PolynomialKernel, RBFKernel, KRLS};
 pub use linear::StreamingLinearModel;
 pub use mondrian::MondrianForest;
 pub use naive_bayes::GaussianNB;

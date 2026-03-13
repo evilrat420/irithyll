@@ -132,6 +132,8 @@ pub struct RecursiveLeastSquares {
     n_features: Option<usize>,
     /// Total samples trained on.
     samples_seen: u64,
+    /// Exponentially weighted moving average of squared residuals (EWMA alpha = 0.01).
+    running_mse: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +164,7 @@ impl RecursiveLeastSquares {
             delta,
             n_features: None,
             samples_seen: 0,
+            running_mse: 0.0,
         }
     }
 
@@ -191,6 +194,57 @@ impl RecursiveLeastSquares {
             self.p_matrix[i * d + i] = self.delta;
         }
     }
+
+    /// Compute x^T * P * x (quadratic form with inverse covariance matrix).
+    fn quadratic_form_p(&self, features: &[f64]) -> f64 {
+        let d = self.weights.len();
+        // P * x
+        let mut px = vec![0.0; d];
+        for (i, px_i) in px.iter_mut().enumerate() {
+            let row_start = i * d;
+            for (j, &fj) in features.iter().enumerate() {
+                *px_i += self.p_matrix[row_start + j] * fj;
+            }
+        }
+        // x^T * (P * x)
+        features.iter().zip(px.iter()).map(|(xi, pi)| xi * pi).sum()
+    }
+
+    // -----------------------------------------------------------------------
+    // Prediction confidence intervals
+    // -----------------------------------------------------------------------
+
+    /// Prediction variance at a given point: sigma^2 * (1 + x^T P x).
+    ///
+    /// This gives the variance of the predictive distribution, combining
+    /// noise variance with parameter uncertainty through the P matrix.
+    pub fn prediction_variance(&self, features: &[f64]) -> f64 {
+        if self.weights.is_empty() {
+            return f64::INFINITY;
+        }
+        let sigma2 = self.noise_variance();
+        let x_p_x = self.quadratic_form_p(features);
+        sigma2 * (1.0 + x_p_x)
+    }
+
+    /// Prediction standard deviation: sqrt(prediction_variance).
+    pub fn prediction_std(&self, features: &[f64]) -> f64 {
+        self.prediction_variance(features).sqrt()
+    }
+
+    /// Predict with confidence interval: returns (mean, lower, upper).
+    ///
+    /// `z` is the number of standard deviations (e.g. 1.96 for ~95% CI).
+    pub fn predict_interval(&self, features: &[f64], z: f64) -> (f64, f64, f64) {
+        let mean = self.predict(features);
+        let std = self.prediction_std(features);
+        (mean, mean - z * std, mean + z * std)
+    }
+
+    /// Estimated noise variance from EWMA of squared residuals.
+    pub fn noise_variance(&self) -> f64 {
+        self.running_mse
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +261,11 @@ impl StreamingLearner for RecursiveLeastSquares {
         }
         let n = self.n_features.unwrap();
         debug_assert_eq!(d, n);
+
+        // Update running MSE (EWMA of squared residuals) BEFORE weight update
+        // so it measures the pre-update prediction error.
+        let residual = target - self.predict(features);
+        self.running_mse = 0.99 * self.running_mse + 0.01 * residual * residual;
 
         // Prediction error, scaled by sqrt(weight).
         let prediction = dot(&self.weights, features);
@@ -250,6 +309,7 @@ impl StreamingLearner for RecursiveLeastSquares {
         self.p_matrix.clear();
         self.n_features = None;
         self.samples_seen = 0;
+        self.running_mse = 0.0;
     }
 }
 
@@ -266,6 +326,7 @@ impl Clone for RecursiveLeastSquares {
             delta: self.delta,
             n_features: self.n_features,
             samples_seen: self.samples_seen,
+            running_mse: self.running_mse,
         }
     }
 }
@@ -281,6 +342,7 @@ impl fmt::Debug for RecursiveLeastSquares {
             .field("forgetting_factor", &self.forgetting_factor)
             .field("delta", &self.delta)
             .field("samples_seen", &self.samples_seen)
+            .field("running_mse", &self.running_mse)
             .field("weights", &self.weights)
             .finish()
     }
@@ -1015,5 +1077,82 @@ mod tests {
 
         boxed.reset();
         assert_eq!(boxed.n_samples_seen(), 0);
+    }
+
+    // ===================================================================
+    // RLS confidence interval tests
+    // ===================================================================
+
+    #[test]
+    fn confidence_intervals_narrow_with_data() {
+        // More data -> lower prediction variance (P shrinks)
+        let mut rls = RecursiveLeastSquares::new(0.01);
+        // Train on y = 2x + 1
+        for i in 0..100 {
+            let x = i as f64 * 0.1;
+            rls.train(&[x], 2.0 * x + 1.0);
+        }
+        let var_100 = rls.prediction_variance(&[5.0]);
+
+        for i in 100..1000 {
+            let x = i as f64 * 0.1;
+            rls.train(&[x], 2.0 * x + 1.0);
+        }
+        let var_1000 = rls.prediction_variance(&[5.0]);
+
+        assert!(
+            var_1000 < var_100,
+            "variance should decrease with more data: {} vs {}",
+            var_1000,
+            var_100
+        );
+    }
+
+    #[test]
+    fn predict_interval_z_scaling() {
+        let mut rls = RecursiveLeastSquares::new(0.01);
+        for i in 0..200 {
+            let x = i as f64 * 0.05;
+            rls.train(&[x], x * x + 0.1); // slight noise-like pattern
+        }
+        let (mean1, lo1, hi1) = rls.predict_interval(&[5.0], 1.0);
+        let (mean2, lo2, hi2) = rls.predict_interval(&[5.0], 2.0);
+        assert!((mean1 - mean2).abs() < 1e-12); // same mean
+        let width1 = hi1 - lo1;
+        let width2 = hi2 - lo2;
+        assert!(
+            (width2 / width1 - 2.0).abs() < 0.01,
+            "width should scale with z: w1={}, w2={}",
+            width1,
+            width2
+        );
+    }
+
+    #[test]
+    fn noise_variance_reflects_residuals() {
+        let mut rls = RecursiveLeastSquares::new(0.01);
+        // Perfect linear data: noise variance should be small
+        for i in 0..500 {
+            let x = i as f64 * 0.01;
+            rls.train(&[x], 3.0 * x);
+        }
+        let nv = rls.noise_variance();
+        assert!(
+            nv < 1.0,
+            "noise variance should be small for perfect data: {}",
+            nv
+        );
+    }
+
+    #[test]
+    fn prediction_bounds_are_finite() {
+        let mut rls = RecursiveLeastSquares::new(0.01);
+        rls.train(&[1.0], 2.0);
+        let (mean, lo, hi) = rls.predict_interval(&[1.0], 1.96);
+        assert!(mean.is_finite());
+        assert!(lo.is_finite());
+        assert!(hi.is_finite());
+        assert!(lo <= mean);
+        assert!(mean <= hi);
     }
 }
