@@ -180,6 +180,7 @@ impl Default for PipelineBuilder {
 /// use irithyll::preprocessing::IncrementalNormalizer;
 /// use irithyll::pipeline::Pipeline;
 /// use irithyll::learners::StreamingLinearModel;
+/// use irithyll::StreamingLearner;
 ///
 /// let mut p = Pipeline::builder()
 ///     .pipe(IncrementalNormalizer::new())

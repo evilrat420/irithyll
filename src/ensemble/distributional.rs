@@ -464,7 +464,7 @@ impl DistributionalSGBT {
         self.uncertainty_modulated_lr
     }
 
-    /// Convert this model into a serializable [`DistributionalModelState`].
+    /// Convert this model into a serializable [`crate::serde_support::DistributionalModelState`].
     ///
     /// Captures the full ensemble state (both location and scale trees) for
     /// persistence. Histogram accumulators are NOT serialized — they rebuild
@@ -504,7 +504,7 @@ impl DistributionalSGBT {
         }
     }
 
-    /// Reconstruct a [`DistributionalSGBT`] from a serialized [`DistributionalModelState`].
+    /// Reconstruct a [`DistributionalSGBT`] from a serialized [`crate::serde_support::DistributionalModelState`].
     ///
     /// Rebuilds both location and scale ensembles including tree topology
     /// and leaf values. Histogram accumulators are left empty and will
