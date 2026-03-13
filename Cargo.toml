@@ -6,7 +6,7 @@ name = "irithyll"
 version = "6.3.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Streaming Gradient Boosted Trees for evolving data streams"
+description = "Streaming machine learning in Rust -- gradient boosted trees, kernel methods, linear models, and composable pipelines"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/evilrat420/irithyll"
 readme = "README.md"
@@ -53,6 +53,10 @@ parquet = ["dep:parquet", "arrow"]
 onnx = ["dep:prost"]
 neural-leaves = []
 full = ["serde-json", "serde-bincode", "kmeans-binning", "parallel", "arrow", "parquet", "onnx", "neural-leaves", "simd"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [[bench]]
 name = "histogram_bench"

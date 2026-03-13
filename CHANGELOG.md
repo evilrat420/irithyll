@@ -5,6 +5,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.3.0] - 2026-03-13
+
+### Added
+
+- **Kernel Recursive Least Squares (KRLS)** -- non-linear streaming regression in
+  reproducing kernel Hilbert space. Implements Engel, Mannor & Meir (2004) with
+  ALD (Approximate Linear Dependency) sparsification for automatic dictionary
+  pruning. Configurable budget caps dictionary size; once full, new samples fall
+  through to weight-only updates. Three kernel implementations: `RBFKernel`,
+  `PolynomialKernel`, `LinearKernel` via the object-safe `Kernel` trait. O(N²)
+  per sample where N ≤ budget.
+- **CCIPCA** (Candid Covariance-free Incremental PCA) -- streaming dimensionality
+  reduction via Weng, Zhang & Hwang (2003). Incrementally estimates leading
+  eigenvectors of the covariance matrix in O(kd) time per sample without ever
+  forming the covariance matrix. Configurable amnestic parameter for non-stationary
+  streams. Implements `StreamingPreprocessor` for pipeline integration.
+- **RLS confidence intervals** -- `RecursiveLeastSquares` now provides
+  `prediction_variance()`, `prediction_std()`, `predict_interval(z)`, and
+  `noise_variance()` for lightweight uncertainty quantification. Variance combines
+  noise estimate (EWMA of squared residuals) with parameter uncertainty through
+  the P matrix.
+- **DistributionalSGBT serialization** -- `to_distributional_state()`,
+  `from_distributional_state()` with full round-trip fidelity including drift
+  detector state, rolling sigma, and alternate trees. `save_distributional_model()`
+  / `load_distributional_model()` and bincode equivalents.
+- Factory functions: `krls()`, `ccipca()` for ergonomic construction.
+
+### Fixed
+
+- Broken intra-doc links for `DistributionalModelState` and missing
+  `StreamingLearner` import in `Pipeline` doc example.
+
+## [6.2.0] - 2026-03-13
+
+### Added
+
+- **Pipeline composition** -- `PipelineBuilder` for chaining `StreamingPreprocessor`
+  steps with a terminal `StreamingLearner`. `Pipeline` itself implements
+  `StreamingLearner`, enabling recursive composition and stacking. Training updates
+  preprocessor statistics; prediction uses frozen transforms.
+- **`StreamingPreprocessor` trait** -- object-safe trait for streaming feature
+  transformers with `update_and_transform()` (training) and `transform()` (prediction).
+- **`IncrementalNormalizer`** -- Welford online standardization implementing
+  `StreamingPreprocessor`. Zero-mean, unit-variance with lazy feature count
+  initialization and configurable variance floor.
+- **`OnlineFeatureSelector`** -- EWMA importance tracking with dynamic feature
+  masking after configurable warmup period.
+- **`AdaptiveSGBT`** -- SGBT wrapper with pluggable learning rate schedulers.
+  Five built-in schedulers: `ConstantLR`, `LinearDecayLR`, `ExponentialDecayLR`,
+  `CosineAnnealingLR`, `PlateauLR`.
+- Factory functions for ergonomic model construction: `sgbt()`, `linear()`,
+  `rls()`, `gaussian_nb()`, `mondrian()`, `normalizer()`, `pipe()`,
+  `adaptive_sgbt()`.
+
 ## [6.1.1] - 2026-03-13
 
 ### Added
@@ -313,6 +367,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[6.3.0]: https://github.com/evilrat420/irithyll/compare/v6.2.0...v6.3.0
+[6.2.0]: https://github.com/evilrat420/irithyll/compare/v6.1.1...v6.2.0
+[6.1.1]: https://github.com/evilrat420/irithyll/compare/v6.1.0...v6.1.1
+[6.1.0]: https://github.com/evilrat420/irithyll/compare/v6.0.0...v6.1.0
+[6.0.0]: https://github.com/evilrat420/irithyll/compare/v5.1.0...v6.0.0
+[5.1.0]: https://github.com/evilrat420/irithyll/compare/v5.0.0...v5.1.0
 [5.0.0]: https://github.com/evilrat420/irithyll/compare/v4.0.0...v5.0.0
 [4.0.0]: https://github.com/evilrat420/irithyll/compare/v3.0.0...v4.0.0
 [3.0.0]: https://github.com/evilrat420/irithyll/compare/v2.0.0...v3.0.0

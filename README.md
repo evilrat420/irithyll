@@ -5,52 +5,54 @@
 [![CI](https://github.com/evilrat420/irithyll/actions/workflows/ci.yml/badge.svg)](https://github.com/evilrat420/irithyll/actions)
 [![License](https://img.shields.io/crates/l/irithyll.svg)](https://github.com/evilrat420/irithyll)
 [![MSRV](https://img.shields.io/badge/MSRV-1.75-blue.svg)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
+[![GitHub stars](https://img.shields.io/github/stars/evilrat420/irithyll?style=social)](https://github.com/evilrat420/irithyll)
 
-**Streaming Gradient Boosted Trees for evolving data streams.**
+**Streaming machine learning in Rust** -- gradient boosted trees, kernel methods, linear models, and composable pipelines, all learning one sample at a time.
 
-Irithyll is a pure Rust implementation of the SGBT algorithm ([Gunasekara et al., 2024](https://doi.org/10.1007/s10994-024-06517-y)). It learns one sample at a time. No batches, no windows, no retraining. Each tree in the ensemble uses Hoeffding-bound split decisions to grow incrementally, and when the data distribution shifts, concept drift detectors trigger automatic tree replacement so the model stays current.
+```rust
+use irithyll::{pipe, normalizer, sgbt, StreamingLearner};
 
-The paper laid the foundation, but deploying streaming trees in long-running systems required going further. Irithyll adds EWMA leaf decay for continuous forgetting, lazy O(1) histogram decay (because decaying every bin on every sample doesn't scale), proactive tree replacement on a timer, and EFDT-style split re-evaluation at max-depth leaves. Together these close the gap between the research algorithm and a system you can run indefinitely on non-stationary data.
+let mut model = pipe(normalizer()).learner(sgbt(50, 0.01));
+model.train(&[100.0, 0.5], 42.0);
+let prediction = model.predict(&[100.0, 0.5]);
+```
 
-## Features
+## Why irithyll?
 
-### Core Algorithm
-- **True online learning** with `train_one()`, one sample at a time
-- **Concept drift detection** via Page-Hinkley, ADWIN, or DDM, with automatic tree replacement
-- **Multi-class support** through `MulticlassSGBT` with one-vs-rest committees
-- **Multi-target regression** via `MultiTargetSGBT` with T independent models
-- **Three SGBT variants** from the paper: Standard, Skip (SGBT-SK), and MultipleIterations (SGBT-MI)
-- **Pluggable loss functions**: squared, logistic, softmax, Huber, or implement the `Loss` trait yourself
-- **Hoeffding tree splitting** with configurable confidence bounds
-- **XGBoost-style regularization**: L2 (`lambda`) and minimum gain (`gamma`)
+- **12+ streaming algorithms** under one unified [`StreamingLearner`](https://docs.rs/irithyll/latest/irithyll/trait.StreamingLearner.html) trait
+- **One sample at a time** -- O(1) memory per model, no batches, no windows, no retraining
+- **Composable pipelines** -- chain preprocessors and learners with a builder API
+- **Concept drift adaptation** -- automatic model replacement when the data distribution shifts
+- **Confidence intervals** -- prediction uncertainty from RLS and conformal methods
+- **Production-grade** -- async streaming, SIMD acceleration, Arrow/Parquet I/O, ONNX export
+- **Pure Rust** -- zero unsafe, deterministic, serializable, 780+ tests
 
-### Interpretability
-- **TreeSHAP explanations** via `explain()` with path-dependent SHAP values (Lundberg et al., 2020)
-- **Named features** with `explain_named()` for human-readable per-feature contributions
-- **StreamingShap** for online running-mean |SHAP| feature importance without storing past data
-- **Feature importance** from accumulated split gain across the ensemble
+## Algorithms
 
-### Streaming Adaptation
-These go beyond the original paper to handle the realities of long-running, non-stationary systems:
+Every algorithm implements `StreamingLearner` -- train and predict with the same two-method interface.
 
-- **EWMA leaf decay** (`leaf_half_life`): exponential moving average on leaf statistics so the model gradually forgets old data without needing to replace entire trees
-- **Lazy histogram decay**: the decay math is O(1) per sample instead of O(n_bins), with exact results. The trick is storing samples in un-decayed coordinates and only materializing the decay when bins are actually read at split evaluation time
-- **Proactive tree replacement** (`max_tree_samples`): cycle trees on a timer, independent of drift detectors. Useful when drift is gradual and detectors don't fire
-- **Split re-evaluation** (`split_reeval_interval`): EFDT-inspired re-checking of max-depth leaves to see if splitting would now help
+| Algorithm | Type | Use Case | Per-Sample Cost |
+|-----------|------|----------|-----------------|
+| [`SGBT`](https://docs.rs/irithyll/latest/irithyll/struct.SGBT.html) | Gradient boosted trees | General regression/classification | O(n_steps * depth) |
+| [`AdaptiveSGBT`](https://docs.rs/irithyll/latest/irithyll/struct.AdaptiveSGBT.html) | SGBT + LR scheduling | Decaying/cycling learning rates | O(n_steps * depth) |
+| [`MulticlassSGBT`](https://docs.rs/irithyll/latest/irithyll/struct.MulticlassSGBT.html) | One-vs-rest SGBT | Multi-class classification | O(classes * n_steps * depth) |
+| [`MultiTargetSGBT`](https://docs.rs/irithyll/latest/irithyll/struct.MultiTargetSGBT.html) | Independent SGBTs | Multi-output regression | O(targets * n_steps * depth) |
+| [`DistributionalSGBT`](https://docs.rs/irithyll/latest/irithyll/struct.DistributionalSGBT.html) | Mean + variance SGBT | Prediction uncertainty | O(2 * n_steps * depth) |
+| [`KRLS`](https://docs.rs/irithyll/latest/irithyll/struct.KRLS.html) | Kernel recursive LS | Nonlinear regression (sin, exp, ...) | O(budget^2) |
+| [`RecursiveLeastSquares`](https://docs.rs/irithyll/latest/irithyll/struct.RecursiveLeastSquares.html) | RLS with confidence | Linear regression + uncertainty | O(d^2) |
+| [`StreamingLinearModel`](https://docs.rs/irithyll/latest/irithyll/struct.StreamingLinearModel.html) | SGD linear model | Fast linear baseline | O(d) |
+| [`StreamingPolynomialRegression`](https://docs.rs/irithyll/latest/irithyll/struct.StreamingPolynomialRegression.html) | Polynomial SGD | Polynomial curve fitting | O(d * degree) |
+| [`GaussianNB`](https://docs.rs/irithyll/latest/irithyll/struct.GaussianNB.html) | Naive Bayes | Text/categorical classification | O(d * classes) |
+| [`MondrianForest`](https://docs.rs/irithyll/latest/irithyll/struct.MondrianForest.html) | Random forest variant | Streaming ensemble regression | O(n_trees * depth) |
+| [`LocallyWeightedRegression`](https://docs.rs/irithyll/latest/irithyll/struct.LocallyWeightedRegression.html) | Memory-based | Locally varying relationships | O(window) |
 
-### Production Infrastructure
-- **Async streaming** via `AsyncSGBT` with tokio channels, concurrent `Predictor` handles, and backpressure
-- **Model checkpointing** with `save_model()` / `load_model()` — drift detector state is preserved across save/load
-- **Online metrics**: incremental MAE, MSE, RMSE, R-squared, accuracy, precision, recall, F1, log loss
-- **Deterministic seeding** for reproducible results
-- **Python bindings** via the `irithyll-python` crate (PyO3 + numpy, GIL-released train/predict)
+**Preprocessing** (implements `StreamingPreprocessor`):
 
-### Optional Accelerators
-- **Parallel training** (`parallel`): Rayon-based data-parallel tree training
-- **SIMD histograms** (`simd`): AVX2 intrinsics for histogram gradient summation
-- **Arrow integration** (`arrow`): train from `RecordBatch`, predict to arrays
-- **Parquet I/O** (`parquet`): bulk training directly from Parquet files
-- **ONNX export** (`onnx`): export trained models for cross-platform inference
+| Preprocessor | Description |
+|-------------|-------------|
+| [`IncrementalNormalizer`](https://docs.rs/irithyll/latest/irithyll/struct.IncrementalNormalizer.html) | Welford's online standardization |
+| [`OnlineFeatureSelector`](https://docs.rs/irithyll/latest/irithyll/struct.OnlineFeatureSelector.html) | Streaming mutual-information feature selection |
+| [`CCIPCA`](https://docs.rs/irithyll/latest/irithyll/struct.CCIPCA.html) | O(kd) streaming PCA without covariance matrices |
 
 ## Quick Start
 
@@ -58,117 +60,132 @@ These go beyond the original paper to handle the realities of long-running, non-
 cargo add irithyll
 ```
 
-### Regression
+### Factory Functions
+
+The fastest way to get started -- one-liner construction for every algorithm:
+
+```rust
+use irithyll::{sgbt, rls, krls, gaussian_nb, mondrian, linear, StreamingLearner};
+
+let mut trees  = sgbt(50, 0.01);        // 50 boosting steps, lr=0.01
+let mut kernel = krls(1.0, 100, 1e-4);  // RBF gamma=1.0, budget=100
+let mut bayes  = gaussian_nb();          // Gaussian Naive Bayes
+let mut forest = mondrian(10);           // 10 Mondrian trees
+let mut lin    = linear(0.01);           // SGD linear model, lr=0.01
+let mut rls_m  = rls(0.99);             // RLS, forgetting factor=0.99
+
+// All share the same interface
+trees.train(&[1.0, 2.0], 3.0);
+let pred = trees.predict(&[1.0, 2.0]);
+```
+
+### Composable Pipelines
+
+Chain preprocessors and learners with zero boilerplate:
+
+```rust
+use irithyll::{pipe, normalizer, sgbt, ccipca, StreamingLearner};
+
+// Normalize → reduce to 5 components → gradient boosted trees
+let mut model = pipe(normalizer())
+    .pipe(ccipca(5))
+    .learner(sgbt(50, 0.01));
+
+model.train(&[100.0, 0.001, 50_000.0, 0.5, 1e-6, 42.0, 7.7, 0.3], 3.14);
+let pred = model.predict(&[100.0, 0.001, 50_000.0, 0.5, 1e-6, 42.0, 7.7, 0.3]);
+```
+
+### Kernel Methods (KRLS)
+
+Learn nonlinear functions with automatic dictionary sparsification:
+
+```rust
+use irithyll::{krls, StreamingLearner};
+
+let mut model = krls(1.0, 100, 1e-4);  // RBF kernel, budget=100
+
+for i in 0..500 {
+    let x = i as f64 * 0.01;
+    model.train(&[x], x.sin());
+}
+
+let pred = model.predict(&[1.5708]);  // sin(pi/2) ~ 1.0
+```
+
+### Prediction Intervals (RLS)
+
+Get calibrated confidence intervals that narrow as data arrives:
+
+```rust
+use irithyll::{rls, StreamingLearner, RecursiveLeastSquares};
+
+let mut model = rls(0.99);
+
+for i in 0..1000 {
+    let x = i as f64 * 0.01;
+    model.train(&[x], 2.0 * x + 1.0);
+}
+
+let (pred, lo, hi) = model.predict_interval(&[5.0], 1.96);
+// 95% CI: prediction is between lo and hi
+```
+
+### Full Builder Pattern
+
+For complete control over SGBT hyperparameters:
 
 ```rust
 use irithyll::{SGBTConfig, SGBT, Sample};
 
-fn main() {
-    let config = SGBTConfig::builder()
-        .n_steps(50)
-        .learning_rate(0.1)
-        .build()
-        .expect("valid config");
+let config = SGBTConfig::builder()
+    .n_steps(100)
+    .learning_rate(0.0125)
+    .max_depth(6)
+    .n_bins(64)
+    .lambda(1.0)
+    .grace_period(200)
+    .feature_names(vec!["price".into(), "volume".into()])
+    .build()
+    .expect("valid config");
 
-    let mut model = SGBT::new(config);
+let mut model = SGBT::new(config);
 
-    // Stream samples one at a time
-    for i in 0..500 {
-        let x = i as f64 * 0.01;
-        let target = 2.0 * x + 1.0;
-        model.train_one(&Sample::new(vec![x], target));
+for i in 0..500 {
+    let x = i as f64 * 0.01;
+    model.train_one(&Sample::new(vec![x], 2.0 * x + 1.0));
+}
+
+// TreeSHAP explanations
+let shap = model.explain(&[3.0]);
+if let Some(named) = model.explain_named(&[3.0]) {
+    for (name, value) in &named.values {
+        println!("{}: {:.4}", name, value);
     }
-
-    let prediction = model.predict(&[3.0]);
-    println!("predict(3.0) = {:.4}", prediction);
 }
 ```
 
-### Binary Classification
+### Concept Drift Detection
+
+Automatic adaptation when the data distribution shifts:
 
 ```rust
 use irithyll::{SGBTConfig, SGBT, Sample};
-use irithyll::loss::logistic::LogisticLoss;
+use irithyll::drift::adwin::Adwin;
 
-fn main() {
-    let config = SGBTConfig::builder()
-        .n_steps(30)
-        .learning_rate(0.1)
-        .build()
-        .expect("valid config");
+let config = SGBTConfig::builder()
+    .n_steps(50)
+    .learning_rate(0.1)
+    .drift_detector(Adwin::default())
+    .build()
+    .expect("valid config");
 
-    let mut model = SGBT::with_loss(config, LogisticLoss);
-
-    // Class 0 near (-2, -2), class 1 near (2, 2)
-    for _ in 0..500 {
-        model.train_one(&Sample::new(vec![-2.0, -2.0], 0.0));
-        model.train_one(&Sample::new(vec![ 2.0,  2.0], 1.0));
-    }
-
-    let prob = model.predict_proba(&[1.5, 1.5]);
-    println!("P(class=1 | [1.5, 1.5]) = {:.4}", prob);
-}
-```
-
-### Explanations
-
-```rust
-use irithyll::{SGBTConfig, SGBT, Sample};
-
-fn main() {
-    let config = SGBTConfig::builder()
-        .n_steps(20)
-        .learning_rate(0.1)
-        .feature_names(vec!["price".into(), "volume".into()])
-        .build()
-        .expect("valid config");
-
-    let mut model = SGBT::new(config);
-
-    for i in 0..500 {
-        let price = i as f64 * 0.1;
-        let volume = 100.0 - price;
-        model.train_one(&Sample::new(vec![price, volume], price * 2.0));
-    }
-
-    // TreeSHAP: per-feature contributions
-    let shap = model.explain(&[5.0, 50.0]);
-    // Invariant: shap.base_value + sum(shap.values) == model.predict(&[5.0, 50.0])
-
-    // Named explanations (sorted by |contribution|)
-    if let Some(named) = model.explain_named(&[5.0, 50.0]) {
-        for (name, value) in &named.values {
-            println!("{}: {:.4}", name, value);
-        }
-    }
-}
-```
-
-### Multi-Target Regression
-
-```rust
-use irithyll::{SGBTConfig, MultiTargetSGBT};
-
-fn main() {
-    let config = SGBTConfig::builder()
-        .n_steps(20)
-        .learning_rate(0.1)
-        .build()
-        .expect("valid config");
-
-    let mut model = MultiTargetSGBT::new(config, 3).unwrap();
-
-    for i in 0..500 {
-        let x = i as f64 * 0.01;
-        model.train_one(&[x, x * 2.0], &[x * 3.0, x * -1.0, x + 1.0]);
-    }
-
-    let preds = model.predict(&[1.0, 2.0]);
-    assert_eq!(preds.len(), 3);
-}
+let mut model = SGBT::new(config);
+// When drift is detected, trees are automatically replaced
 ```
 
 ### Async Streaming
+
+Tokio-native with bounded channels and concurrent prediction:
 
 ```rust
 use irithyll::{SGBTConfig, Sample};
@@ -185,20 +202,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sender = runner.sender();
     let predictor = runner.predictor();
 
-    // Spawn the training loop
     let handle = tokio::spawn(async move { runner.run().await });
 
-    // Feed samples from any async context
     for i in 0..500 {
         let x = i as f64 * 0.01;
         sender.send(Sample::new(vec![x], 2.0 * x)).await?;
     }
 
-    // Predict concurrently while training proceeds
     let pred = predictor.predict(&[3.0]);
-    println!("prediction = {:.4}", pred);
-
-    // Drop sender to signal shutdown
     drop(sender);
     handle.await??;
     Ok(())
@@ -219,54 +230,43 @@ for i in range(500):
     model.train_one(x, 2.0 * x[0] + 1.0)
 
 pred = model.predict(np.array([3.0]))
-
-# SHAP explanations
 shap = model.explain(np.array([3.0]))
-print(shap.values, shap.base_value)
-
-# Save/load
-model.save("model.json")
-restored = StreamingGBT.load("model.json")
 ```
+
+## The SGBT Algorithm
+
+The core gradient boosting engine is based on [Gunasekara et al., 2024](https://doi.org/10.1007/s10994-024-06517-y). The ensemble maintains `n_steps` boosting stages, each owning a streaming Hoeffding tree and a drift detector. For each sample *(x, y)*:
+
+1. Compute the ensemble prediction *F(x) = base + lr * sum(tree_s(x))*
+2. For each boosting step, compute gradient/hessian of the loss at the residual
+3. Update the tree's histogram accumulators and evaluate splits via Hoeffding bound
+4. Feed the standardized error to the drift detector
+5. If drift is detected, replace the tree with a fresh alternate
+
+Beyond the paper, irithyll adds EWMA leaf decay, lazy O(1) histogram decay, proactive tree replacement, and EFDT-style split re-evaluation for long-running non-stationary systems.
 
 ## Architecture
 
 ```
 irithyll/
-  loss/          Differentiable loss functions (squared, logistic, softmax, huber)
-  histogram/     Streaming histogram binning (uniform, quantile, optional k-means)
-  tree/          Hoeffding-bound streaming decision trees
-  drift/         Concept drift detectors (Page-Hinkley, ADWIN, DDM) with serializable state
-  ensemble/      SGBT boosting loop, config, variants, multi-class, multi-target, parallel
-  explain/       TreeSHAP explanations and StreamingShap online importance
-  stream/        Async tokio channel-based training runner and predictor handles
-  metrics/       Online regression and classification metric trackers
-  serde_support/ Model checkpoint/restore serialization
+  ensemble/        SGBT variants, config, multi-class/target, parallel, adaptive, distributional
+  learners/        KRLS, RLS, Gaussian NB, Mondrian forests, linear/polynomial models
+  pipeline/        Composable preprocessor + learner chains (StreamingPreprocessor trait)
+  preprocessing/   IncrementalNormalizer, OnlineFeatureSelector, CCIPCA
+  tree/            Hoeffding-bound streaming decision trees
+  histogram/       Streaming histogram binning (uniform, quantile, k-means)
+  drift/           Concept drift detectors (Page-Hinkley, ADWIN, DDM)
+  loss/            Differentiable loss functions (squared, logistic, softmax, Huber)
+  explain/         TreeSHAP, StreamingShap, importance drift monitoring
+  stream/          Async tokio-based training runner and predictor handles
+  metrics/         Online regression/classification metrics, conformal intervals, EWMA
+  anomaly/         Half-space trees for streaming anomaly detection
+  serde_support/   Model checkpoint/restore (JSON, bincode)
 
-irithyll-python/   PyO3 Python bindings (StreamingGBT, MultiTargetGBT, ShapExplanation)
+irithyll-python/   PyO3 Python bindings
 ```
 
 ## Configuration
-
-All hyperparameters go through the builder pattern, validated on `build()`:
-
-```rust
-use irithyll::SGBTConfig;
-
-let config = SGBTConfig::builder()
-    .n_steps(100)              // Number of boosting steps (trees)
-    .learning_rate(0.0125)     // Shrinkage factor
-    .feature_subsample_rate(0.75) // Fraction of features per tree
-    .max_depth(6)              // Maximum tree depth
-    .n_bins(64)                // Histogram bins per feature
-    .lambda(1.0)               // L2 regularization
-    .gamma(0.0)                // Minimum split gain
-    .grace_period(200)         // Samples before evaluating splits
-    .delta(1e-7)               // Hoeffding bound confidence
-    .feature_names(vec!["price".into(), "volume".into()])
-    .build()
-    .expect("valid config");
-```
 
 | Parameter                | Default                    | Description                                   |
 |--------------------------|----------------------------|-----------------------------------------------|
@@ -281,25 +281,24 @@ let config = SGBTConfig::builder()
 | `delta`                  | 1e-7                       | Hoeffding bound confidence parameter           |
 | `drift_detector`         | PageHinkley(0.005, 50.0)   | Drift detection algorithm for tree replacement |
 | `variant`                | Standard                   | Computational variant (Standard, Skip, MI)     |
-| `feature_names`          | None                       | Optional feature names for named explanations  |
 | `leaf_half_life`         | None (disabled)            | EWMA decay half-life for leaf statistics       |
 | `max_tree_samples`       | None (disabled)            | Proactive tree replacement threshold           |
 | `split_reeval_interval`  | None (disabled)            | Re-evaluation interval for max-depth leaves    |
 
 ## Feature Flags
 
-| Feature | Dependencies | Description |
-|---------|-------------|-------------|
-| `serde-json` (default) | `serde_json` | JSON model serialization |
-| `serde-bincode` | `bincode` | Compact binary serialization |
-| `parallel` | `rayon` | Parallel tree training |
-| `simd` | -- | AVX2 histogram acceleration |
-| `kmeans-binning` | -- | K-means histogram binning |
-| `arrow` | `arrow` | Apache Arrow integration |
-| `parquet` | `parquet` | Parquet file I/O |
-| `onnx` | `prost` | ONNX model export |
-| `neural-leaves` | -- | Experimental MLP leaf models |
-| `full` | all above | Enable everything |
+| Feature | Default | Description |
+|---------|---------|-------------|
+| `serde-json` | Yes | JSON model serialization |
+| `serde-bincode` | No | Compact binary serialization (bincode) |
+| `parallel` | No | Rayon-based parallel tree training (`ParallelSGBT`) |
+| `simd` | No | AVX2 histogram acceleration |
+| `kmeans-binning` | No | K-means histogram binning strategy |
+| `arrow` | No | Apache Arrow RecordBatch integration |
+| `parquet` | No | Parquet file I/O |
+| `onnx` | No | ONNX model export |
+| `neural-leaves` | No | Experimental MLP leaf models |
+| `full` | No | Enable all features |
 
 ## Examples
 
@@ -314,6 +313,15 @@ Run any example with `cargo run --example <name>`:
 | `drift_detection` | Abrupt concept drift with recovery analysis |
 | `model_checkpointing` | Save/restore models with prediction verification |
 | `streaming_metrics` | Prequential evaluation with windowed metrics |
+| `krls_nonlinear` | Kernel regression on sin(x) with ALD sparsification |
+| `ccipca_reduction` | Streaming PCA dimensionality reduction |
+| `rls_confidence` | RLS prediction intervals narrowing over time |
+| `pipeline_composition` | Normalizer + SGBT composable pipeline |
+
+## Documentation
+
+- [**API Reference**](https://docs.rs/irithyll) -- full docs on docs.rs (all features enabled)
+- [**Rustdoc (GitHub Pages)**](https://evilrat420.github.io/irithyll/) -- latest from master
 
 ## Minimum Supported Rust Version
 
@@ -324,6 +332,8 @@ The MSRV is **1.75**. This is checked in CI and will only be raised in minor ver
 > Gunasekara, N., Pfahringer, B., Gomes, H. M., & Bifet, A. (2024). *Gradient boosted trees for evolving data streams.* Machine Learning, 113, 3325-3352.
 
 > Lundberg, S. M., Erion, G., Chen, H., DeGrave, A., Prutkin, J. M., Nair, B., Katz, R., Himmelfarb, J., Banber, N., & Lee, S.-I. (2020). *From local explanations to global understanding with explainable AI for trees.* Nature Machine Intelligence, 2, 56-67.
+
+> Weng, J., Zhang, Y., & Hwang, W.-S. (2003). *Candid covariance-free incremental principal component analysis.* IEEE Transactions on Pattern Analysis and Machine Intelligence, 25(8), 1034-1040.
 
 ## License
 

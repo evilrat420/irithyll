@@ -1,21 +1,25 @@
 //! # Irithyll
 //!
-//! Streaming Gradient Boosted Trees for evolving data streams.
+//! Streaming machine learning in Rust -- gradient boosted trees, kernel methods,
+//! linear models, and composable pipelines, all learning one sample at a time.
 //!
-//! Irithyll implements the SGBT algorithm
-//! ([Gunasekara et al., 2024](https://doi.org/10.1007/s10994-024-06517-y))
-//! in pure Rust, providing incremental gradient boosted tree ensembles that learn
-//! one sample at a time. Trees are built using Hoeffding-bound split decisions and
-//! automatically replaced when concept drift is detected, making the model suitable
-//! for non-stationary environments where the data distribution shifts over time.
+//! Irithyll provides 12+ streaming algorithms under one unified
+//! [`StreamingLearner`] trait. The core is SGBT
+//! ([Gunasekara et al., 2024](https://doi.org/10.1007/s10994-024-06517-y)),
+//! but the library extends to kernel regression, RLS with confidence intervals,
+//! Naive Bayes, Mondrian forests, streaming PCA, and composable pipelines.
+//! Every algorithm processes samples one at a time with O(1) memory per model.
 //!
 //! ## Key Capabilities
 //!
-//! - **True online learning** -- `train_one()` processes samples individually, no batching
+//! - **12+ streaming algorithms** -- SGBT, KRLS, RLS, linear SGD, Gaussian NB, Mondrian forests, and more
+//! - **Composable pipelines** -- chain preprocessors and learners: `pipe(normalizer()).learner(sgbt(50, 0.01))`
 //! - **Concept drift adaptation** -- automatic tree replacement via Page-Hinkley, ADWIN, or DDM
+//! - **Kernel methods** -- [`KRLS`] with RBF, polynomial, and linear kernels + ALD sparsification
+//! - **Confidence intervals** -- [`RecursiveLeastSquares::predict_interval`] for prediction uncertainty
+//! - **Streaming PCA** -- [`CCIPCA`] for O(kd) dimensionality reduction without covariance matrices
 //! - **Async streaming** -- tokio-native [`AsyncSGBT`] with bounded channels and concurrent prediction
 //! - **Pluggable losses** -- squared, logistic, softmax, Huber, or custom via the [`Loss`] trait
-//! - **Multi-class** -- one-vs-rest committees with softmax normalization ([`MulticlassSGBT`])
 //! - **Serialization** -- checkpoint/restore via JSON or bincode for zero-downtime deployments
 //! - **Production-grade** -- SIMD acceleration, parallel training, Arrow/Parquet I/O, ONNX export
 //!
@@ -51,6 +55,16 @@
 //! let sample = Sample::new(vec![1.0, 2.0, 3.0], 0.5);
 //! model.train_one(&sample);
 //! let prediction = model.predict(&sample.features);
+//! ```
+//!
+//! Or use factory functions for quick construction:
+//!
+//! ```no_run
+//! use irithyll::{pipe, normalizer, sgbt, StreamingLearner};
+//!
+//! let mut model = pipe(normalizer()).learner(sgbt(50, 0.01));
+//! model.train(&[100.0, 0.5], 42.0);
+//! let pred = model.predict(&[100.0, 0.5]);
 //! ```
 //!
 //! ## Algorithm
