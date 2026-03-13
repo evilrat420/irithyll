@@ -13,7 +13,7 @@ readme = "README.md"
 documentation = "https://docs.rs/irithyll"
 keywords = ["machine-learning", "gradient-boosting", "streaming", "online-learning", "decision-trees"]
 categories = ["algorithms", "science"]
-exclude = [".claude/", "irithyll-python/"]
+exclude = [".claude/", "irithyll-python/", "marketing/"]
 
 [dependencies]
 parking_lot = "0.12"
