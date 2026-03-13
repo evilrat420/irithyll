@@ -25,7 +25,7 @@
 
 use crate::ensemble::config::SGBTConfig;
 use crate::ensemble::step::BoostingStep;
-use crate::sample::Observation;
+use crate::sample::{Observation, SampleRef};
 use crate::tree::builder::TreeConfig;
 
 /// Prediction from a distributional model: full Gaussian N(μ, σ²).
@@ -466,6 +466,33 @@ impl DistributionalSGBT {
 }
 
 // ---------------------------------------------------------------------------
+// StreamingLearner impl
+// ---------------------------------------------------------------------------
+
+use crate::learner::StreamingLearner;
+
+impl StreamingLearner for DistributionalSGBT {
+    fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
+        let sample = SampleRef::weighted(features, target, weight);
+        // UFCS: call the inherent train_one(&impl Observation), not this trait method.
+        DistributionalSGBT::train_one(self, &sample);
+    }
+
+    /// Returns the mean (μ) of the predicted Gaussian distribution.
+    fn predict(&self, features: &[f64]) -> f64 {
+        DistributionalSGBT::predict(self, features).mu
+    }
+
+    fn n_samples_seen(&self) -> u64 {
+        self.samples_seen
+    }
+
+    fn reset(&mut self) {
+        DistributionalSGBT::reset(self);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -754,5 +781,20 @@ mod tests {
 
         model.reset();
         assert!((model.rolling_sigma_mean() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn streaming_learner_returns_mu() {
+        let mut model = DistributionalSGBT::new(test_config());
+        for i in 0..200 {
+            let x = i as f64 * 0.1;
+            StreamingLearner::train(&mut model, &[x], x * 2.0 + 1.0);
+        }
+        let pred = StreamingLearner::predict(&model, &[5.0]);
+        let gaussian = DistributionalSGBT::predict(&model, &[5.0]);
+        assert!(
+            (pred - gaussian.mu).abs() < 1e-12,
+            "StreamingLearner::predict should return mu"
+        );
     }
 }

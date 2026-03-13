@@ -300,6 +300,28 @@ impl Default for IncrementalNormalizer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// StreamingPreprocessor impl
+// ---------------------------------------------------------------------------
+
+impl crate::pipeline::StreamingPreprocessor for IncrementalNormalizer {
+    fn update_and_transform(&mut self, features: &[f64]) -> Vec<f64> {
+        IncrementalNormalizer::update_and_transform(self, features)
+    }
+
+    fn transform(&self, features: &[f64]) -> Vec<f64> {
+        IncrementalNormalizer::transform(self, features)
+    }
+
+    fn output_dim(&self) -> Option<usize> {
+        self.n_features()
+    }
+
+    fn reset(&mut self) {
+        IncrementalNormalizer::reset(self);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

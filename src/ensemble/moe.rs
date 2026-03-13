@@ -472,6 +472,32 @@ impl<L: Loss> MoESGBT<L> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// StreamingLearner impl
+// ---------------------------------------------------------------------------
+
+use crate::learner::StreamingLearner;
+
+impl<L: Loss> StreamingLearner for MoESGBT<L> {
+    fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
+        let sample = SampleRef::weighted(features, target, weight);
+        // UFCS: call the inherent train_one(&impl Observation), not this trait method.
+        MoESGBT::train_one(self, &sample);
+    }
+
+    fn predict(&self, features: &[f64]) -> f64 {
+        MoESGBT::predict(self, features)
+    }
+
+    fn n_samples_seen(&self) -> u64 {
+        self.samples_seen
+    }
+
+    fn reset(&mut self) {
+        MoESGBT::reset(self);
+    }
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -784,5 +810,21 @@ mod tests {
         // Should produce non-zero predictions after batch training
         let pred = moe.predict(&[10.0, 30.0]);
         assert!(pred.is_finite());
+    }
+
+    #[test]
+    fn streaming_learner_trait_object() {
+        let config = test_config();
+        let model = MoESGBT::new(config, 3);
+        let mut boxed: Box<dyn StreamingLearner> = Box::new(model);
+        for i in 0..100 {
+            let x = i as f64 * 0.1;
+            boxed.train(&[x], x * 2.0);
+        }
+        assert_eq!(boxed.n_samples_seen(), 100);
+        let pred = boxed.predict(&[5.0]);
+        assert!(pred.is_finite());
+        boxed.reset();
+        assert_eq!(boxed.n_samples_seen(), 0);
     }
 }

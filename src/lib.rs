@@ -82,6 +82,7 @@ pub mod anomaly;
 pub mod explain;
 pub mod learner;
 pub mod learners;
+pub mod pipeline;
 pub mod preprocessing;
 pub mod serde_support;
 
@@ -93,6 +94,7 @@ pub mod onnx_export;
 
 // Re-exports — core types
 pub use drift::{DriftDetector, DriftSignal};
+pub use ensemble::adaptive::AdaptiveSGBT;
 pub use ensemble::bagged::BaggedSGBT;
 pub use ensemble::config::{FeatureType, SGBTConfig};
 pub use ensemble::distributional::{DistributionalSGBT, GaussianPrediction};
@@ -130,7 +132,8 @@ pub use anomaly::hst::{AnomalyScore, HSTConfig, HalfSpaceTree};
 // Re-exports — streaming learner trait
 pub use learner::{SGBTLearner, StreamingLearner};
 
-// Re-exports — preprocessing
+// Re-exports — preprocessing & pipeline
+pub use pipeline::{Pipeline, PipelineBuilder, StreamingPreprocessor};
 pub use preprocessing::{IncrementalNormalizer, OnlineFeatureSelector};
 
 // Re-exports — learning rate scheduling
@@ -141,3 +144,127 @@ pub use learners::{
     GaussianNB, LocallyWeightedRegression, MondrianForest, RecursiveLeastSquares,
     StreamingLinearModel, StreamingPolynomialRegression,
 };
+
+// ---------------------------------------------------------------------------
+// Convenience factory functions
+// ---------------------------------------------------------------------------
+
+/// Create an SGBT learner with squared loss from minimal parameters.
+///
+/// For full control, use [`SGBTConfig::builder()`] directly.
+///
+/// ```
+/// use irithyll::{sgbt, StreamingLearner};
+///
+/// let mut model = sgbt(50, 0.01);
+/// model.train(&[1.0, 2.0], 3.0);
+/// let pred = model.predict(&[1.0, 2.0]);
+/// ```
+pub fn sgbt(n_steps: usize, lr: f64) -> SGBTLearner {
+    let config = SGBTConfig::builder()
+        .n_steps(n_steps)
+        .learning_rate(lr)
+        .build()
+        .expect("sgbt() factory: invalid parameters");
+    SGBTLearner::from_config(config)
+}
+
+/// Create a streaming linear model with the given learning rate.
+///
+/// ```
+/// use irithyll::{linear, StreamingLearner};
+///
+/// let mut model = linear(0.01);
+/// model.train(&[1.0, 2.0], 3.0);
+/// ```
+pub fn linear(lr: f64) -> StreamingLinearModel {
+    StreamingLinearModel::new(lr)
+}
+
+/// Create a recursive least squares model with the given forgetting factor.
+///
+/// ```
+/// use irithyll::{rls, StreamingLearner};
+///
+/// let mut model = rls(0.99);
+/// model.train(&[1.0, 2.0], 3.0);
+/// ```
+pub fn rls(forgetting_factor: f64) -> RecursiveLeastSquares {
+    RecursiveLeastSquares::new(forgetting_factor)
+}
+
+/// Create a Gaussian Naive Bayes classifier.
+///
+/// ```
+/// use irithyll::{gaussian_nb, StreamingLearner};
+///
+/// let mut model = gaussian_nb();
+/// model.train(&[1.0, 2.0], 0.0);
+/// ```
+pub fn gaussian_nb() -> GaussianNB {
+    GaussianNB::new()
+}
+
+/// Create a Mondrian forest with the given number of trees.
+///
+/// ```
+/// use irithyll::{mondrian, StreamingLearner};
+///
+/// let mut model = mondrian(10);
+/// model.train(&[1.0, 2.0], 3.0);
+/// ```
+pub fn mondrian(n_trees: usize) -> MondrianForest {
+    let config = learners::mondrian::MondrianForestConfig::builder()
+        .n_trees(n_trees)
+        .build();
+    MondrianForest::new(config)
+}
+
+/// Create an incremental normalizer for streaming standardization.
+///
+/// ```
+/// use irithyll::{normalizer, StreamingPreprocessor};
+///
+/// let mut norm = normalizer();
+/// let z = norm.update_and_transform(&[10.0, 200.0]);
+/// ```
+pub fn normalizer() -> IncrementalNormalizer {
+    IncrementalNormalizer::new()
+}
+
+/// Start building a pipeline with the first preprocessor.
+///
+/// Shorthand for `Pipeline::builder().pipe(preprocessor)`.
+///
+/// ```
+/// use irithyll::{pipe, normalizer, sgbt, StreamingLearner};
+///
+/// let mut pipeline = pipe(normalizer()).learner(sgbt(10, 0.01));
+/// pipeline.train(&[100.0, 0.5], 42.0);
+/// let pred = pipeline.predict(&[100.0, 0.5]);
+/// ```
+pub fn pipe(preprocessor: impl StreamingPreprocessor + 'static) -> PipelineBuilder {
+    PipelineBuilder::new().pipe(preprocessor)
+}
+
+/// Create an adaptive SGBT with a learning rate scheduler.
+///
+/// ```
+/// use irithyll::{adaptive_sgbt, StreamingLearner};
+/// use irithyll::ensemble::lr_schedule::ExponentialDecayLR;
+///
+/// let mut model = adaptive_sgbt(50, 0.1, ExponentialDecayLR::new(0.1, 0.999));
+/// model.train(&[1.0, 2.0], 3.0);
+/// ```
+pub fn adaptive_sgbt(
+    n_steps: usize,
+    lr: f64,
+    scheduler: impl ensemble::lr_schedule::LRScheduler + 'static,
+) -> AdaptiveSGBT {
+    let config = SGBTConfig::builder()
+        .n_steps(n_steps)
+        .learning_rate(lr)
+        .build()
+        .expect("adaptive_sgbt() factory: invalid parameters");
+    AdaptiveSGBT::new(config, scheduler)
+}

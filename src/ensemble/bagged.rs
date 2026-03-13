@@ -243,6 +243,33 @@ impl<L: Loss + Clone> BaggedSGBT<L> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// StreamingLearner impl
+// ---------------------------------------------------------------------------
+
+use crate::learner::StreamingLearner;
+use crate::sample::SampleRef;
+
+impl<L: Loss + Clone> StreamingLearner for BaggedSGBT<L> {
+    fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
+        let sample = SampleRef::weighted(features, target, weight);
+        // UFCS: call the inherent train_one(&impl Observation), not this trait method.
+        BaggedSGBT::train_one(self, &sample);
+    }
+
+    fn predict(&self, features: &[f64]) -> f64 {
+        BaggedSGBT::predict(self, features)
+    }
+
+    fn n_samples_seen(&self) -> u64 {
+        self.samples_seen
+    }
+
+    fn reset(&mut self) {
+        BaggedSGBT::reset(self);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +494,21 @@ mod tests {
         );
         // Variance should be finite and non-negative (basic sanity)
         assert!(variance >= 0.0 && variance.is_finite());
+    }
+
+    #[test]
+    fn streaming_learner_trait_object() {
+        let config = test_config();
+        let model = BaggedSGBT::new(config, 3).unwrap();
+        let mut boxed: Box<dyn StreamingLearner> = Box::new(model);
+        for i in 0..100 {
+            let x = i as f64 * 0.1;
+            boxed.train(&[x], x * 2.0);
+        }
+        assert_eq!(boxed.n_samples_seen(), 100);
+        let pred = boxed.predict(&[5.0]);
+        assert!(pred.is_finite());
+        boxed.reset();
+        assert_eq!(boxed.n_samples_seen(), 0);
     }
 }

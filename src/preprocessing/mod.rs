@@ -26,3 +26,6 @@ pub mod normalizer;
 
 pub use feature_selector::OnlineFeatureSelector;
 pub use normalizer::IncrementalNormalizer;
+
+// Re-export the StreamingPreprocessor trait (defined in pipeline module).
+pub use crate::pipeline::StreamingPreprocessor;

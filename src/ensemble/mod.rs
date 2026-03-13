@@ -16,6 +16,7 @@
 //! 3. The ensemble adapts incrementally, with each tree targeting the residual
 //!    of all preceding trees.
 
+pub mod adaptive;
 pub mod bagged;
 pub mod config;
 pub mod distributional;
