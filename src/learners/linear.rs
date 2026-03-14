@@ -10,7 +10,7 @@
 //!
 //! | Variant | Mechanism |
 //! |---------|-----------|
-//! | [`None`](Regularization::None) | Vanilla SGD — no penalty |
+//! | [`None`](Regularization::None) | Vanilla SGD -- no penalty |
 //! | [`Ridge`](Regularization::Ridge) | L2 weight decay applied before the gradient step |
 //! | [`Lasso`](Regularization::Lasso) | L1 proximal (soft-thresholding) after the gradient step |
 //! | [`ElasticNet`](Regularization::ElasticNet) | L2 decay + L1 proximal combined |
@@ -53,7 +53,7 @@ use crate::learner::StreamingLearner;
 /// let elastic = Regularization::ElasticNet { l1: 0.0005, l2: 0.0005 };
 /// ```
 pub enum Regularization {
-    /// No regularization — vanilla SGD.
+    /// No regularization -- vanilla SGD.
     None,
     /// L2 penalty (Ridge). The parameter is the regularization strength lambda.
     ///
@@ -115,7 +115,7 @@ impl fmt::Debug for Regularization {
 ///
 /// The model maintains a weight vector and bias term, updated incrementally
 /// on each call to [`train_one`](StreamingLearner::train_one). Feature
-/// dimensionality is determined lazily on the first training sample — weights
+/// dimensionality is determined lazily on the first training sample -- weights
 /// are initialized to zero.
 ///
 /// # Gradient Update
@@ -164,7 +164,7 @@ impl StreamingLinearModel {
     ///
     /// # Arguments
     ///
-    /// * `learning_rate` — step size for SGD updates (e.g., 0.01)
+    /// * `learning_rate` -- step size for SGD updates (e.g., 0.01)
     ///
     /// # Examples
     ///
@@ -190,8 +190,8 @@ impl StreamingLinearModel {
     ///
     /// # Arguments
     ///
-    /// * `learning_rate` — step size for SGD updates
-    /// * `lambda` — L2 penalty strength
+    /// * `learning_rate` -- step size for SGD updates
+    /// * `lambda` -- L2 penalty strength
     #[inline]
     pub fn ridge(learning_rate: f64, lambda: f64) -> Self {
         Self {
@@ -208,8 +208,8 @@ impl StreamingLinearModel {
     ///
     /// # Arguments
     ///
-    /// * `learning_rate` — step size for SGD updates
-    /// * `lambda` — L1 penalty strength
+    /// * `learning_rate` -- step size for SGD updates
+    /// * `lambda` -- L1 penalty strength
     #[inline]
     pub fn lasso(learning_rate: f64, lambda: f64) -> Self {
         Self {
@@ -226,9 +226,9 @@ impl StreamingLinearModel {
     ///
     /// # Arguments
     ///
-    /// * `learning_rate` — step size for SGD updates
-    /// * `l1` — L1 (Lasso) penalty strength
-    /// * `l2` — L2 (Ridge) penalty strength
+    /// * `learning_rate` -- step size for SGD updates
+    /// * `l1` -- L1 (Lasso) penalty strength
+    /// * `l2` -- L2 (Ridge) penalty strength
     #[inline]
     pub fn elastic_net(learning_rate: f64, l1: f64, l2: f64) -> Self {
         Self {
@@ -362,7 +362,7 @@ impl StreamingLearner for StreamingLinearModel {
 }
 
 // ---------------------------------------------------------------------------
-// Clone impl — manual to match irithyll patterns
+// Clone impl -- manual to match irithyll patterns
 // ---------------------------------------------------------------------------
 
 impl Clone for StreamingLinearModel {
@@ -379,7 +379,7 @@ impl Clone for StreamingLinearModel {
 }
 
 // ---------------------------------------------------------------------------
-// Debug impl — manual for consistent formatting
+// Debug impl -- manual for consistent formatting
 // ---------------------------------------------------------------------------
 
 impl fmt::Debug for StreamingLinearModel {
@@ -496,7 +496,7 @@ mod tests {
         }
 
         let w = model.weights();
-        // x2 and x3 have near-zero true coefficients — Lasso should zero them out.
+        // x2 and x3 have near-zero true coefficients -- Lasso should zero them out.
         assert!(
             w[1].abs() < 0.05,
             "w[1] should be near zero (sparse), got {}",
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_elastic_net() {
-        // ElasticNet combines both L1 and L2 — weights should be smaller than
+        // ElasticNet combines both L1 and L2 -- weights should be smaller than
         // Ridge alone and Lasso alone (for the same total penalty budget).
         let mut ridge_only = StreamingLinearModel::ridge(0.001, 0.05);
         let mut elastic = StreamingLinearModel::elastic_net(0.001, 0.025, 0.025);

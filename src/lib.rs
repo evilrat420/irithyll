@@ -106,7 +106,7 @@ pub mod arrow_support;
 #[cfg(feature = "onnx")]
 pub mod onnx_export;
 
-// Re-exports — core types
+// Re-exports -- core types
 pub use drift::{DriftDetector, DriftSignal};
 pub use ensemble::adaptive::AdaptiveSGBT;
 pub use ensemble::bagged::BaggedSGBT;
@@ -120,40 +120,41 @@ pub use error::{ConfigError, IrithyllError};
 pub use histogram::{BinnerKind, BinningStrategy};
 pub use loss::{Loss, LossType};
 pub use sample::{Observation, Sample, SampleRef};
+pub use tree::leaf_model::LeafModelType;
 pub use tree::StreamingTree;
 
-// Re-exports — explainability
+// Re-exports -- explainability
 pub use explain::importance_drift::ImportanceDriftMonitor;
 pub use explain::streaming::StreamingShap;
 pub use explain::treeshap::ShapValues;
 
-// Re-exports — parallel (feature-gated)
+// Re-exports -- parallel (feature-gated)
 #[cfg(feature = "parallel")]
 pub use ensemble::parallel::ParallelSGBT;
 
-// Re-exports — async streaming
+// Re-exports -- async streaming
 pub use stream::{AsyncSGBT, Prediction, PredictionStream, Predictor, SampleSender};
 
-// Re-exports — metrics
+// Re-exports -- metrics
 pub use metrics::conformal::AdaptiveConformalInterval;
 pub use metrics::ewma::{EwmaClassificationMetrics, EwmaRegressionMetrics};
 pub use metrics::rolling::{RollingClassificationMetrics, RollingRegressionMetrics};
 pub use metrics::{ClassificationMetrics, FeatureImportance, MetricSet, RegressionMetrics};
 
-// Re-exports — anomaly detection
+// Re-exports -- anomaly detection
 pub use anomaly::hst::{AnomalyScore, HSTConfig, HalfSpaceTree};
 
-// Re-exports — streaming learner trait
+// Re-exports -- streaming learner trait
 pub use learner::{SGBTLearner, StreamingLearner};
 
-// Re-exports — preprocessing & pipeline
+// Re-exports -- preprocessing & pipeline
 pub use pipeline::{Pipeline, PipelineBuilder, StreamingPreprocessor};
 pub use preprocessing::{IncrementalNormalizer, OnlineFeatureSelector, CCIPCA};
 
-// Re-exports — learning rate scheduling
+// Re-exports -- learning rate scheduling
 pub use ensemble::lr_schedule::LRScheduler;
 
-// Re-exports — streaming learners
+// Re-exports -- streaming learners
 pub use learners::{
     GaussianNB, Kernel, LinearKernel, LocallyWeightedRegression, MondrianForest, PolynomialKernel,
     RBFKernel, RecursiveLeastSquares, StreamingLinearModel, StreamingPolynomialRegression, KRLS,

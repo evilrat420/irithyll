@@ -1,7 +1,7 @@
 //! Streaming preprocessing utilities for feature transformation.
 //!
 //! These transformers process features incrementally, maintaining running
-//! statistics that update with each sample — no batch recomputation needed.
+//! statistics that update with each sample -- no batch recomputation needed.
 //!
 //! # Modules
 //!
@@ -9,7 +9,7 @@
 //! |--------|---------|
 //! | [`normalizer`] | Welford-based online standardization (zero-mean, unit-variance) |
 //! | [`feature_selector`] | EWMA importance tracking with dynamic feature masking |
-//! | [`ccipca`] | Candid Covariance-free Incremental PCA — streaming dimensionality reduction |
+//! | [`ccipca`] | Candid Covariance-free Incremental PCA -- streaming dimensionality reduction |
 //!
 //! # Example
 //!

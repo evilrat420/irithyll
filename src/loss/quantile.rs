@@ -8,7 +8,7 @@
 //! We use the pseudo-Huber trick: set hessian = 1.0, so leaf weights
 //! become w = -G_sum / (count + lambda), effectively gradient descent.
 //! This converges to the empirical conditional quantile as more samples
-//! arrive at each leaf — the same approach used by LightGBM and XGBoost.
+//! arrive at each leaf -- the same approach used by LightGBM and XGBoost.
 
 use super::{Loss, LossType};
 
@@ -32,7 +32,7 @@ use super::{Loss, LossType};
 ///
 /// # Prediction Intervals
 ///
-/// Train two models — one for the low quantile, one for the high quantile —
+/// Train two models -- one for the low quantile, one for the high quantile --
 /// to produce prediction intervals:
 ///
 /// ```no_run

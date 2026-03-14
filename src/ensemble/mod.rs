@@ -1,4 +1,4 @@
-//! SGBT ensemble orchestrator — the core boosting loop.
+//! SGBT ensemble orchestrator -- the core boosting loop.
 //!
 //! Implements Streaming Gradient Boosted Trees (Gunasekara et al., 2024):
 //! a sequence of boosting steps, each owning a streaming tree and drift detector,
@@ -55,7 +55,7 @@ pub type DynSGBT = SGBT<Box<dyn Loss>>;
 ///
 /// The primary entry point for training and prediction. Generic over `L: Loss`
 /// so the loss function's gradient/hessian calls are monomorphized (inlined)
-/// into the boosting hot loop — no virtual dispatch overhead.
+/// into the boosting hot loop -- no virtual dispatch overhead.
 ///
 /// The default type parameter `L = SquaredLoss` means `SGBT::new(config)`
 /// creates a regression model without specifying the loss type explicitly.
@@ -74,7 +74,7 @@ pub type DynSGBT = SGBT<Box<dyn Loss>>;
 /// use irithyll::{SGBTConfig, SGBT};
 /// use irithyll::loss::logistic::LogisticLoss;
 ///
-/// // Classification with logistic loss — no Box::new()!
+/// // Classification with logistic loss -- no Box::new()!
 /// let config = SGBTConfig::builder().n_steps(10).build().unwrap();
 /// let model = SGBT::with_loss(config, LogisticLoss);
 /// ```
@@ -83,7 +83,7 @@ pub struct SGBT<L: Loss = SquaredLoss> {
     config: SGBTConfig,
     /// Boosting steps (one tree + drift detector each).
     steps: Vec<BoostingStep>,
-    /// Loss function (monomorphized — no vtable).
+    /// Loss function (monomorphized -- no vtable).
     loss: L,
     /// Base prediction (initial constant, computed from first batch of targets).
     base_prediction: f64,
@@ -186,7 +186,8 @@ impl<L: Loss> SGBT<L> {
             .split_reeval_interval_opt(config.split_reeval_interval)
             .feature_types_opt(config.feature_types.clone())
             .gradient_clip_sigma_opt(config.gradient_clip_sigma)
-            .monotone_constraints_opt(config.monotone_constraints.clone());
+            .monotone_constraints_opt(config.monotone_constraints.clone())
+            .leaf_model_type(config.leaf_model_type.clone());
 
         let max_tree_samples = config.max_tree_samples;
 
@@ -351,7 +352,7 @@ impl<L: Loss> SGBT<L> {
     /// Train on a random subsample of a batch using reservoir sampling.
     ///
     /// When `max_samples < samples.len()`, selects a representative subset
-    /// using Algorithm R (Vitter, 1985) — a uniform random sample without
+    /// using Algorithm R (Vitter, 1985) -- a uniform random sample without
     /// replacement. The selected samples are then trained in their original
     /// order to preserve sequential dependencies.
     ///
@@ -539,7 +540,7 @@ impl<L: Loss> SGBT<L> {
     ///
     /// # Arguments
     ///
-    /// * `lr` — New learning rate (should be positive and finite)
+    /// * `lr` -- New learning rate (should be positive and finite)
     #[inline]
     pub fn set_learning_rate(&mut self, lr: f64) {
         self.config.learning_rate = lr;
@@ -809,6 +810,7 @@ impl SGBT<Box<dyn Loss>> {
                     .feature_types_opt(state.config.feature_types.clone())
                     .gradient_clip_sigma_opt(state.config.gradient_clip_sigma)
                     .monotone_constraints_opt(state.config.monotone_constraints.clone())
+                    .leaf_model_type(state.config.leaf_model_type.clone())
                     .seed(state.config.seed ^ (i as u64));
 
                 let active = rebuild_tree(&step_snap.tree, tree_config.clone());
@@ -1214,7 +1216,7 @@ mod tests {
             "clone should predict identically: original={pred_original}, cloned={pred_cloned}"
         );
 
-        // Train only the clone further — models should diverge
+        // Train only the clone further -- models should diverge
         for _ in 0..200 {
             rng ^= rng << 13;
             rng ^= rng >> 7;
@@ -1558,6 +1560,151 @@ mod tests {
             *callbacks.last().unwrap(),
             50,
             "final callback should be total samples"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Linear leaf model integration tests
+    // ---------------------------------------------------------------
+
+    /// xorshift64 PRNG for deterministic test data.
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut s = *state;
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        *state = s;
+        s
+    }
+
+    fn rand_f64(state: &mut u64) -> f64 {
+        xorshift64(state) as f64 / u64::MAX as f64
+    }
+
+    fn linear_leaves_config() -> SGBTConfig {
+        SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(2) // low depth -- linear leaves should shine
+            .n_bins(16)
+            .leaf_model_type(crate::tree::leaf_model::LeafModelType::Linear {
+                learning_rate: 0.01,
+            })
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn linear_leaves_trains_without_panic() {
+        let mut model = SGBT::new(linear_leaves_config());
+        let mut rng = 42u64;
+        for _ in 0..200 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            model.train_one(&Sample::new(vec![x1, x2], y));
+        }
+        assert_eq!(model.n_samples_seen(), 200);
+    }
+
+    #[test]
+    fn linear_leaves_prediction_finite() {
+        let mut model = SGBT::new(linear_leaves_config());
+        let mut rng = 42u64;
+        for _ in 0..200 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            model.train_one(&Sample::new(vec![x1, x2], y));
+        }
+        let pred = model.predict(&[0.5, -0.3]);
+        assert!(pred.is_finite(), "prediction should be finite, got {pred}");
+    }
+
+    #[test]
+    fn linear_leaves_learns_linear_target() {
+        let mut model = SGBT::new(linear_leaves_config());
+        let mut rng = 42u64;
+        for _ in 0..500 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            model.train_one(&Sample::new(vec![x1, x2], y));
+        }
+
+        // Test on a few points -- should be reasonably close for a linear target.
+        let mut total_error = 0.0;
+        for _ in 0..50 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            let pred = model.predict(&[x1, x2]);
+            total_error += (pred - y).powi(2);
+        }
+        let mse = total_error / 50.0;
+        assert!(
+            mse < 5.0,
+            "linear leaves MSE on linear target should be < 5.0, got {mse}"
+        );
+    }
+
+    #[test]
+    fn linear_leaves_better_than_constant_at_low_depth() {
+        // Train two models on a linear target at depth 2:
+        // one with constant leaves, one with linear leaves.
+        let constant_config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(2)
+            .n_bins(16)
+            .seed(0xDEAD)
+            .build()
+            .unwrap();
+        let linear_config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(2)
+            .n_bins(16)
+            .seed(0xDEAD)
+            .leaf_model_type(crate::tree::leaf_model::LeafModelType::Linear {
+                learning_rate: 0.01,
+            })
+            .build()
+            .unwrap();
+
+        let mut constant_model = SGBT::new(constant_config);
+        let mut linear_model = SGBT::new(linear_config);
+        let mut rng = 42u64;
+
+        for _ in 0..500 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            let sample = Sample::new(vec![x1, x2], y);
+            constant_model.train_one(&sample);
+            linear_model.train_one(&sample);
+        }
+
+        // Evaluate both on test set.
+        let mut constant_mse = 0.0;
+        let mut linear_mse = 0.0;
+        for _ in 0..100 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            constant_mse += (constant_model.predict(&[x1, x2]) - y).powi(2);
+            linear_mse += (linear_model.predict(&[x1, x2]) - y).powi(2);
+        }
+        constant_mse /= 100.0;
+        linear_mse /= 100.0;
+
+        // Linear leaves should outperform constant leaves on a linear target.
+        assert!(
+            linear_mse < constant_mse,
+            "linear leaves MSE ({linear_mse:.4}) should be less than constant ({constant_mse:.4})"
         );
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! Wraps K independent [`SGBT<QuantileLoss>`] instances, one per quantile
 //! level. Predictions are post-processed with the Pool Adjacent Violators
-//! Algorithm (PAVA) to enforce monotonicity — guaranteeing that the predicted
+//! Algorithm (PAVA) to enforce monotonicity -- guaranteeing that the predicted
 //! quantile at tau_i <= tau_j implies q_hat(tau_i) <= q_hat(tau_j).
 //!
 //! Without PAVA enforcement, independently trained quantile models can
@@ -40,7 +40,7 @@ use crate::loss::quantile::QuantileLoss;
 use crate::sample::Observation;
 
 // ---------------------------------------------------------------------------
-// PAVA — Pool Adjacent Violators Algorithm
+// PAVA -- Pool Adjacent Violators Algorithm
 // ---------------------------------------------------------------------------
 
 /// Enforce monotonicity on a slice of values via isotonic regression.
@@ -55,7 +55,7 @@ use crate::sample::Observation;
 ///
 /// # Arguments
 ///
-/// * `values` — mutable slice modified in-place to be non-decreasing
+/// * `values` -- mutable slice modified in-place to be non-decreasing
 fn enforce_monotonicity(values: &mut [f64]) {
     let n = values.len();
     if n <= 1 {
@@ -114,8 +114,8 @@ fn enforce_monotonicity(values: &mut [f64]) {
 
 /// Non-crossing multi-quantile SGBT regressor.
 ///
-/// Maintains K independent `SGBT<QuantileLoss>` models — one per quantile
-/// level — and applies the Pool Adjacent Violators Algorithm (PAVA) to
+/// Maintains K independent `SGBT<QuantileLoss>` models -- one per quantile
+/// level -- and applies the Pool Adjacent Violators Algorithm (PAVA) to
 /// predictions to guarantee non-crossing quantile estimates.
 ///
 /// # Non-crossing guarantee
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn pava_partial_violation() {
-        // [1, 5, 3, 4, 6] — violation at 5 > 3
+        // [1, 5, 3, 4, 6] -- violation at 5 > 3
         // Pool 5,3 -> 4.0: [1, 4, 4, 4, 6]
         let mut values = vec![1.0, 5.0, 3.0, 4.0, 6.0];
         enforce_monotonicity(&mut values);
@@ -489,7 +489,7 @@ mod tests {
             model.train_one(&Sample::new(vec![x], y));
         }
 
-        // Test at multiple points — predictions must be non-decreasing
+        // Test at multiple points -- predictions must be non-decreasing
         let test_points = [0.0, 1.0, 3.0, 5.0, 8.0, 10.0];
         for &x in &test_points {
             let preds = model.predict(&[x]);
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn raw_predict_may_cross() {
-        // Raw predictions don't have PAVA — they may cross
+        // Raw predictions don't have PAVA -- they may cross
         // (Just verify the method works, crossings aren't guaranteed)
         let mut model = QuantileRegressorSGBT::new(test_config(), &[0.1, 0.5, 0.9]).unwrap();
 

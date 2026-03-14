@@ -449,7 +449,7 @@ mod tests {
         m.update(1, 0, 0.3); // wrong
         assert!(approx_eq(m.accuracy(), 2.0 / 3.0));
 
-        // Evict (1,1,0.9) — was correct, add another correct
+        // Evict (1,1,0.9) -- was correct, add another correct
         m.update(0, 0, 0.2); // correct
                              // Window: [(0,0), (1,0), (0,0)] => 2 correct of 3
         assert!(approx_eq(m.accuracy(), 2.0 / 3.0));

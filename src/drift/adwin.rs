@@ -277,7 +277,7 @@ impl Adwin {
                 let epsilon_drift = ((1.0 / (2.0 * m)) * (4.0 / delta_prime).ln()).sqrt();
 
                 if abs_diff >= epsilon_drift {
-                    // No need to keep scanning — we found the outermost drift point.
+                    // No need to keep scanning -- we found the outermost drift point.
                     return (true, true);
                 }
 
@@ -641,7 +641,7 @@ mod tests {
             det.update(rng.next_normal(0.0, 0.1));
         }
 
-        // Phase 2: N(5, 0.1) — huge shift, should detect quickly.
+        // Phase 2: N(5, 0.1) -- huge shift, should detect quickly.
         let mut detected = false;
         for i in 0..2000 {
             let sig = det.update(rng.next_normal(5.0, 0.1));
@@ -742,7 +742,7 @@ mod tests {
 
         // We can't directly inspect the boxed detector's fields, so we verify
         // behaviour: feeding the same constant shouldn't drift.
-        // (This implicitly tests that delta was preserved — if it were near 1.0,
+        // (This implicitly tests that delta was preserved -- if it were near 1.0,
         // we'd get spurious drifts.)
         let mut fresh = fresh;
         let mut drifts = 0;

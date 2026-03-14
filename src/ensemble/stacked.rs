@@ -1,8 +1,8 @@
 //! Polymorphic model stacking meta-learner for streaming ensembles.
 //!
 //! [`StackedEnsemble`] implements *stacked generalization* (Wolpert, 1992) in a
-//! streaming context. Multiple heterogeneous base learners — any type implementing
-//! [`StreamingLearner`] — produce predictions that are fed as features to a
+//! streaming context. Multiple heterogeneous base learners -- any type implementing
+//! [`StreamingLearner`] -- produce predictions that are fed as features to a
 //! meta-learner which learns to optimally combine them.
 //!
 //! # Temporal Holdout Stacking
@@ -12,7 +12,7 @@
 //! holdout**: for each incoming sample `(x, y, w)`, base predictions are
 //! collected *before* the base learners are trained on that sample. This ensures
 //! the meta-learner always sees honest, out-of-sample-like predictions rather
-//! than memorized values — the streaming analogue of leave-one-out stacking.
+//! than memorized values -- the streaming analogue of leave-one-out stacking.
 //!
 //! # Recursive Stacking
 //!
@@ -68,7 +68,7 @@ use crate::learner::StreamingLearner;
 /// `StackedEnsemble` cannot implement `Clone` because `Box<dyn StreamingLearner>`
 /// is not `Clone`. If you need to snapshot the ensemble, serialize it instead.
 pub struct StackedEnsemble {
-    /// Base learners — heterogeneous models wrapped as trait objects.
+    /// Base learners -- heterogeneous models wrapped as trait objects.
     base_learners: Vec<Box<dyn StreamingLearner>>,
     /// Meta-learner that combines base predictions.
     meta_learner: Box<dyn StreamingLearner>,
@@ -89,8 +89,8 @@ impl StackedEnsemble {
     ///
     /// # Arguments
     ///
-    /// * `base_learners` — heterogeneous base models (at least one recommended)
-    /// * `meta_learner` — combiner model trained on base predictions
+    /// * `base_learners` -- heterogeneous base models (at least one recommended)
+    /// * `meta_learner` -- combiner model trained on base predictions
     #[inline]
     pub fn new(
         base_learners: Vec<Box<dyn StreamingLearner>>,
@@ -112,9 +112,9 @@ impl StackedEnsemble {
     ///
     /// # Arguments
     ///
-    /// * `base_learners` — heterogeneous base models
-    /// * `meta_learner` — combiner model
-    /// * `passthrough` — if `true`, original features are appended to meta-features
+    /// * `base_learners` -- heterogeneous base models
+    /// * `meta_learner` -- combiner model
+    /// * `passthrough` -- if `true`, original features are appended to meta-features
     #[inline]
     pub fn with_passthrough(
         base_learners: Vec<Box<dyn StreamingLearner>>,
@@ -169,7 +169,7 @@ impl StackedEnsemble {
 }
 
 // ---------------------------------------------------------------------------
-// StreamingLearner impl — enables recursive stacking
+// StreamingLearner impl -- enables recursive stacking
 // ---------------------------------------------------------------------------
 
 impl StreamingLearner for StackedEnsemble {
@@ -223,7 +223,7 @@ impl StreamingLearner for StackedEnsemble {
 }
 
 // ---------------------------------------------------------------------------
-// Debug impl — manual since Box<dyn StreamingLearner> does not impl Debug
+// Debug impl -- manual since Box<dyn StreamingLearner> does not impl Debug
 // ---------------------------------------------------------------------------
 
 impl fmt::Debug for StackedEnsemble {
@@ -477,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_heterogeneous_bases() {
-        // Mix SGBT and linear base learners — the core polymorphism use case.
+        // Mix SGBT and linear base learners -- the core polymorphism use case.
         let bases: Vec<Box<dyn StreamingLearner>> = vec![
             Box::new(SGBTLearner::from_config(test_config())),
             Box::new(StreamingLinearModel::new(0.01)),

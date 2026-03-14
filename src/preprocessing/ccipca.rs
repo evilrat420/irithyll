@@ -126,7 +126,7 @@ impl CCIPCA {
         // --- Update each component ---
         for i in 0..self.n_components {
             if n <= (i as u64) + 1 {
-                // Not enough samples yet for this component — initialise.
+                // Not enough samples yet for this component -- initialise.
                 self.components[i] = x_c.clone();
                 self.eigenvalues[i] = norm(&x_c);
                 if self.eigenvalues[i] > 0.0 {
@@ -280,7 +280,7 @@ impl CCIPCA {
 
     /// Sort components by eigenvalue in descending order.
     fn sort_components(&mut self) {
-        // Simple insertion sort — n_components is typically very small.
+        // Simple insertion sort -- n_components is typically very small.
         let k = self.n_components;
         for i in 1..k {
             let mut j = i;

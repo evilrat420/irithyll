@@ -152,7 +152,7 @@ fn tree_shap_recursive(
     let idx = node.idx();
 
     if arena.is_leaf[idx] {
-        // At a leaf — accumulate SHAP contributions.
+        // At a leaf -- accumulate SHAP contributions.
         let leaf_value = arena.leaf_value[idx];
         for i in 1..path.len() {
             let w = unwound_path_sum(path, i);
@@ -175,7 +175,7 @@ fn tree_shap_recursive(
     let right_cover = covers[right.idx()];
     let node_cover = left_cover + right_cover;
 
-    // No training data at this node — nothing to explain.
+    // No training data at this node -- nothing to explain.
     if node_cover == 0.0 {
         return;
     }
@@ -241,7 +241,7 @@ fn tree_shap_recursive(
         // Unwind cold extension.
         unwind_path(path, path.len() - 1);
     } else if hot_cover > 0.0 {
-        // Only hot child has data — recurse without adding a path entry
+        // Only hot child has data -- recurse without adding a path entry
         // for this feature (it has no decision power at this split).
         tree_shap_recursive(arena, covers, hot_child, features, shap_values, path);
     } else {
@@ -421,7 +421,7 @@ mod tests {
             prediction
         );
 
-        // Feature 1 has no splits — its SHAP should be 0.
+        // Feature 1 has no splits -- its SHAP should be 0.
         assert!(
             shap.values[1].abs() < 1e-10,
             "non-split feature SHAP should be 0, got {}",

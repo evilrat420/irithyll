@@ -77,11 +77,11 @@ pub(crate) mod onnx_proto {
         pub r#type: Option<TypeProto>,
     }
 
-    /// ONNX AttributeProto — carries named attributes on operator nodes.
+    /// ONNX AttributeProto -- carries named attributes on operator nodes.
     ///
     /// Field tags from onnx.proto:
     ///   1 = name, 2 = ref_attr_name, 3 = i, 4 = s (bytes), 5 = t,
-    ///   6 = f (actually doc_string in some versions — but in ONNX spec f=4... )
+    ///   6 = f (actually doc_string in some versions -- but in ONNX spec f=4... )
     ///
     /// Actually the correct ONNX AttributeProto tags are:
     ///   1 = name, 2 = ref_attr_name, 3 = doc_string,
@@ -383,7 +383,7 @@ pub fn export_onnx<L: crate::loss::Loss>(
                 elem_type: ONNX_FLOAT,
                 shape: Some(onnx_proto::TensorShapeProto {
                     dim: vec![
-                        // Batch dimension (dynamic — use 0 for unknown).
+                        // Batch dimension (dynamic -- use 0 for unknown).
                         onnx_proto::tensor_shape_proto::Dimension { dim_value: 0 },
                         // Feature dimension.
                         onnx_proto::tensor_shape_proto::Dimension {

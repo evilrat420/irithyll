@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
-// ConfigError — structured sub-enum for configuration validation
+// ConfigError -- structured sub-enum for configuration validation
 // ---------------------------------------------------------------------------
 
 /// Structured error for configuration validation failures.
@@ -72,7 +72,7 @@ impl ConfigError {
 }
 
 // ---------------------------------------------------------------------------
-// IrithyllError — top-level error enum
+// IrithyllError -- top-level error enum
 // ---------------------------------------------------------------------------
 
 /// Top-level error type for the Irithyll crate.

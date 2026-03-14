@@ -21,8 +21,8 @@
 //!
 //! # Parameters
 //!
-//! - `delta` — magnitude tolerance; small values increase sensitivity (default 0.005)
-//! - `lambda` — detection threshold; smaller values trigger faster (default 50.0)
+//! - `delta` -- magnitude tolerance; small values increase sensitivity (default 0.005)
+//! - `lambda` -- detection threshold; smaller values trigger faster (default 50.0)
 //!
 //! # Example
 //!
@@ -32,12 +32,12 @@
 //!
 //! let mut pht = PageHinkleyTest::new();
 //!
-//! // Feed stationary data — should remain stable.
+//! // Feed stationary data -- should remain stable.
 //! for _ in 0..500 {
 //!     assert_ne!(pht.update(1.0), DriftSignal::Drift);
 //! }
 //!
-//! // Abrupt upward shift — should eventually trigger drift.
+//! // Abrupt upward shift -- should eventually trigger drift.
 //! let mut detected = false;
 //! for _ in 0..500 {
 //!     if pht.update(10.0) == DriftSignal::Drift {
@@ -181,7 +181,7 @@ impl DriftDetector for PageHinkleyTest {
         let ph_down = self.ph_down();
 
         if ph_up > self.lambda || ph_down > self.lambda {
-            // Drift confirmed — reset cumulative sums but keep the running mean
+            // Drift confirmed -- reset cumulative sums but keep the running mean
             // so monitoring can continue against the new distribution.
             self.reset_sums();
             return DriftSignal::Drift;
@@ -447,7 +447,7 @@ mod tests {
         // the running mean.
         let mut pht = PageHinkleyTest::new();
 
-        // Constant extreme value — large but stable.
+        // Constant extreme value -- large but stable.
         for i in 0..20 {
             let signal = pht.update(1_000_000.0);
             assert_ne!(
@@ -480,7 +480,7 @@ mod tests {
             pht.update(v);
         }
 
-        // Shift upward — we expect Warning before Drift.
+        // Shift upward -- we expect Warning before Drift.
         let mut saw_warning = false;
         let mut saw_drift = false;
         for v in noisy_stream(5.0, 0.001, 1000, 900) {

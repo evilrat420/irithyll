@@ -59,7 +59,7 @@ pub struct Prediction {
 ///
 /// Implements [`futures_core::Stream`] directly. The predictor acquires a
 /// read lock on the shared model for each prediction, so predictions reflect
-/// the model state at the moment of polling — not the state when the sample
+/// the model state at the moment of polling -- not the state when the sample
 /// was sent. This is intentional for streaming evaluation.
 pub struct PredictionStream {
     receiver: SampleReceiver,
@@ -109,7 +109,7 @@ impl Stream for PredictionStream {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        // We cannot know how many samples remain — lower bound 0, no upper.
+        // We cannot know how many samples remain -- lower bound 0, no upper.
         (0, None)
     }
 }
@@ -167,7 +167,7 @@ mod tests {
         tx.send(sample(1.0)).await.unwrap();
         drop(tx);
 
-        // Use poll manually via a utility — or just use StreamExt from futures.
+        // Use poll manually via a utility -- or just use StreamExt from futures.
         // For simplicity, we poll via a helper.
         let pred = poll_next(&mut stream).await;
         assert!(pred.is_some());

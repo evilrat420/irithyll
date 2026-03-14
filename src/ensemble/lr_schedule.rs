@@ -10,7 +10,7 @@
 //!
 //! | Scheduler | Strategy |
 //! |-----------|----------|
-//! | [`ConstantLR`] | Fixed rate — baseline behaviour, equivalent to no scheduling. |
+//! | [`ConstantLR`] | Fixed rate -- baseline behaviour, equivalent to no scheduling. |
 //! | [`LinearDecayLR`] | Linearly interpolates from `initial_lr` to `final_lr` over a fixed number of steps, then holds `final_lr`. |
 //! | [`ExponentialDecayLR`] | Multiplicative decay by `gamma` each step, floored at `1e-8` to avoid numerical zero. |
 //! | [`CosineAnnealingLR`] | Periodic cosine wave between `max_lr` and `min_lr`, useful for warm-restart style exploration. |
@@ -56,9 +56,9 @@ pub trait LRScheduler: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `step` — Zero-based step counter. Incremented by the caller before
+    /// * `step` -- Zero-based step counter. Incremented by the caller before
     ///   each invocation (0 on the first call, 1 on the second, ...).
-    /// * `current_loss` — The most recent loss value observed by the ensemble.
+    /// * `current_loss` -- The most recent loss value observed by the ensemble.
     ///   Schedulers that do not use loss feedback (everything except
     ///   [`PlateauLR`]) may ignore this argument.
     fn learning_rate(&mut self, step: u64, current_loss: f64) -> f64;
@@ -100,7 +100,7 @@ impl ConstantLR {
     ///
     /// # Arguments
     ///
-    /// * `lr` — The learning rate returned on every call.
+    /// * `lr` -- The learning rate returned on every call.
     pub fn new(lr: f64) -> Self {
         Self { lr }
     }
@@ -113,7 +113,7 @@ impl LRScheduler for ConstantLR {
     }
 
     fn reset(&mut self) {
-        // Nothing to reset — the rate is stateless.
+        // Nothing to reset -- the rate is stateless.
     }
 }
 
@@ -163,9 +163,9 @@ impl LinearDecayLR {
     ///
     /// # Arguments
     ///
-    /// * `initial_lr` — Rate at step 0.
-    /// * `final_lr` — Rate from step `decay_steps` onward.
-    /// * `decay_steps` — Length of the linear ramp in steps.
+    /// * `initial_lr` -- Rate at step 0.
+    /// * `final_lr` -- Rate from step `decay_steps` onward.
+    /// * `decay_steps` -- Length of the linear ramp in steps.
     pub fn new(initial_lr: f64, final_lr: f64, decay_steps: u64) -> Self {
         Self {
             initial_lr,
@@ -187,7 +187,7 @@ impl LRScheduler for LinearDecayLR {
     }
 
     fn reset(&mut self) {
-        // Stateless — nothing to reset.
+        // Stateless -- nothing to reset.
     }
 }
 
@@ -224,8 +224,8 @@ impl ExponentialDecayLR {
     ///
     /// # Arguments
     ///
-    /// * `initial_lr` — Rate at step 0.
-    /// * `gamma` — Multiplicative decay factor applied each step.
+    /// * `initial_lr` -- Rate at step 0.
+    /// * `gamma` -- Multiplicative decay factor applied each step.
     pub fn new(initial_lr: f64, gamma: f64) -> Self {
         Self { initial_lr, gamma }
     }
@@ -238,7 +238,7 @@ impl LRScheduler for ExponentialDecayLR {
     }
 
     fn reset(&mut self) {
-        // Stateless — nothing to reset.
+        // Stateless -- nothing to reset.
     }
 }
 
@@ -287,9 +287,9 @@ impl CosineAnnealingLR {
     ///
     /// # Arguments
     ///
-    /// * `max_lr` — Rate at the start (and end) of each cosine period.
-    /// * `min_lr` — Rate at the midpoint of each period.
-    /// * `period` — Length of one cosine cycle in steps.
+    /// * `max_lr` -- Rate at the start (and end) of each cosine period.
+    /// * `min_lr` -- Rate at the midpoint of each period.
+    /// * `period` -- Length of one cosine cycle in steps.
     pub fn new(max_lr: f64, min_lr: f64, period: u64) -> Self {
         Self {
             max_lr,
@@ -311,7 +311,7 @@ impl LRScheduler for CosineAnnealingLR {
     }
 
     fn reset(&mut self) {
-        // Stateless — nothing to reset.
+        // Stateless -- nothing to reset.
     }
 }
 
@@ -334,7 +334,7 @@ impl LRScheduler for CosineAnnealingLR {
 ///
 /// let mut sched = PlateauLR::new(0.1, 0.5, 3, 0.001);
 ///
-/// // Improving loss — rate stays at 0.1.
+/// // Improving loss -- rate stays at 0.1.
 /// assert!((sched.learning_rate(0, 1.0) - 0.1).abs() < 1e-12);
 /// assert!((sched.learning_rate(1, 0.9) - 0.1).abs() < 1e-12);
 ///
@@ -343,7 +343,7 @@ impl LRScheduler for CosineAnnealingLR {
 /// assert!((sched.learning_rate(3, 0.95) - 0.1).abs() < 1e-12);
 /// assert!((sched.learning_rate(4, 0.95) - 0.1).abs() < 1e-12);
 ///
-/// // Patience exhausted — rate drops to 0.1 * 0.5 = 0.05.
+/// // Patience exhausted -- rate drops to 0.1 * 0.5 = 0.05.
 /// assert!((sched.learning_rate(5, 0.95) - 0.05).abs() < 1e-12);
 /// ```
 #[derive(Clone, Debug)]
@@ -371,10 +371,10 @@ impl PlateauLR {
     ///
     /// # Arguments
     ///
-    /// * `initial_lr` — Starting learning rate.
-    /// * `factor` — Multiplicative reduction factor (e.g., 0.5 halves the rate).
-    /// * `patience` — Number of non-improving steps to tolerate before reducing.
-    /// * `min_lr` — Floor below which the rate will not be reduced.
+    /// * `initial_lr` -- Starting learning rate.
+    /// * `factor` -- Multiplicative reduction factor (e.g., 0.5 halves the rate).
+    /// * `patience` -- Number of non-improving steps to tolerate before reducing.
+    /// * `min_lr` -- Floor below which the rate will not be reduced.
     pub fn new(initial_lr: f64, factor: f64, patience: u64, min_lr: f64) -> Self {
         Self {
             initial_lr,
@@ -391,7 +391,7 @@ impl PlateauLR {
 impl LRScheduler for PlateauLR {
     fn learning_rate(&mut self, _step: u64, current_loss: f64) -> f64 {
         if current_loss < self.best_loss {
-            // Improvement — record and reset counter.
+            // Improvement -- record and reset counter.
             self.best_loss = current_loss;
             self.steps_without_improvement = 0;
         } else {
@@ -642,7 +642,7 @@ mod tests {
         sched.learning_rate(1, 1.5);
         sched.learning_rate(2, 1.5);
 
-        // Now improve — counter resets to 0.
+        // Now improve -- counter resets to 0.
         sched.learning_rate(3, 0.5);
 
         // One non-improving step after improvement (counter: 1).

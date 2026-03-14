@@ -2,8 +2,8 @@
 //!
 //! [`AdaptiveSGBT`] pairs an [`SGBT`] model with an [`LRScheduler`], adjusting
 //! the learning rate before each training step based on the scheduler's policy.
-//! This enables time-varying learning rates — decay, cosine annealing, plateau
-//! reduction — without modifying the core ensemble code.
+//! This enables time-varying learning rates -- decay, cosine annealing, plateau
+//! reduction -- without modifying the core ensemble code.
 //!
 //! # Example
 //!
@@ -46,8 +46,8 @@ use crate::sample::{Observation, SampleRef};
 /// 3. Sets the learning rate on the inner SGBT.
 /// 4. Delegates the actual training step.
 ///
-/// This allows any [`LRScheduler`] — exponential decay, cosine annealing,
-/// plateau reduction — to drive the ensemble's learning rate without touching
+/// This allows any [`LRScheduler`] -- exponential decay, cosine annealing,
+/// plateau reduction -- to drive the ensemble's learning rate without touching
 /// the core boosting logic.
 ///
 /// # Loss Estimation
@@ -277,7 +277,7 @@ mod tests {
     fn exponential_decay_reduces_lr() {
         let mut model = AdaptiveSGBT::new(test_config(), ExponentialDecayLR::new(0.1, 0.9));
 
-        // Train a few steps — LR should decrease.
+        // Train a few steps -- LR should decrease.
         for i in 0..10 {
             model.train(&[i as f64, (i * 2) as f64], i as f64);
         }
@@ -328,7 +328,7 @@ mod tests {
         let scheduler = PlateauLR::new(0.1, 0.5, 5, 1e-6);
         let mut model = AdaptiveSGBT::new(test_config(), scheduler);
 
-        // Feed constant data — loss will stagnate.
+        // Feed constant data -- loss will stagnate.
         for _ in 0..50 {
             model.train(&[1.0, 1.0], 1.0);
         }

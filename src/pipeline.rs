@@ -2,7 +2,7 @@
 //!
 //! A [`Pipeline`] chains one or more [`StreamingPreprocessor`] steps with a
 //! terminal [`StreamingLearner`], producing a single unit that itself
-//! implements `StreamingLearner`. This enables nested composition — pipelines
+//! implements `StreamingLearner`. This enables nested composition -- pipelines
 //! can participate in stacking ensembles, be boxed as `Box<dyn StreamingLearner>`,
 //! or be used anywhere a learner is expected.
 //!
@@ -12,7 +12,7 @@
 //! updates its internal statistics, and outputs transformed features for the
 //! next stage. The final transformed features reach the learner.
 //!
-//! During **prediction** (`predict`), preprocessors only *transform* — they do
+//! During **prediction** (`predict`), preprocessors only *transform* -- they do
 //! **not** update their statistics. This matches the standard ML convention
 //! where test-time transforms use frozen statistics.
 //!
@@ -29,11 +29,11 @@
 //!     .pipe(IncrementalNormalizer::new())
 //!     .learner(StreamingLinearModel::new(0.01));
 //!
-//! // Train through the pipeline — normalizer updates, then learner trains.
+//! // Train through the pipeline -- normalizer updates, then learner trains.
 //! pipeline.train(&[100.0, 0.5], 42.0);
 //! pipeline.train(&[200.0, 1.5], 84.0);
 //!
-//! // Predict — normalizer transforms (no update), then learner predicts.
+//! // Predict -- normalizer transforms (no update), then learner predicts.
 //! let pred = pipeline.predict(&[150.0, 1.0]);
 //! assert!(pred.is_finite());
 //! ```
@@ -57,7 +57,7 @@ use crate::learner::StreamingLearner;
 ///
 /// # Implementors
 ///
-/// - [`IncrementalNormalizer`](crate::preprocessing::IncrementalNormalizer) —
+/// - [`IncrementalNormalizer`](crate::preprocessing::IncrementalNormalizer) --
 ///   Welford online standardization (zero-mean, unit-variance).
 pub trait StreamingPreprocessor: Send + Sync {
     /// Update internal statistics from this sample and return transformed features.
@@ -157,7 +157,7 @@ impl Default for PipelineBuilder {
 ///
 /// Chains zero or more [`StreamingPreprocessor`] steps with a terminal
 /// [`StreamingLearner`]. The pipeline itself implements `StreamingLearner`,
-/// enabling nested composition — pipelines can participate in stacking
+/// enabling nested composition -- pipelines can participate in stacking
 /// ensembles, be stored as `Box<dyn StreamingLearner>`, or sit inside
 /// other pipelines.
 ///
@@ -459,7 +459,7 @@ mod tests {
             p.train(&[i as f64, (i as f64) * 2.0], 0.0);
         }
 
-        // Predict on the mean — normalized features should be near zero.
+        // Predict on the mean -- normalized features should be near zero.
         let pred = p.predict(&[49.5, 99.0]);
         assert!(
             pred.abs() < 0.5,
@@ -470,7 +470,7 @@ mod tests {
 
     #[test]
     fn empty_preprocessor_pipeline() {
-        // Pipeline with no preprocessors — features pass straight to learner.
+        // Pipeline with no preprocessors -- features pass straight to learner.
         let mut p = Pipeline::builder().learner(MeanLearner::new());
 
         assert_eq!(p.n_preprocessors(), 0);

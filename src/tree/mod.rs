@@ -10,7 +10,6 @@ pub mod node;
 pub mod predict;
 pub mod split;
 
-#[cfg(feature = "neural-leaves")]
 pub mod leaf_model;
 
 /// A streaming decision tree that trains incrementally.

@@ -256,7 +256,7 @@ impl TreeSlot {
     }
 
     /// Immutable access to the alternate drift detector (always `None` in
-    /// the current architecture — the alternate tree shares the main detector).
+    /// the current architecture -- the alternate tree shares the main detector).
     /// Reserved for future use.
     #[inline]
     pub fn alt_detector(&self) -> Option<&dyn DriftDetector> {
