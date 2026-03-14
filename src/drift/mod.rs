@@ -13,9 +13,9 @@ pub mod state;
 pub enum DriftSignal {
     /// No significant change detected.
     Stable,
-    /// Possible drift — start training an alternate model.
+    /// Possible drift -- start training an alternate model.
     Warning,
-    /// Confirmed drift — replace the current model.
+    /// Confirmed drift -- replace the current model.
     Drift,
 }
 

@@ -1,4 +1,4 @@
-//! Categorical feature binning — one bin per observed category value.
+//! Categorical feature binning -- one bin per observed category value.
 //!
 //! Unlike continuous binning strategies that discretize a range, categorical
 //! binning assigns each distinct category value its own bin. Category values
@@ -81,7 +81,7 @@ impl BinningStrategy for CategoricalBinning {
     }
 
     fn compute_edges(&self, _n_bins: usize) -> BinEdges {
-        // For categorical features, n_bins is ignored — we use one bin per category.
+        // For categorical features, n_bins is ignored -- we use one bin per category.
         // Bin edges are placed at midpoints between consecutive category values.
         if self.categories.len() <= 1 {
             return BinEdges { edges: Vec::new() };

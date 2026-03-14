@@ -38,7 +38,7 @@ use std::fmt;
 use crate::learner::StreamingLearner;
 
 // ---------------------------------------------------------------------------
-// RNG utilities — xorshift64
+// RNG utilities -- xorshift64
 // ---------------------------------------------------------------------------
 
 /// Advance a xorshift64 state and return the next pseudo-random `u64`.
@@ -170,7 +170,7 @@ impl MondrianForestConfigBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// MondrianTree — SoA arena-based online regression tree
+// MondrianTree -- SoA arena-based online regression tree
 // ---------------------------------------------------------------------------
 
 /// A single tree in the Mondrian forest ensemble.
@@ -585,7 +585,7 @@ impl StreamingLearner for MondrianForest {
 }
 
 // ---------------------------------------------------------------------------
-// Clone impl — manual to match irithyll patterns
+// Clone impl -- manual to match irithyll patterns
 // ---------------------------------------------------------------------------
 
 impl Clone for MondrianForest {
@@ -600,7 +600,7 @@ impl Clone for MondrianForest {
 }
 
 // ---------------------------------------------------------------------------
-// Debug impl — manual
+// Debug impl -- manual
 // ---------------------------------------------------------------------------
 
 impl fmt::Debug for MondrianForest {

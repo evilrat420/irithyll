@@ -145,7 +145,7 @@ impl DriftDetector for Ddm {
         // 4. Current metric.
         let p_plus_s = self.mean + std;
 
-        // 5. Warmup guard — return Stable and skip minimum / threshold
+        // 5. Warmup guard -- return Stable and skip minimum / threshold
         //    updates until running statistics have stabilised.
         if self.count <= self.min_instances {
             return DriftSignal::Stable;
@@ -157,7 +157,7 @@ impl DriftDetector for Ddm {
             self.min_s = std;
         }
 
-        // 7. Drift check (must come before warning — drift is more severe).
+        // 7. Drift check (must come before warning -- drift is more severe).
         if p_plus_s >= self.min_p_plus_s + self.drift_level * self.min_s {
             self.reset_running_stats();
             return DriftSignal::Drift;

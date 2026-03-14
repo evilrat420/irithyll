@@ -31,16 +31,16 @@
 //! assert_eq!(z.len(), 2);
 //! ```
 
-/// Welford online normalizer — incremental zero-mean, unit-variance standardization.
+/// Welford online normalizer -- incremental zero-mean, unit-variance standardization.
 ///
 /// Internally tracks per-feature `mean` and `M2` (sum of squared deviations
 /// from the current mean) so that variance is always available as `M2 / count`.
 ///
 /// The struct supports two initialisation modes:
 ///
-/// 1. **Lazy** — call [`new`](Self::new) and let the first [`update`](Self::update)
+/// 1. **Lazy** -- call [`new`](Self::new) and let the first [`update`](Self::update)
 ///    determine `n_features` from the slice length.
-/// 2. **Explicit** — call [`with_n_features`](Self::with_n_features) to
+/// 2. **Explicit** -- call [`with_n_features`](Self::with_n_features) to
 ///    pre-allocate buffers and enforce a fixed dimensionality.
 #[derive(Clone, Debug)]
 pub struct IncrementalNormalizer {
@@ -379,13 +379,13 @@ mod tests {
             norm.update(row);
         }
 
-        // Transform the mean itself — should produce values near zero.
+        // Transform the mean itself -- should produce values near zero.
         let mean_point = [norm.mean(0), norm.mean(1)];
         let z = norm.transform(&mean_point);
         assert!(z[0].abs() < EPS, "z[0] = {}", z[0]);
         assert!(z[1].abs() < EPS, "z[1] = {}", z[1]);
 
-        // Transform a point one std-dev above the mean — should be ~1.0.
+        // Transform a point one std-dev above the mean -- should be ~1.0.
         let one_sd = [
             norm.mean(0) + norm.std_dev(0),
             norm.mean(1) + norm.std_dev(1),

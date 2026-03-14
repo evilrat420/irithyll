@@ -11,7 +11,7 @@ use super::Loss;
 /// Mean squared error loss (L2 loss, scaled by 0.5).
 ///
 /// Optimal for regression when the noise is Gaussian.
-/// Sensitive to outliers — consider [`HuberLoss`](super::huber::HuberLoss)
+/// Sensitive to outliers -- consider [`HuberLoss`](super::huber::HuberLoss)
 /// for heavy-tailed distributions.
 #[derive(Debug, Clone, Copy)]
 pub struct SquaredLoss;

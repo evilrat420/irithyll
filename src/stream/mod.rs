@@ -102,7 +102,7 @@ pub struct Predictor<L: Loss = SquaredLoss> {
     pub(crate) model: Arc<RwLock<SGBT<L>>>,
 }
 
-// Manual Clone impl — cloning the Arc doesn't require L: Clone.
+// Manual Clone impl -- cloning the Arc doesn't require L: Clone.
 impl<L: Loss> Clone for Predictor<L> {
     fn clone(&self) -> Self {
         Self {

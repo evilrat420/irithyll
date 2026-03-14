@@ -1,7 +1,7 @@
 //! Unified streaming learner trait for polymorphic model composition.
 //!
 //! [`StreamingLearner`] is an **object-safe** trait that abstracts over any
-//! online/streaming machine learning model — gradient boosted trees, linear
+//! online/streaming machine learning model -- gradient boosted trees, linear
 //! models, Naive Bayes, Mondrian forests, or anything else that can ingest
 //! samples one at a time and produce predictions.
 //!
@@ -87,14 +87,14 @@ pub trait StreamingLearner: Send + Sync {
     /// Train on a single observation with explicit sample weight.
     ///
     /// This is the fundamental training primitive. All streaming models must
-    /// support weighted incremental updates — even if the weight is simply
+    /// support weighted incremental updates -- even if the weight is simply
     /// used to scale gradient contributions.
     ///
     /// # Arguments
     ///
-    /// * `features` — feature vector for this observation
-    /// * `target` — target value (regression) or class label (classification)
-    /// * `weight` — sample weight (1.0 for uniform weighting)
+    /// * `features` -- feature vector for this observation
+    /// * `target` -- target value (regression) or class label (classification)
+    /// * `weight` -- sample weight (1.0 for uniform weighting)
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64);
 
     /// Predict the target for the given feature vector.
@@ -131,14 +131,14 @@ pub trait StreamingLearner: Send + Sync {
     ///
     /// # Arguments
     ///
-    /// * `feature_matrix` — each element is a feature vector (one row)
+    /// * `feature_matrix` -- each element is a feature vector (one row)
     fn predict_batch(&self, feature_matrix: &[&[f64]]) -> Vec<f64> {
         feature_matrix.iter().map(|row| self.predict(row)).collect()
     }
 }
 
 // ---------------------------------------------------------------------------
-// SGBTLearner — adapter wrapping SGBT<L> into StreamingLearner
+// SGBTLearner -- adapter wrapping SGBT<L> into StreamingLearner
 // ---------------------------------------------------------------------------
 
 /// Adapter that wraps an [`SGBT`] ensemble into the [`StreamingLearner`] trait.
@@ -150,7 +150,7 @@ pub trait StreamingLearner: Send + Sync {
 ///
 /// # Type Parameter
 ///
-/// * `L` — loss function type, defaulting to [`SquaredLoss`] for regression.
+/// * `L` -- loss function type, defaulting to [`SquaredLoss`] for regression.
 ///   Any `L: Loss + Clone` is supported.
 ///
 /// # Examples
@@ -273,7 +273,7 @@ impl<L: Loss> StreamingLearner for SGBTLearner<L> {
 }
 
 // ---------------------------------------------------------------------------
-// Clone impl — manual to match irithyll patterns (no derive)
+// Clone impl -- manual to match irithyll patterns (no derive)
 // ---------------------------------------------------------------------------
 
 impl<L: Loss + Clone> Clone for SGBTLearner<L> {
@@ -285,7 +285,7 @@ impl<L: Loss + Clone> Clone for SGBTLearner<L> {
 }
 
 // ---------------------------------------------------------------------------
-// Debug impl — manual, avoids requiring Debug on L
+// Debug impl -- manual, avoids requiring Debug on L
 // ---------------------------------------------------------------------------
 
 impl<L: Loss> fmt::Debug for SGBTLearner<L> {

@@ -276,7 +276,7 @@ impl<L: Loss> MoESGBT<L> {
     }
 
     // -------------------------------------------------------------------
-    // Public API — gating
+    // Public API -- gating
     // -------------------------------------------------------------------
 
     /// Compute gating probabilities for a feature vector.
@@ -287,7 +287,7 @@ impl<L: Loss> MoESGBT<L> {
     pub fn gating_probabilities(&self, features: &[f64]) -> Vec<f64> {
         let k = self.experts.len();
         if self.n_features.is_none() {
-            // Gate not initialized yet — return uniform
+            // Gate not initialized yet -- return uniform
             return vec![1.0 / k as f64; k];
         }
         let logits = self.gate_logits(features);
@@ -295,7 +295,7 @@ impl<L: Loss> MoESGBT<L> {
     }
 
     // -------------------------------------------------------------------
-    // Public API — training
+    // Public API -- training
     // -------------------------------------------------------------------
 
     /// Train on a single observation.
@@ -390,7 +390,7 @@ impl<L: Loss> MoESGBT<L> {
     }
 
     // -------------------------------------------------------------------
-    // Public API — prediction
+    // Public API -- prediction
     // -------------------------------------------------------------------
 
     /// Predict the output for a feature vector.
@@ -427,7 +427,7 @@ impl<L: Loss> MoESGBT<L> {
     }
 
     // -------------------------------------------------------------------
-    // Public API — inspection
+    // Public API -- inspection
     // -------------------------------------------------------------------
 
     /// Number of experts in the mixture.

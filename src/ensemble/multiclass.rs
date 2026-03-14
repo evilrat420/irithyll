@@ -14,7 +14,7 @@ use crate::sample::{Observation, SampleRef};
 ///
 /// Each class gets its own `SGBT<SoftmaxLoss>` trained with softmax
 /// (logistic per-class) loss. The concrete loss type is monomorphized
-/// for each committee — no `Box<dyn Loss>` overhead.
+/// for each committee -- no `Box<dyn Loss>` overhead.
 ///
 /// Predictions are softmax-normalized across all class committees.
 #[derive(Debug)]

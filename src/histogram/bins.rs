@@ -27,7 +27,7 @@ pub struct FeatureHistogram {
     /// Instead of decaying all bins on every sample (O(n_bins)), we track
     /// a running scale factor and store new samples in un-decayed coordinates.
     /// The decay is materialized (applied to all bins) only when the histogram
-    /// is read — typically at split evaluation time, every `grace_period` samples.
+    /// is read -- typically at split evaluation time, every `grace_period` samples.
     ///
     /// Invariant: `effective_value[i] = grad_sums[i] * decay_scale`.
     /// Value is 1.0 when no decay is pending (default, or after [`materialize_decay`]).
@@ -115,7 +115,7 @@ impl FeatureHistogram {
     /// Mathematically equivalent to eager decay: a gradient `g` added at
     /// epoch `t` contributes `g * alpha^(T - t)` at read time `T`.
     ///
-    /// The `counts` array is NOT decayed — it tracks the raw sample count
+    /// The `counts` array is NOT decayed -- it tracks the raw sample count
     /// for the Hoeffding bound computation.
     #[inline]
     pub fn accumulate_with_decay(&mut self, value: f64, gradient: f64, hessian: f64, alpha: f64) {
@@ -128,7 +128,7 @@ impl FeatureHistogram {
 
         // Renormalize when scale underflows to prevent precision loss.
         // With alpha ≈ 0.986 (half_life = 50), this fires roughly every
-        // 16K samples per leaf — negligible amortized cost.
+        // 16K samples per leaf -- negligible amortized cost.
         if self.decay_scale < 1e-100 {
             self.materialize_decay();
         }
@@ -138,7 +138,7 @@ impl FeatureHistogram {
     ///
     /// After calling this, `grad_sums` and `hess_sums` contain the true
     /// decayed values and can be passed directly to split evaluation.
-    /// O(n_bins) — called at split evaluation time, not per sample.
+    /// O(n_bins) -- called at split evaluation time, not per sample.
     #[inline]
     pub fn materialize_decay(&mut self) {
         if (self.decay_scale - 1.0).abs() > f64::EPSILON {
@@ -308,7 +308,7 @@ impl LeafHistograms {
     /// Materialize pending lazy decay across all feature histograms.
     ///
     /// Call before reading raw bin values (e.g., split evaluation).
-    /// O(n_features * n_bins) — called at split evaluation time, not per sample.
+    /// O(n_features * n_bins) -- called at split evaluation time, not per sample.
     pub fn materialize_decay(&mut self) {
         for hist in &mut self.histograms {
             hist.materialize_decay();
@@ -527,7 +527,7 @@ mod tests {
             h.accumulate_with_decay(1.0, 1.0, 1.0, alpha);
         }
 
-        // 50 samples in bin 2 (value=8.0) — enough for recent to dominate
+        // 50 samples in bin 2 (value=8.0) -- enough for recent to dominate
         for _ in 0..50 {
             h.accumulate_with_decay(8.0, 1.0, 1.0, alpha);
         }

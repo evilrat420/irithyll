@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// Observation trait — zero-copy training interface
+// Observation trait -- zero-copy training interface
 // ---------------------------------------------------------------------------
 
 /// Trait for anything that can be used as a training observation.
@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 /// | Type | Allocates? |
 /// |------|-----------|
 /// | `Sample` | Already owns `Vec<f64>` |
-/// | `SampleRef<'a>` | No — borrows `&[f64]` |
-/// | `(&[f64], f64)` | No — tuple of slice + target |
+/// | `SampleRef<'a>` | No -- borrows `&[f64]` |
+/// | `(&[f64], f64)` | No -- tuple of slice + target |
 /// | `(Vec<f64>, f64)` | Owns `Vec<f64>` |
 ///
 /// # Example
@@ -48,7 +48,7 @@ pub trait Observation {
 }
 
 // ---------------------------------------------------------------------------
-// Sample — owned observation
+// Sample -- owned observation
 // ---------------------------------------------------------------------------
 
 /// A single observation with feature vector and target value.
@@ -140,7 +140,7 @@ impl Observation for &Sample {
 }
 
 // ---------------------------------------------------------------------------
-// SampleRef — zero-copy borrowing observation
+// SampleRef -- zero-copy borrowing observation
 // ---------------------------------------------------------------------------
 
 /// A borrowed observation that avoids `Vec<f64>` allocation.
@@ -206,7 +206,7 @@ impl<'a> Observation for SampleRef<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// Tuple impls — quick-and-dirty observations
+// Tuple impls -- quick-and-dirty observations
 // ---------------------------------------------------------------------------
 
 impl Observation for (&[f64], f64) {
@@ -243,7 +243,7 @@ impl Observation for (&Vec<f64>, f64) {
 }
 
 // ---------------------------------------------------------------------------
-// From impls — conversion convenience
+// From impls -- conversion convenience
 // ---------------------------------------------------------------------------
 
 impl From<(Vec<f64>, f64)> for Sample {

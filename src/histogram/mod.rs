@@ -55,7 +55,7 @@ pub trait BinningStrategy: Send + Sync + 'static {
 }
 
 // ---------------------------------------------------------------------------
-// BinnerKind — enum dispatch replacing Box<dyn BinningStrategy>
+// BinnerKind -- enum dispatch replacing Box<dyn BinningStrategy>
 // ---------------------------------------------------------------------------
 
 /// Concrete binning strategy enum, eliminating `Box<dyn BinningStrategy>`
@@ -68,7 +68,7 @@ pub enum BinnerKind {
     /// Equal-width binning (default).
     Uniform(uniform::UniformBinning),
 
-    /// Categorical binning — one bin per observed distinct value.
+    /// Categorical binning -- one bin per observed distinct value.
     Categorical(categorical::CategoricalBinning),
 
     /// K-means binning (feature-gated).

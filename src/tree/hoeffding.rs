@@ -22,6 +22,7 @@ use crate::ensemble::config::FeatureType;
 use crate::histogram::bins::LeafHistograms;
 use crate::histogram::{BinEdges, BinnerKind};
 use crate::tree::builder::TreeConfig;
+use crate::tree::leaf_model::{LeafModel, LeafModelType};
 use crate::tree::node::{NodeId, TreeArena};
 use crate::tree::split::{leaf_weight, SplitCandidate, SplitCriterion, XGBoostGain};
 use crate::tree::StreamingTree;
@@ -32,7 +33,7 @@ use crate::tree::StreamingTree;
 const TAU: f64 = 0.05;
 
 // ---------------------------------------------------------------------------
-// xorshift64 — minimal deterministic PRNG
+// xorshift64 -- minimal deterministic PRNG
 // ---------------------------------------------------------------------------
 
 /// Advance an xorshift64 state and return the new value.
@@ -47,14 +48,13 @@ fn xorshift64(state: &mut u64) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// LeafState — per-leaf bookkeeping
+// LeafState -- per-leaf bookkeeping
 // ---------------------------------------------------------------------------
 
 /// State tracked per leaf node for split decisions.
 ///
 /// Each active leaf owns its own set of histogram accumulators (one per feature)
 /// and running gradient/hessian sums for leaf weight updates.
-#[derive(Clone)]
 struct LeafState {
     /// Histogram accumulators for this leaf. `None` until bin edges are computed
     /// (after the grace period).
@@ -85,6 +85,26 @@ struct LeafState {
 
     /// Number of gradients observed for clipping statistics.
     clip_grad_count: u64,
+
+    /// Optional trainable leaf model (linear / MLP). `None` for closed-form leaves.
+    leaf_model: Option<Box<dyn LeafModel>>,
+}
+
+impl Clone for LeafState {
+    fn clone(&self) -> Self {
+        Self {
+            histograms: self.histograms.clone(),
+            binners: self.binners.clone(),
+            bins_ready: self.bins_ready,
+            grad_sum: self.grad_sum,
+            hess_sum: self.hess_sum,
+            last_reeval_count: self.last_reeval_count,
+            clip_grad_mean: self.clip_grad_mean,
+            clip_grad_m2: self.clip_grad_m2,
+            clip_grad_count: self.clip_grad_count,
+            leaf_model: self.leaf_model.as_ref().map(|m| m.clone_fresh()),
+        }
+    }
 }
 
 /// Clip a gradient using Welford online stats tracked per leaf.
@@ -112,7 +132,7 @@ fn clip_gradient(state: &mut LeafState, gradient: f64, sigma: f64) -> f64 {
     let std_dev = variance.sqrt();
 
     if std_dev < 1e-15 {
-        return gradient; // All gradients identical — no clipping needed
+        return gradient; // All gradients identical -- no clipping needed
     }
 
     let lo = state.clip_grad_mean - sigma * std_dev;
@@ -154,6 +174,7 @@ impl LeafState {
             clip_grad_mean: 0.0,
             clip_grad_m2: 0.0,
             clip_grad_count: 0,
+            leaf_model: None,
         }
     }
 
@@ -184,6 +205,7 @@ impl LeafState {
             clip_grad_mean: 0.0,
             clip_grad_m2: 0.0,
             clip_grad_count: 0,
+            leaf_model: None,
         }
     }
 }
@@ -213,7 +235,7 @@ pub struct HoeffdingTree {
     /// Tree configuration / hyperparameters.
     config: TreeConfig,
 
-    /// Per-leaf state indexed by `NodeId.0`. Dense Vec — NodeIds are
+    /// Per-leaf state indexed by `NodeId.0`. Dense Vec -- NodeIds are
     /// contiguous u32 indices from TreeArena, so direct indexing is optimal.
     leaf_states: Vec<Option<LeafState>>,
 
@@ -251,9 +273,13 @@ impl HoeffdingTree {
         let root = arena.add_leaf(0);
 
         // Insert a placeholder leaf state for the root. We don't know n_features
-        // yet, so give it 0 binners — it will be properly initialized on the
+        // yet, so give it 0 binners -- it will be properly initialized on the
         // first sample.
         let mut leaf_states = vec![None; root.0 as usize + 1];
+        let root_model = match config.leaf_model_type {
+            LeafModelType::ClosedForm => None,
+            _ => Some(config.leaf_model_type.create(config.seed)),
+        };
         leaf_states[root.0 as usize] = Some(LeafState {
             histograms: None,
             binners: Vec::new(),
@@ -264,6 +290,7 @@ impl HoeffdingTree {
             clip_grad_mean: 0.0,
             clip_grad_m2: 0.0,
             clip_grad_count: 0,
+            leaf_model: root_model,
         });
 
         let seed = config.seed;
@@ -279,6 +306,22 @@ impl HoeffdingTree {
             feature_mask_bits: Vec::new(),
             rng_state: seed,
             split_gains: Vec::new(),
+        }
+    }
+
+    /// Create a leaf model for a new leaf if the config requires one.
+    ///
+    /// Returns `None` for `ClosedForm` (the default), which uses the existing
+    /// `leaf_weight()` path with zero overhead. For `Linear` and `MLP`, returns
+    /// a fresh model seeded deterministically from the config seed and node id.
+    fn make_leaf_model(&self, node: NodeId) -> Option<Box<dyn LeafModel>> {
+        match self.config.leaf_model_type {
+            LeafModelType::ClosedForm => None,
+            _ => Some(
+                self.config
+                    .leaf_model_type
+                    .create(self.config.seed ^ (node.0 as u64)),
+            ),
         }
     }
 
@@ -300,7 +343,7 @@ impl HoeffdingTree {
         let root = if arena.n_nodes() > 0 {
             NodeId(0)
         } else {
-            // Empty arena — add a root leaf (shouldn't normally happen in restore).
+            // Empty arena -- add a root leaf (shouldn't normally happen in restore).
             let mut arena_mut = arena;
             let root = arena_mut.add_leaf(0);
             return Self {
@@ -501,7 +544,7 @@ impl HoeffdingTree {
         // Materialize pending lazy decay before reading histogram data.
         // This converts un-decayed coordinates to true decayed values so
         // split evaluation sees correct gradient/hessian sums. O(n_features * n_bins)
-        // but amortized over grace_period samples — not per-sample cost.
+        // but amortized over grace_period samples -- not per-sample cost.
         if self.config.leaf_decay_alpha.is_some() {
             if let Some(state) = self
                 .leaf_states
@@ -592,7 +635,7 @@ impl HoeffdingTree {
                     candidates.push((feat_idx, candidate, Some(bin_order)));
                 }
             } else {
-                // Standard continuous feature — evaluate as-is
+                // Standard continuous feature -- evaluate as-is
                 if let Some(candidate) = self.split_criterion.evaluate(
                     &hist.grad_sums,
                     &hist.hess_sums,
@@ -707,7 +750,7 @@ impl HoeffdingTree {
             self.config.lambda,
         );
 
-        // Perform the split — categorical or continuous.
+        // Perform the split -- categorical or continuous.
         let (left_id, right_id) = if let Some(ref order) = fisher_order {
             // Categorical split: build a bitmask from the Fisher-sorted partition.
             // bin_idx in the sorted order means bins order[0..=bin_idx] go left.
@@ -812,6 +855,9 @@ impl HoeffdingTree {
                 let child_binners_l = make_binners(nf, ft);
                 let child_binners_r = make_binners(nf, ft);
 
+                let left_model = self.make_leaf_model(left_id);
+                let right_model = self.make_leaf_model(right_id);
+
                 let left_state = LeafState {
                     histograms: Some(left_hists),
                     binners: child_binners_l,
@@ -822,6 +868,7 @@ impl HoeffdingTree {
                     clip_grad_mean: 0.0,
                     clip_grad_m2: 0.0,
                     clip_grad_count: 0,
+                    leaf_model: left_model,
                 };
 
                 let right_state = LeafState {
@@ -834,6 +881,7 @@ impl HoeffdingTree {
                     clip_grad_mean: 0.0,
                     clip_grad_m2: 0.0,
                     clip_grad_count: 0,
+                    leaf_model: right_model,
                 };
 
                 self.leaf_states[left_id.0 as usize] = Some(left_state);
@@ -841,14 +889,22 @@ impl HoeffdingTree {
             } else {
                 // Parent didn't have histograms (shouldn't happen if bins_ready).
                 let ft = self.config.feature_types.as_deref();
-                self.leaf_states[left_id.0 as usize] = Some(LeafState::new_with_types(nf, ft));
-                self.leaf_states[right_id.0 as usize] = Some(LeafState::new_with_types(nf, ft));
+                let mut ls = LeafState::new_with_types(nf, ft);
+                ls.leaf_model = self.make_leaf_model(left_id);
+                self.leaf_states[left_id.0 as usize] = Some(ls);
+                let mut rs = LeafState::new_with_types(nf, ft);
+                rs.leaf_model = self.make_leaf_model(right_id);
+                self.leaf_states[right_id.0 as usize] = Some(rs);
             }
         } else {
             // No parent state found (shouldn't happen).
             let ft = self.config.feature_types.as_deref();
-            self.leaf_states[left_id.0 as usize] = Some(LeafState::new_with_types(nf, ft));
-            self.leaf_states[right_id.0 as usize] = Some(LeafState::new_with_types(nf, ft));
+            let mut ls = LeafState::new_with_types(nf, ft);
+            ls.leaf_model = self.make_leaf_model(left_id);
+            self.leaf_states[left_id.0 as usize] = Some(ls);
+            let mut rs = LeafState::new_with_types(nf, ft);
+            rs.leaf_model = self.make_leaf_model(right_id);
+            self.leaf_states[right_id.0 as usize] = Some(rs);
         }
 
         true
@@ -937,6 +993,11 @@ impl StreamingTree for HoeffdingTree {
             let lw = leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda);
             self.arena.set_leaf_value(leaf_id, lw);
 
+            // Update the leaf model if one exists (linear / MLP).
+            if let Some(ref mut model) = state.leaf_model {
+                model.update(features, gradient, hessian, self.config.lambda);
+            }
+
             // Check if we've reached the grace period to compute bin edges.
             if sample_count >= self.config.grace_period as u64 {
                 let edges_per_feature: Vec<BinEdges> = state
@@ -966,7 +1027,7 @@ impl StreamingTree for HoeffdingTree {
             return;
         }
 
-        // Bins are ready — accumulate into histograms (with optional decay).
+        // Bins are ready -- accumulate into histograms (with optional decay).
         if let Some(ref mut histograms) = state.histograms {
             if let Some(alpha) = self.config.leaf_decay_alpha {
                 histograms.accumulate_with_decay(features, gradient, hessian, alpha);
@@ -986,6 +1047,11 @@ impl StreamingTree for HoeffdingTree {
         let lw = leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda);
         self.arena.set_leaf_value(leaf_id, lw);
 
+        // Update the leaf model if one exists (linear / MLP).
+        if let Some(ref mut model) = state.leaf_model {
+            model.update(features, gradient, hessian, self.config.lambda);
+        }
+
         // Attempt split.
         // We only try every grace_period samples to avoid excessive computation.
         if sample_count % (self.config.grace_period as u64) == 0 {
@@ -1004,6 +1070,10 @@ impl StreamingTree for HoeffdingTree {
             .get(leaf_id.0 as usize)
             .and_then(|o| o.as_ref())
         {
+            // Delegate to the leaf model when one exists (linear / MLP).
+            if let Some(ref model) = state.leaf_model {
+                return model.predict(features);
+            }
             if state.hess_sum != 0.0 {
                 // Compute live prediction from accumulated statistics.
                 leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda)
@@ -1039,10 +1109,10 @@ impl StreamingTree for HoeffdingTree {
         // Insert a placeholder leaf state for the new root.
         let n_features = self.n_features.unwrap_or(0);
         self.leaf_states.resize_with(root.0 as usize + 1, || None);
-        self.leaf_states[root.0 as usize] = Some(LeafState::new_with_types(
-            n_features,
-            self.config.feature_types.as_deref(),
-        ));
+        let mut root_state =
+            LeafState::new_with_types(n_features, self.config.feature_types.as_deref());
+        root_state.leaf_model = self.make_leaf_model(root);
+        self.leaf_states[root.0 as usize] = Some(root_state);
 
         self.samples_seen = 0;
         self.feature_mask.clear();
@@ -1062,7 +1132,9 @@ impl StreamingTree for HoeffdingTree {
             .get(leaf_id.0 as usize)
             .and_then(|o| o.as_ref())
         {
-            let value = if state.hess_sum != 0.0 {
+            let value = if let Some(ref model) = state.leaf_model {
+                model.predict(features)
+            } else if state.hess_sum != 0.0 {
                 leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda)
             } else {
                 self.arena.leaf_value[leaf_id.0 as usize]
@@ -1289,7 +1361,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 5: Reset works — tree returns to single leaf.
+    // Test 5: Reset works -- tree returns to single leaf.
     // -----------------------------------------------------------------------
     #[test]
     fn reset_returns_to_single_leaf() {
@@ -1337,7 +1409,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 6: Multiple features — verify tree uses different features.
+    // Test 6: Multiple features -- verify tree uses different features.
     // -----------------------------------------------------------------------
     #[test]
     fn multi_feature_training() {
@@ -1420,7 +1492,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test 9: EWMA leaf decay — recent data dominates predictions.
+    // Test 9: EWMA leaf decay -- recent data dominates predictions.
     // -----------------------------------------------------------------------
     #[test]
     fn ewma_leaf_decay_recent_data_dominates() {
@@ -1608,7 +1680,7 @@ mod tests {
             );
         }
 
-        // Now an extreme outlier — mean is ~1.95, std ~0.59, 3-sigma range is ~[0.18, 3.72]
+        // Now an extreme outlier -- mean is ~1.95, std ~0.59, 3-sigma range is ~[0.18, 3.72]
         let clipped = clip_gradient(&mut state, 100.0, 3.0);
         assert!(
             clipped < 100.0,

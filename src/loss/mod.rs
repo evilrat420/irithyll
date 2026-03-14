@@ -11,7 +11,7 @@ pub mod softmax;
 pub mod squared;
 
 // ---------------------------------------------------------------------------
-// LossType — serialization tag for built-in loss functions
+// LossType -- serialization tag for built-in loss functions
 // ---------------------------------------------------------------------------
 
 /// Tag identifying a loss function for serialization and reconstruction.
@@ -80,7 +80,7 @@ impl LossType {
 /// # Generic SGBT
 ///
 /// [`SGBT`](crate::SGBT) is generic over `L: Loss`, so the loss function is
-/// monomorphized into the boosting loop — no virtual dispatch overhead on the
+/// monomorphized into the boosting loop -- no virtual dispatch overhead on the
 /// gradient/hessian hot path.
 ///
 /// ```
@@ -113,7 +113,7 @@ pub trait Loss: Send + Sync + 'static {
     /// Return the serialization tag for this loss function.
     ///
     /// Built-in losses return `Some(LossType::...)`. Custom losses default to
-    /// `None`, which means the model cannot be auto-serialized — use
+    /// `None`, which means the model cannot be auto-serialized -- use
     /// [`SGBT::to_model_state_with`](crate::SGBT::to_model_state_with) to
     /// supply the tag manually.
     fn loss_type(&self) -> Option<LossType> {
@@ -122,7 +122,7 @@ pub trait Loss: Send + Sync + 'static {
 }
 
 // ---------------------------------------------------------------------------
-// Box<dyn Loss> blanket impl — enables DynSGBT = SGBT<Box<dyn Loss>>
+// Box<dyn Loss> blanket impl -- enables DynSGBT = SGBT<Box<dyn Loss>>
 // ---------------------------------------------------------------------------
 
 impl Loss for Box<dyn Loss> {

@@ -20,7 +20,7 @@ const DEFAULT_MAX_ITERS: usize = 50;
 const EPSILON: f64 = 1e-10;
 
 // ---------------------------------------------------------------------------
-// Xorshift64 PRNG — lightweight, deterministic, no allocation.
+// Xorshift64 PRNG -- lightweight, deterministic, no allocation.
 // ---------------------------------------------------------------------------
 
 /// Advance an xorshift64 state and return the new value.
@@ -321,7 +321,7 @@ mod tests {
                 let u = (lcg >> 33) as f64 / (1u64 << 31) as f64; // [0, 1)
                 sum += u;
             }
-            // sum is in [0, 4), shift to [-2, 2) — roughly bell-shaped.
+            // sum is in [0, 4), shift to [-2, 2) -- roughly bell-shaped.
             binner.observe(sum - 2.0);
         }
 
@@ -349,7 +349,7 @@ mod tests {
         // The first bin edge should be much closer to 0 than to the max,
         // because k-means follows data density. With equal-width bins the
         // first edge would be at ~124875. K-means should place it well below
-        // that — typically under 60% of the equal-width edge.
+        // that -- typically under 60% of the equal-width edge.
         let max_val = 999.0 * 999.0;
         let equal_width_first = max_val / 8.0;
 

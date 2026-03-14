@@ -291,7 +291,7 @@ mod tests {
         }
         assert!(approx_eq(m.mae(), 1.0));
 
-        // Now feed zero error — MAE should decay toward 0
+        // Now feed zero error -- MAE should decay toward 0
         for _ in 0..100 {
             m.update(5.0, 5.0);
         }

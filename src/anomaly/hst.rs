@@ -21,7 +21,7 @@
 //!
 //! After `window_size` samples, `l` is copied to `r` and `l` is reset.
 //!
-//! The anomaly score for a point is: `Σ_nodes(mass_r / 2^depth)` — nodes
+//! The anomaly score for a point is: `Σ_nodes(mass_r / 2^depth)` -- nodes
 //! with low reference mass at shallow depth contribute most to anomaly score.
 //!
 //! # References
@@ -51,7 +51,7 @@ pub struct HSTConfig {
     /// Random seed for reproducibility.
     pub seed: u64,
 
-    /// Anomaly score threshold — scores above this are flagged.
+    /// Anomaly score threshold -- scores above this are flagged.
     /// Default: 0.5 (after normalization to [0, 1]).
     pub threshold: f64,
 }
@@ -251,7 +251,7 @@ impl HSTree {
         }
     }
 
-    /// Score a point — lower reference mass at shallow depth = more anomalous.
+    /// Score a point -- lower reference mass at shallow depth = more anomalous.
     /// Returns a raw score (higher = more anomalous).
     fn score(&self, features: &[f64], max_depth: usize) -> f64 {
         let mut idx = 0;
@@ -667,7 +667,7 @@ mod tests {
         assert_eq!(hst.windows_completed(), 1);
 
         // After rotation, reference should have mass
-        // Score a normal point — it should land where mass accumulated
+        // Score a normal point -- it should land where mass accumulated
         let normal = hst.score(&[0.5, 0.5]);
 
         // Score a very different point

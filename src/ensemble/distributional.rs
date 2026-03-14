@@ -1,4 +1,4 @@
-//! NGBoost-style distributional SGBT — outputs Gaussian N(μ, σ²) instead of a point estimate.
+//! NGBoost-style distributional SGBT -- outputs Gaussian N(μ, σ²) instead of a point estimate.
 //!
 //! [`DistributionalSGBT`] maintains two independent ensembles of streaming trees:
 //! one targeting the location (mean) and one targeting the scale (log-sigma).
@@ -58,7 +58,7 @@ impl GaussianPrediction {
 /// NGBoost-style distributional streaming gradient boosted trees.
 ///
 /// Outputs a full Gaussian predictive distribution N(μ, σ²) by maintaining two
-/// independent ensembles — one for location (mean) and one for scale (log-sigma).
+/// independent ensembles -- one for location (mean) and one for scale (log-sigma).
 ///
 /// # Example
 ///
@@ -99,7 +99,7 @@ pub struct DistributionalSGBT {
     rng_state: u64,
     /// Whether σ-modulated learning rate is enabled.
     uncertainty_modulated_lr: bool,
-    /// EWMA of the model's predicted σ — used as the denominator in σ-ratio.
+    /// EWMA of the model's predicted σ -- used as the denominator in σ-ratio.
     ///
     /// Updated with alpha = 0.001 (slow adaptation) after each training step.
     /// Initialized from the standard deviation of the initial target collection.
@@ -162,7 +162,8 @@ impl DistributionalSGBT {
             .split_reeval_interval_opt(config.split_reeval_interval)
             .feature_types_opt(config.feature_types.clone())
             .gradient_clip_sigma_opt(config.gradient_clip_sigma)
-            .monotone_constraints_opt(config.monotone_constraints.clone());
+            .monotone_constraints_opt(config.monotone_constraints.clone())
+            .leaf_model_type(config.leaf_model_type.clone());
 
         let max_tree_samples = config.max_tree_samples;
 
@@ -220,7 +221,7 @@ impl DistributionalSGBT {
                 let mean = sum / self.initial_targets.len() as f64;
                 self.location_base = mean;
 
-                // Scale base = log(std) — clamped for stability
+                // Scale base = log(std) -- clamped for stability
                 let var: f64 = self
                     .initial_targets
                     .iter()
@@ -277,12 +278,12 @@ impl DistributionalSGBT {
 
             let train_count = self.config.variant.train_count(h_mu, &mut self.rng_state);
 
-            // Train location step — σ-modulated LR when enabled
+            // Train location step -- σ-modulated LR when enabled
             let loc_pred =
                 self.location_steps[s].train_and_predict(features, g_mu, h_mu, train_count);
             mu += (base_lr * sigma_ratio) * loc_pred;
 
-            // Train scale step — ALWAYS at unmodulated base rate.
+            // Train scale step -- ALWAYS at unmodulated base rate.
             // Critical: modulating σ's own LR by σ creates a positive feedback loop
             // (σ high → learn σ faster → σ changes faster → instability).
             let scale_pred =
@@ -312,7 +313,7 @@ impl DistributionalSGBT {
     /// Predict with σ-ratio diagnostic exposed.
     ///
     /// Returns `(mu, sigma, sigma_ratio)` where `sigma_ratio` is
-    /// `current_sigma / rolling_sigma_mean` — the multiplier applied to the
+    /// `current_sigma / rolling_sigma_mean` -- the multiplier applied to the
     /// location learning rate when [`uncertainty_modulated_lr`](SGBTConfig::uncertainty_modulated_lr)
     /// is enabled.
     ///
@@ -467,7 +468,7 @@ impl DistributionalSGBT {
     /// Convert this model into a serializable [`crate::serde_support::DistributionalModelState`].
     ///
     /// Captures the full ensemble state (both location and scale trees) for
-    /// persistence. Histogram accumulators are NOT serialized — they rebuild
+    /// persistence. Histogram accumulators are NOT serialized -- they rebuild
     /// naturally from continued training.
     #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
     pub fn to_distributional_state(&self) -> crate::serde_support::DistributionalModelState {
@@ -535,7 +536,8 @@ impl DistributionalSGBT {
             .split_reeval_interval_opt(state.config.split_reeval_interval)
             .feature_types_opt(state.config.feature_types.clone())
             .gradient_clip_sigma_opt(state.config.gradient_clip_sigma)
-            .monotone_constraints_opt(state.config.monotone_constraints.clone());
+            .monotone_constraints_opt(state.config.monotone_constraints.clone())
+            .leaf_model_type(state.config.leaf_model_type.clone());
 
         // Rebuild a Vec<BoostingStep> from step snapshots with a given seed transform.
         let rebuild_steps = |snaps: &[StepSnapshot], seed_xor: u64| -> Vec<BoostingStep> {

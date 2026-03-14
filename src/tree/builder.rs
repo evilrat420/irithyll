@@ -5,6 +5,7 @@
 //! confidence parameter that controls when splits are committed.
 
 use crate::ensemble::config::FeatureType;
+use crate::tree::leaf_model::LeafModelType;
 
 /// Configuration for a single streaming decision tree.
 ///
@@ -99,6 +100,17 @@ pub struct TreeConfig {
     /// Candidate splits violating monotonicity are rejected.
     /// `None` (default) means no constraints.
     pub monotone_constraints: Option<Vec<i8>>,
+
+    /// Leaf prediction model type.
+    ///
+    /// Controls how each leaf computes its prediction:
+    /// - [`ClosedForm`](LeafModelType::ClosedForm) (default): constant leaf weight
+    ///   `w = -G / (H + lambda)`.
+    /// - [`Linear`](LeafModelType::Linear): online ridge regression within each leaf,
+    ///   learning a local `w . x + b` surface. Significantly improves accuracy for
+    ///   low-depth trees (depth 2–4) where constant leaves are too coarse.
+    /// - [`MLP`](LeafModelType::MLP): single hidden layer neural network per leaf.
+    pub leaf_model_type: LeafModelType,
 }
 
 impl Default for TreeConfig {
@@ -117,6 +129,7 @@ impl Default for TreeConfig {
             feature_types: None,
             gradient_clip_sigma: None,
             monotone_constraints: None,
+            leaf_model_type: LeafModelType::default(),
         }
     }
 }
@@ -253,6 +266,17 @@ impl TreeConfig {
     #[inline]
     pub fn monotone_constraints_opt(mut self, constraints: Option<Vec<i8>>) -> Self {
         self.monotone_constraints = constraints;
+        self
+    }
+
+    /// Set the leaf prediction model type.
+    ///
+    /// [`LeafModelType::Linear`] is recommended for low-depth configurations
+    /// (depth 2–4) where per-leaf linear models significantly reduce
+    /// approximation error compared to constant leaves.
+    #[inline]
+    pub fn leaf_model_type(mut self, lmt: LeafModelType) -> Self {
+        self.leaf_model_type = lmt;
         self
     }
 }

@@ -47,7 +47,7 @@ use std::fmt;
 /// -- only training is parallelized.
 ///
 /// Generic over `L: Loss` so the loss function's gradient/hessian calls
-/// are monomorphized (inlined) into the training loop — no virtual dispatch.
+/// are monomorphized (inlined) into the training loop -- no virtual dispatch.
 ///
 /// # Differences from [`SGBT`](super::SGBT)
 ///
@@ -63,7 +63,7 @@ pub struct ParallelSGBT<L: Loss = SquaredLoss> {
     config: SGBTConfig,
     /// Boosting steps (one tree + drift detector each).
     steps: Vec<BoostingStep>,
-    /// Loss function (monomorphized — no vtable).
+    /// Loss function (monomorphized -- no vtable).
     loss: L,
     /// Base prediction (initial constant, computed from first batch of targets).
     base_prediction: f64,
@@ -152,7 +152,8 @@ impl<L: Loss> ParallelSGBT<L> {
             .delta(config.delta)
             .feature_subsample_rate(config.feature_subsample_rate)
             .leaf_decay_alpha_opt(leaf_decay_alpha)
-            .split_reeval_interval_opt(config.split_reeval_interval);
+            .split_reeval_interval_opt(config.split_reeval_interval)
+            .leaf_model_type(config.leaf_model_type.clone());
 
         let max_tree_samples = config.max_tree_samples;
 

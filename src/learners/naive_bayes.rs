@@ -9,9 +9,9 @@
 //! # Algorithm
 //!
 //! For each class *k* and feature *j*, the model tracks:
-//! - `count_k` — weighted sample count
-//! - `mean_kj` — running mean via Welford's method
-//! - `m2_kj` — running second moment (variance = m2 / count)
+//! - `count_k` -- weighted sample count
+//! - `mean_kj` -- running mean via Welford's method
+//! - `m2_kj` -- running second moment (variance = m2 / count)
 //!
 //! Prediction selects the class with the highest log-posterior:
 //!
@@ -33,7 +33,7 @@ use std::fmt;
 use crate::learner::StreamingLearner;
 
 // ---------------------------------------------------------------------------
-// ClassStats — per-class sufficient statistics
+// ClassStats -- per-class sufficient statistics
 // ---------------------------------------------------------------------------
 
 /// Sufficient statistics for a single class, updated via Welford's algorithm.
@@ -360,7 +360,7 @@ impl Default for GaussianNB {
 }
 
 // ---------------------------------------------------------------------------
-// Free functions — math utilities
+// Free functions -- math utilities
 // ---------------------------------------------------------------------------
 
 /// Gaussian log-likelihood: `-0.5 * (log(2 * pi * var) + (x - mean)^2 / var)`.
@@ -528,7 +528,7 @@ mod tests {
     fn test_incremental_update() {
         let mut nb = GaussianNB::new();
 
-        // Train with minimal data — only 1 sample per class, no variance
+        // Train with minimal data -- only 1 sample per class, no variance
         nb.train(&[0.0, 0.0], 0.0);
         nb.train(&[10.0, 10.0], 1.0);
 
@@ -537,7 +537,7 @@ mod tests {
         let proba_early = nb.predict_proba(&[2.0, 2.0]);
         let p0_early = proba_early[0];
 
-        // Add more class-0 data near origin — model should become more confident
+        // Add more class-0 data near origin -- model should become more confident
         for _ in 0..50 {
             nb.train(&[0.5, 0.5], 0.0);
             nb.train(&[-0.5, -0.5], 0.0);

@@ -17,7 +17,7 @@
 //! Otherwise it is *added* to the dictionary.
 //!
 //! A `budget` parameter caps dictionary size. Once the budget is reached, no
-//! new entries are added — subsequent samples use weight-only updates.
+//! new entries are added -- subsequent samples use weight-only updates.
 //!
 //! # Complexity
 //!
@@ -223,9 +223,9 @@ impl KRLS {
     ///
     /// # Arguments
     ///
-    /// * `kernel` — kernel function (e.g., `RBFKernel`, `PolynomialKernel`)
-    /// * `budget` — maximum dictionary size (caps memory usage)
-    /// * `ald_threshold` — ALD sparsification threshold. Typical values: 1e-4 to 1e-2.
+    /// * `kernel` -- kernel function (e.g., `RBFKernel`, `PolynomialKernel`)
+    /// * `budget` -- maximum dictionary size (caps memory usage)
+    /// * `ald_threshold` -- ALD sparsification threshold. Typical values: 1e-4 to 1e-2.
     ///   Smaller = more dictionary entries (closer approximation).
     pub fn new(kernel: Box<dyn Kernel>, budget: usize, ald_threshold: f64) -> Self {
         Self::with_forgetting(kernel, budget, ald_threshold, 1.0)
@@ -451,10 +451,10 @@ impl StreamingLearner for KRLS {
         let delta = k_tt - Self::dot(&k_t, &p_k);
 
         if delta > self.ald_threshold && !self.at_budget() {
-            // Sample is linearly independent and budget has room — expand dictionary.
+            // Sample is linearly independent and budget has room -- expand dictionary.
             self.add_to_dictionary(features.to_vec(), &k_t, delta, target);
         } else {
-            // Either dependent (ALD) or budget full — update weights only.
+            // Either dependent (ALD) or budget full -- update weights only.
             self.update_weights_only(&k_t, target);
         }
     }

@@ -1,4 +1,4 @@
-//! Streaming SHAP — running mean of absolute SHAP values for online feature importance.
+//! Streaming SHAP -- running mean of absolute SHAP values for online feature importance.
 
 use crate::explain::treeshap::ShapValues;
 

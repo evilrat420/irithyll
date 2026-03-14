@@ -10,6 +10,7 @@ use crate::drift::pht::PageHinkleyTest;
 use crate::drift::DriftDetector;
 use crate::ensemble::variants::SGBTVariant;
 use crate::error::{ConfigError, Result};
+use crate::tree::leaf_model::LeafModelType;
 
 // ---------------------------------------------------------------------------
 // FeatureType
@@ -19,7 +20,7 @@ use crate::error::{ConfigError, Result};
 ///
 /// Categorical features are handled differently in the tree construction:
 /// - **Binning:** One bin per observed category value instead of equal-width bins.
-/// - **Split evaluation:** Fisher optimal binary partitioning — categories are sorted
+/// - **Split evaluation:** Fisher optimal binary partitioning -- categories are sorted
 ///   by gradient_sum/hessian_sum ratio, then the best contiguous partition is found
 ///   using the same left-to-right XGBoost gain scan.
 /// - **Routing:** Categorical splits use a `u64` bitmask where bit `i` set means
@@ -179,7 +180,7 @@ pub struct SGBTConfig {
     /// the model to continuously adapt to changing data distributions rather
     /// than freezing on early observations.
     ///
-    /// `None` (default) disables decay — traditional monotonic accumulation.
+    /// `None` (default) disables decay -- traditional monotonic accumulation.
     #[serde(default)]
     pub leaf_half_life: Option<usize>,
 
@@ -200,7 +201,7 @@ pub struct SGBTConfig {
     /// `split_reeval_interval` samples since its last evaluation and has reached
     /// max depth, it re-evaluates whether a split should be performed.
     ///
-    /// `None` (default) disables re-evaluation — max-depth leaves are permanent.
+    /// `None` (default) disables re-evaluation -- max-depth leaves are permanent.
     #[serde(default)]
     pub split_reeval_interval: Option<usize>,
 
@@ -261,7 +262,7 @@ pub struct SGBTConfig {
     /// for [`quality_prune_patience`](Self::quality_prune_patience) consecutive
     /// samples are replaced with a fresh tree that can learn the current regime.
     ///
-    /// This prevents "dead wood" — trees from a past regime that no longer
+    /// This prevents "dead wood" -- trees from a past regime that no longer
     /// contribute meaningfully to ensemble accuracy.
     ///
     /// `None` (default) disables quality-based pruning.
@@ -295,7 +296,7 @@ pub struct SGBTConfig {
     /// `1.0 + |error| / (rolling_mean_error + epsilon)`, capped at 10x.
     ///
     /// This is a streaming version of AdaBoost's reweighting applied at the
-    /// gradient level — learning capacity focuses on hard/novel patterns,
+    /// gradient level -- learning capacity focuses on hard/novel patterns,
     /// enabling faster adaptation to regime changes.
     ///
     /// `None` (default) disables error weighting.
@@ -316,6 +317,19 @@ pub struct SGBTConfig {
     /// Default: `false`.
     #[serde(default)]
     pub uncertainty_modulated_lr: bool,
+
+    /// Leaf prediction model type.
+    ///
+    /// Controls how each leaf computes its prediction:
+    /// - [`ClosedForm`](LeafModelType::ClosedForm) (default): constant leaf weight.
+    /// - [`Linear`](LeafModelType::Linear): per-leaf online ridge regression.
+    ///   Recommended for low-depth trees (depth 2–4) where constant leaves are
+    ///   too coarse -- each leaf learns a local linear surface `w · x + b`.
+    /// - [`MLP`](LeafModelType::MLP): per-leaf single-hidden-layer neural network.
+    ///
+    /// Default: [`ClosedForm`](LeafModelType::ClosedForm).
+    #[serde(default)]
+    pub leaf_model_type: LeafModelType,
 }
 
 fn default_quality_prune_threshold() -> f64 {
@@ -354,6 +368,7 @@ impl Default for SGBTConfig {
             quality_prune_patience: 500,
             error_weight_alpha: None,
             uncertainty_modulated_lr: false,
+            leaf_model_type: LeafModelType::default(),
         }
     }
 }
@@ -583,6 +598,15 @@ impl SGBTConfigBuilder {
     /// during stable periods. Only affects [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
     pub fn uncertainty_modulated_lr(mut self, enabled: bool) -> Self {
         self.config.uncertainty_modulated_lr = enabled;
+        self
+    }
+
+    /// Set the leaf prediction model type.
+    ///
+    /// [`LeafModelType::Linear`] is recommended for low-depth configurations
+    /// (depth 2–4) where per-leaf linear models reduce approximation error.
+    pub fn leaf_model_type(mut self, lmt: LeafModelType) -> Self {
+        self.config.leaf_model_type = lmt;
         self
     }
 
@@ -1346,7 +1370,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // 12. Feature names — valid config with names
+    // 12. Feature names -- valid config with names
     // ------------------------------------------------------------------
     #[test]
     fn feature_names_accepted() {
@@ -1361,7 +1385,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // 13. Feature names — duplicate names rejected
+    // 13. Feature names -- duplicate names rejected
     // ------------------------------------------------------------------
     #[test]
     fn feature_names_rejects_duplicates() {
@@ -1374,7 +1398,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // 14. Feature names — serde backward compat (missing field)
+    // 14. Feature names -- serde backward compat (missing field)
     // ------------------------------------------------------------------
     #[test]
     fn feature_names_serde_backward_compat() {
@@ -1386,7 +1410,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // 15. Feature names — empty vec is valid
+    // 15. Feature names -- empty vec is valid
     // ------------------------------------------------------------------
     #[test]
     fn feature_names_empty_vec_accepted() {

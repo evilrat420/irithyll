@@ -132,7 +132,7 @@ impl TreeArena {
     ///
     /// # Returns
     ///
-    /// `(left_id, right_id)` — the [`NodeId`]s of the two new children.
+    /// `(left_id, right_id)` -- the [`NodeId`]s of the two new children.
     pub fn split_leaf(
         &mut self,
         leaf_id: NodeId,
@@ -527,7 +527,7 @@ mod tests {
         let root = arena.add_leaf(0);
         let _ = arena.split_leaf(root, 0, 1.0, 0.0, 0.0);
 
-        // root is now internal — this should panic.
+        // root is now internal -- this should panic.
         let _ = arena.predict(root);
     }
 
@@ -539,7 +539,7 @@ mod tests {
         let root = arena.add_leaf(0);
         let _ = arena.split_leaf(root, 0, 1.0, 0.0, 0.0);
 
-        // root is now internal — this should panic.
+        // root is now internal -- this should panic.
         arena.set_leaf_value(root, 1.0);
     }
 
@@ -551,7 +551,7 @@ mod tests {
         let root = arena.add_leaf(0);
         let _ = arena.split_leaf(root, 0, 1.0, 0.0, 0.0);
 
-        // root is already internal — splitting again should panic.
+        // root is already internal -- splitting again should panic.
         let _ = arena.split_leaf(root, 1, 2.0, 0.0, 0.0);
     }
 

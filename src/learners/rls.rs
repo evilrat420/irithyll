@@ -3,15 +3,15 @@
 //! This module provides three streaming linear/nonlinear regression models that
 //! implement [`StreamingLearner`]:
 //!
-//! - **[`RecursiveLeastSquares`]** — Exact streaming OLS via the Sherman-Morrison
+//! - **[`RecursiveLeastSquares`]** -- Exact streaming OLS via the Sherman-Morrison
 //!   matrix inversion lemma. O(d^2) per sample, where d is the feature dimension.
 //!   Supports exponential forgetting for non-stationary environments.
 //!
-//! - **[`StreamingPolynomialRegression`]** — Wraps RLS with online polynomial
+//! - **[`StreamingPolynomialRegression`]** -- Wraps RLS with online polynomial
 //!   feature expansion, enabling streaming nonlinear regression without manual
 //!   feature engineering. Supports arbitrary polynomial degree.
 //!
-//! - **[`LocallyWeightedRegression`]** — Nadaraya-Watson kernel regression over
+//! - **[`LocallyWeightedRegression`]** -- Nadaraya-Watson kernel regression over
 //!   a fixed-capacity circular buffer. Predictions are Gaussian-kernel-weighted
 //!   averages of nearby training targets, providing adaptive local fits without
 //!   parametric assumptions.
@@ -110,7 +110,7 @@ fn outer_subtract_scaled(p: &mut [f64], k: &[f64], px: &[f64], lambda: f64, n: u
 ///
 /// let mut rls = RecursiveLeastSquares::new(1.0);
 ///
-/// // Learn y = 3*x (no intercept — RLS has no bias term)
+/// // Learn y = 3*x (no intercept -- RLS has no bias term)
 /// for i in 0..200 {
 ///     let x = i as f64 * 0.1;
 ///     rls.train(&[x], 3.0 * x);
@@ -146,7 +146,7 @@ impl RecursiveLeastSquares {
     ///
     /// # Arguments
     ///
-    /// * `forgetting_factor` — lambda in (0, 1]. Use 1.0 for standard RLS.
+    /// * `forgetting_factor` -- lambda in (0, 1]. Use 1.0 for standard RLS.
     pub fn new(forgetting_factor: f64) -> Self {
         Self::with_delta(forgetting_factor, 100.0)
     }
@@ -400,8 +400,8 @@ impl StreamingPolynomialRegression {
     ///
     /// # Arguments
     ///
-    /// * `degree` — maximum polynomial degree (must be >= 1)
-    /// * `forgetting_factor` — lambda for the inner RLS
+    /// * `degree` -- maximum polynomial degree (must be >= 1)
+    /// * `forgetting_factor` -- lambda for the inner RLS
     pub fn new(degree: usize, forgetting_factor: f64) -> Self {
         assert!(degree >= 1, "polynomial degree must be >= 1, got {degree}");
         Self {
@@ -601,8 +601,8 @@ impl LocallyWeightedRegression {
     ///
     /// # Arguments
     ///
-    /// * `capacity` — maximum number of samples to store in the buffer
-    /// * `bandwidth` — Gaussian kernel bandwidth (sigma); must be > 0
+    /// * `capacity` -- maximum number of samples to store in the buffer
+    /// * `bandwidth` -- Gaussian kernel bandwidth (sigma); must be > 0
     pub fn new(capacity: usize, bandwidth: f64) -> Self {
         assert!(capacity > 0, "capacity must be > 0, got {capacity}");
         assert!(bandwidth > 0.0, "bandwidth must be > 0.0, got {bandwidth}");
@@ -660,14 +660,14 @@ impl LocallyWeightedRegression {
 impl StreamingLearner for LocallyWeightedRegression {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
         if self.len < self.capacity {
-            // Buffer not yet full — push to the end.
+            // Buffer not yet full -- push to the end.
             self.buffer_features.push(features.to_vec());
             self.buffer_targets.push(target);
             self.buffer_weights.push(weight);
             self.len += 1;
             self.head = self.len % self.capacity;
         } else {
-            // Buffer full — overwrite at head.
+            // Buffer full -- overwrite at head.
             self.buffer_features[self.head] = features.to_vec();
             self.buffer_targets[self.head] = target;
             self.buffer_weights[self.head] = weight;
@@ -844,7 +844,7 @@ mod tests {
             rls.train(&[x, 1.0], 1.0 * x + 0.0);
         }
 
-        // Phase 2: y = 5*x + 10 — drastic shift.
+        // Phase 2: y = 5*x + 10 -- drastic shift.
         for i in 0..500 {
             let x = i as f64 * 0.01;
             rls.train(&[x, 1.0], 5.0 * x + 10.0);
@@ -977,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_lwr_constant() {
-        // All training targets are 42.0 — prediction everywhere should be ~42.
+        // All training targets are 42.0 -- prediction everywhere should be ~42.
         let mut lwr = LocallyWeightedRegression::new(200, 1.0);
         for i in 0..200 {
             let x = i as f64 * 0.1;

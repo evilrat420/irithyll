@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.4.0] - 2026-03-14
+
+### Added
+
+- **Pluggable leaf models** -- leaves can now use trainable prediction models
+  instead of constant weights. Three variants via `LeafModelType`:
+  - `ClosedForm` (default) -- standard constant leaf weight, zero overhead.
+  - `Linear { learning_rate }` -- per-leaf online ridge regression. Each leaf
+    learns a local linear surface `w . x + b` via Newton-scaled gradient descent.
+    Significantly improves accuracy for low-depth trees (depth 2-4).
+  - `MLP { hidden_size, learning_rate }` -- per-leaf single-hidden-layer neural
+    network with ReLU activation and backpropagation.
+- `LeafModelType` re-exported at crate root for ergonomic access.
+- `SGBTConfig::builder().leaf_model_type(...)` for ensemble-level configuration.
+- Full integration across all ensemble variants: SGBT, DistributionalSGBT,
+  ParallelSGBT.
+
+### Changed
+
+- Leaf model module (`tree::leaf_model`) is now always compiled -- previously
+  gated behind the `neural-leaves` feature flag. No external dependencies added.
+- Removed all em-dash characters from source code for consistent ASCII encoding.
+
 ## [6.3.0] - 2026-03-13
 
 ### Added
@@ -367,6 +390,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[6.4.0]: https://github.com/evilrat420/irithyll/compare/v6.3.0...v6.4.0
 [6.3.0]: https://github.com/evilrat420/irithyll/compare/v6.2.0...v6.3.0
 [6.2.0]: https://github.com/evilrat420/irithyll/compare/v6.1.1...v6.2.0
 [6.1.1]: https://github.com/evilrat420/irithyll/compare/v6.1.0...v6.1.1

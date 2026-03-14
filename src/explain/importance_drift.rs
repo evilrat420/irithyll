@@ -1,8 +1,8 @@
 //! Per-feature SHAP importance drift detection.
 //!
 //! Monitors per-feature |SHAP| values over time using drift detectors (PHT,
-//! ADWIN, or DDM). Detects when the model's reasoning changes — e.g. a feature
-//! that was previously unimportant becomes dominant, or vice versa — potentially
+//! ADWIN, or DDM). Detects when the model's reasoning changes -- e.g. a feature
+//! that was previously unimportant becomes dominant, or vice versa -- potentially
 //! before accuracy degrades.
 //!
 //! This is a novel capability: no existing open-source streaming ML library
@@ -293,7 +293,7 @@ mod tests {
     #[test]
     fn handles_fewer_shap_values_than_features() {
         let mut monitor = ImportanceDriftMonitor::new(5, pht_type());
-        // Only 2 values but 5 features — remaining should get 0.0
+        // Only 2 values but 5 features -- remaining should get 0.0
         let shap = ShapValues {
             values: vec![1.0, 2.0],
             base_value: 0.0,

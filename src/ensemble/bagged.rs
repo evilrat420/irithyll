@@ -481,7 +481,7 @@ mod tests {
         let variance = preds.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / preds.len() as f64;
 
         // Individual bag predictions should have some variance (bags are diverse)
-        // This is a soft check — just verify bags aren't all identical
+        // This is a soft check -- just verify bags aren't all identical
         assert!(
             preds.len() > 1,
             "need multiple bags to test variance reduction"

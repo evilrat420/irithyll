@@ -21,7 +21,7 @@
 //!     sel.update_importances(&[0.9, 0.1, 0.8, 0.2]);
 //! }
 //!
-//! // After warmup the mask activates — only top 50% survive.
+//! // After warmup the mask activates -- only top 50% survive.
 //! sel.update_importances(&[0.9, 0.1, 0.8, 0.2]);
 //! let masked = sel.mask_features(&[10.0, 20.0, 30.0, 40.0]);
 //!
@@ -35,7 +35,7 @@
 /// Online feature selector using EWMA importance tracking.
 ///
 /// After each call to [`update_importances`](Self::update_importances), the
-/// internal EWMA is updated and — once past the warmup period — a boolean
+/// internal EWMA is updated and -- once past the warmup period -- a boolean
 /// mask is recomputed. Features whose smoothed importance falls below the
 /// threshold are suppressed (zeroed) by [`mask_features`](Self::mask_features).
 ///
@@ -63,12 +63,12 @@ impl OnlineFeatureSelector {
     ///
     /// # Arguments
     ///
-    /// * `n_features` — Dimensionality of the feature vector.
-    /// * `keep_fraction` — Fraction of features to keep (e.g. `0.5` keeps 50%).
+    /// * `n_features` -- Dimensionality of the feature vector.
+    /// * `keep_fraction` -- Fraction of features to keep (e.g. `0.5` keeps 50%).
     ///   Clamped to `(0.0, 1.0]`.
-    /// * `alpha` — EWMA smoothing factor. Closer to 1.0 reacts faster to
+    /// * `alpha` -- EWMA smoothing factor. Closer to 1.0 reacts faster to
     ///   recent importance scores; closer to 0.0 is more stable.
-    /// * `warmup` — Number of [`update_importances`](Self::update_importances)
+    /// * `warmup` -- Number of [`update_importances`](Self::update_importances)
     ///   calls before the mask activates. During warmup all features pass.
     ///
     /// # Example
@@ -270,7 +270,7 @@ mod tests {
             sel.update_importances(&[1.0, 0.0, 0.0, 0.0]);
         }
 
-        // Still in warmup (9 < 10) — all features should be active.
+        // Still in warmup (9 < 10) -- all features should be active.
         assert_eq!(sel.active_count(), 4);
         assert!(sel.active_features().iter().all(|&b| b));
     }
@@ -284,7 +284,7 @@ mod tests {
             sel.update_importances(&[0.9, 0.1, 0.8, 0.05]);
         }
 
-        // Past warmup — mask should now be active.
+        // Past warmup -- mask should now be active.
         // keep_fraction = 0.5 => ceil(4 * 0.5) = 2 features kept.
         assert_eq!(sel.active_count(), 2);
 

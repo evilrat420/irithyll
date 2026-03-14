@@ -325,7 +325,7 @@ impl LeafModel for MLPLeafModel {
 /// Describes which leaf model architecture to use.
 ///
 /// Used by tree builders to construct fresh leaf models when creating new leaves.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LeafModelType {
     /// Standard closed-form leaf weight.
     #[default]

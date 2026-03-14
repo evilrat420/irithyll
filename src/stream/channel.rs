@@ -71,7 +71,7 @@ impl SampleSender {
 
 /// The receiving end of the sample channel, consumed by the training loop.
 ///
-/// Wraps a [`tokio::sync::mpsc::Receiver<Sample>`]. Not clonable — only
+/// Wraps a [`tokio::sync::mpsc::Receiver<Sample>`]. Not clonable -- only
 /// one consumer (the [`AsyncSGBT`](super::AsyncSGBT) training loop) should
 /// own this.
 #[derive(Debug)]
@@ -88,7 +88,7 @@ impl SampleReceiver {
     /// Receive the next sample from the channel.
     ///
     /// Returns `None` when all senders have been dropped and the channel
-    /// is drained — this is the clean shutdown signal for the training loop.
+    /// is drained -- this is the clean shutdown signal for the training loop.
     pub async fn recv(&mut self) -> Option<Sample> {
         self.inner.recv().await
     }
@@ -216,7 +216,7 @@ mod tests {
         // Fill the single slot.
         tx.send(sample(1.0)).await.unwrap();
 
-        // Spawn a task that sends another — it should block until we recv.
+        // Spawn a task that sends another -- it should block until we recv.
         let tx_clone = tx.clone();
         let handle = tokio::spawn(async move {
             tx_clone.send(sample(2.0)).await.unwrap();

@@ -14,7 +14,7 @@ use arrow::datatypes::DataType;
 /// as features. Columns that are not Float64 are silently skipped.
 ///
 /// The model's loss function is used for gradient/hessian computation
-/// (monomorphized — no `&dyn Loss` parameter needed).
+/// (monomorphized -- no `&dyn Loss` parameter needed).
 ///
 /// # Arguments
 /// * `model` - The SGBT model to train (generic over loss `L`)

@@ -7,8 +7,8 @@
 //!
 //! # Usage
 //!
-//! Train two SGBT models — one for the low quantile and one for the high
-//! quantile — and feed their predictions along with the actual target into
+//! Train two SGBT models -- one for the low quantile and one for the high
+//! quantile -- and feed their predictions along with the actual target into
 //! the ACI tracker. Use `effective_quantiles()` to determine what quantile
 //! levels to use for the next prediction interval.
 
