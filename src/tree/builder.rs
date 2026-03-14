@@ -106,10 +106,14 @@ pub struct TreeConfig {
     /// Controls how each leaf computes its prediction:
     /// - [`ClosedForm`](LeafModelType::ClosedForm) (default): constant leaf weight
     ///   `w = -G / (H + lambda)`.
-    /// - [`Linear`](LeafModelType::Linear): online ridge regression within each leaf,
-    ///   learning a local `w . x + b` surface. Significantly improves accuracy for
-    ///   low-depth trees (depth 2–4) where constant leaves are too coarse.
+    /// - [`Linear`](LeafModelType::Linear): online ridge regression with AdaGrad
+    ///   optimization, learning a local `w . x + b` surface. Optional `decay` for
+    ///   concept drift. Recommended for low-depth trees (depth 2--4).
     /// - [`MLP`](LeafModelType::MLP): single hidden layer neural network per leaf.
+    ///   Optional `decay` for concept drift.
+    /// - [`Adaptive`](LeafModelType::Adaptive): starts as closed-form, auto-promotes
+    ///   to a more complex model when the Hoeffding bound (using [`delta`](Self::delta))
+    ///   confirms it is statistically superior. No arbitrary thresholds.
     pub leaf_model_type: LeafModelType,
 }
 
@@ -272,8 +276,11 @@ impl TreeConfig {
     /// Set the leaf prediction model type.
     ///
     /// [`LeafModelType::Linear`] is recommended for low-depth configurations
-    /// (depth 2–4) where per-leaf linear models significantly reduce
+    /// (depth 2--4) where per-leaf linear models significantly reduce
     /// approximation error compared to constant leaves.
+    ///
+    /// [`LeafModelType::Adaptive`] automatically selects between closed-form and
+    /// a trainable model per leaf, using the Hoeffding bound for promotion.
     #[inline]
     pub fn leaf_model_type(mut self, lmt: LeafModelType) -> Self {
         self.leaf_model_type = lmt;
