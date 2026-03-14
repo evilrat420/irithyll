@@ -1589,7 +1589,8 @@ mod tests {
             .max_depth(2) // low depth -- linear leaves should shine
             .n_bins(16)
             .leaf_model_type(crate::tree::leaf_model::LeafModelType::Linear {
-                learning_rate: 0.01,
+                learning_rate: 0.1, // higher base rate -- AdaGrad self-regulates
+                decay: None,
             })
             .build()
             .unwrap()
@@ -1670,7 +1671,8 @@ mod tests {
             .n_bins(16)
             .seed(0xDEAD)
             .leaf_model_type(crate::tree::leaf_model::LeafModelType::Linear {
-                learning_rate: 0.01,
+                learning_rate: 0.1, // higher base rate -- AdaGrad self-regulates
+                decay: None,
             })
             .build()
             .unwrap();
@@ -1705,6 +1707,68 @@ mod tests {
         assert!(
             linear_mse < constant_mse,
             "linear leaves MSE ({linear_mse:.4}) should be less than constant ({constant_mse:.4})"
+        );
+    }
+
+    #[test]
+    fn adaptive_leaves_trains_without_panic() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(3)
+            .n_bins(16)
+            .leaf_model_type(crate::tree::leaf_model::LeafModelType::Adaptive {
+                promote_to: Box::new(crate::tree::leaf_model::LeafModelType::Linear {
+                    learning_rate: 0.1,
+                    decay: None,
+                }),
+            })
+            .build()
+            .unwrap();
+
+        let mut model = SGBT::new(config);
+        let mut rng = 42u64;
+        for _ in 0..500 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            model.train_one(&Sample::new(vec![x1, x2], y));
+        }
+        let pred = model.predict(&[0.5, -0.3]);
+        assert!(
+            pred.is_finite(),
+            "adaptive leaf prediction should be finite, got {pred}"
+        );
+    }
+
+    #[test]
+    fn linear_leaves_with_decay_trains_without_panic() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(3)
+            .n_bins(16)
+            .leaf_model_type(crate::tree::leaf_model::LeafModelType::Linear {
+                learning_rate: 0.1,
+                decay: Some(0.995),
+            })
+            .build()
+            .unwrap();
+
+        let mut model = SGBT::new(config);
+        let mut rng = 42u64;
+        for _ in 0..500 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            model.train_one(&Sample::new(vec![x1, x2], y));
+        }
+        let pred = model.predict(&[0.5, -0.3]);
+        assert!(
+            pred.is_finite(),
+            "decay leaf prediction should be finite, got {pred}"
         );
     }
 }

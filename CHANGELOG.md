@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.0] - 2026-03-14
+
+### Added
+
+- **Adaptive leaf promotion** -- leaves start as constant (zero overhead) and
+  auto-promote to a trainable model when the Hoeffding bound confirms it is
+  statistically superior. Uses the tree's existing `delta` parameter -- no
+  arbitrary thresholds. New `LeafModelType::Adaptive { promote_to }` variant.
+- **AdaGrad optimization for linear leaves** -- per-weight squared gradient
+  accumulators give each feature its own adaptive learning rate. Features at
+  different scales converge at their natural rates without manual tuning.
+- **Exponential forgetting** -- optional `decay` parameter on `Linear` and `MLP`
+  leaf models. Applies exponential weight decay before each update, giving the
+  model a finite memory horizon for non-stationary streams.
+- **Warm-start on split** -- new `LeafModel::clone_warm()` trait method. When a
+  leaf splits, child leaves inherit the parent's learned weights (resetting
+  optimizer state), converging faster than starting from scratch.
+- Integration tests for adaptive leaves, decay leaves, warm-start cloning.
+
+### Changed
+
+- `LeafModelType::Linear` and `LeafModelType::MLP` now include an optional
+  `decay: Option<f64>` field (serde-defaulted to `None`). Existing configs
+  that omit `decay` deserialize correctly.
+- `LeafModelType::create()` now takes an additional `delta: f64` parameter
+  for adaptive leaf construction.
+- Tree cloning now uses `clone_warm()` instead of `clone_fresh()`, preserving
+  learned leaf model weights across clone operations.
+- Child leaves created during splits warm-start from the parent's model
+  instead of initializing from scratch.
+
 ## [6.4.0] - 2026-03-14
 
 ### Added

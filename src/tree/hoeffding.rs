@@ -102,7 +102,7 @@ impl Clone for LeafState {
             clip_grad_mean: self.clip_grad_mean,
             clip_grad_m2: self.clip_grad_m2,
             clip_grad_count: self.clip_grad_count,
-            leaf_model: self.leaf_model.as_ref().map(|m| m.clone_fresh()),
+            leaf_model: self.leaf_model.as_ref().map(|m| m.clone_warm()),
         }
     }
 }
@@ -278,7 +278,7 @@ impl HoeffdingTree {
         let mut leaf_states = vec![None; root.0 as usize + 1];
         let root_model = match config.leaf_model_type {
             LeafModelType::ClosedForm => None,
-            _ => Some(config.leaf_model_type.create(config.seed)),
+            _ => Some(config.leaf_model_type.create(config.seed, config.delta)),
         };
         leaf_states[root.0 as usize] = Some(LeafState {
             histograms: None,
@@ -320,7 +320,7 @@ impl HoeffdingTree {
             _ => Some(
                 self.config
                     .leaf_model_type
-                    .create(self.config.seed ^ (node.0 as u64)),
+                    .create(self.config.seed ^ (node.0 as u64), self.config.delta),
             ),
         }
     }
@@ -855,8 +855,12 @@ impl HoeffdingTree {
                 let child_binners_l = make_binners(nf, ft);
                 let child_binners_r = make_binners(nf, ft);
 
-                let left_model = self.make_leaf_model(left_id);
-                let right_model = self.make_leaf_model(right_id);
+                // Warm-start children from parent's learned leaf model.
+                // If parent has a model, children inherit its weights (resetting
+                // optimizer state). If parent has no model (ClosedForm), children
+                // also get None -- the fast path stays fast.
+                let left_model = parent.leaf_model.as_ref().map(|m| m.clone_warm());
+                let right_model = parent.leaf_model.as_ref().map(|m| m.clone_warm());
 
                 let left_state = LeafState {
                     histograms: Some(left_hists),
@@ -890,10 +894,10 @@ impl HoeffdingTree {
                 // Parent didn't have histograms (shouldn't happen if bins_ready).
                 let ft = self.config.feature_types.as_deref();
                 let mut ls = LeafState::new_with_types(nf, ft);
-                ls.leaf_model = self.make_leaf_model(left_id);
+                ls.leaf_model = parent.leaf_model.as_ref().map(|m| m.clone_warm());
                 self.leaf_states[left_id.0 as usize] = Some(ls);
                 let mut rs = LeafState::new_with_types(nf, ft);
-                rs.leaf_model = self.make_leaf_model(right_id);
+                rs.leaf_model = parent.leaf_model.as_ref().map(|m| m.clone_warm());
                 self.leaf_states[right_id.0 as usize] = Some(rs);
             }
         } else {

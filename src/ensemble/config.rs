@@ -322,10 +322,13 @@ pub struct SGBTConfig {
     ///
     /// Controls how each leaf computes its prediction:
     /// - [`ClosedForm`](LeafModelType::ClosedForm) (default): constant leaf weight.
-    /// - [`Linear`](LeafModelType::Linear): per-leaf online ridge regression.
-    ///   Recommended for low-depth trees (depth 2–4) where constant leaves are
-    ///   too coarse -- each leaf learns a local linear surface `w · x + b`.
+    /// - [`Linear`](LeafModelType::Linear): per-leaf online ridge regression with
+    ///   AdaGrad optimization. Optional `decay` for concept drift. Recommended for
+    ///   low-depth trees (depth 2--4).
     /// - [`MLP`](LeafModelType::MLP): per-leaf single-hidden-layer neural network.
+    ///   Optional `decay` for concept drift.
+    /// - [`Adaptive`](LeafModelType::Adaptive): starts as closed-form, auto-promotes
+    ///   when the Hoeffding bound confirms a more complex model is better.
     ///
     /// Default: [`ClosedForm`](LeafModelType::ClosedForm).
     #[serde(default)]
@@ -604,7 +607,10 @@ impl SGBTConfigBuilder {
     /// Set the leaf prediction model type.
     ///
     /// [`LeafModelType::Linear`] is recommended for low-depth configurations
-    /// (depth 2–4) where per-leaf linear models reduce approximation error.
+    /// (depth 2--4) where per-leaf linear models reduce approximation error.
+    ///
+    /// [`LeafModelType::Adaptive`] automatically selects between closed-form and
+    /// a trainable model per leaf, using the Hoeffding bound for promotion.
     pub fn leaf_model_type(mut self, lmt: LeafModelType) -> Self {
         self.config.leaf_model_type = lmt;
         self
