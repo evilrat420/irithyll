@@ -1589,8 +1589,9 @@ mod tests {
             .max_depth(2) // low depth -- linear leaves should shine
             .n_bins(16)
             .leaf_model_type(crate::tree::leaf_model::LeafModelType::Linear {
-                learning_rate: 0.1, // higher base rate -- AdaGrad self-regulates
+                learning_rate: 0.1,
                 decay: None,
+                use_adagrad: false,
             })
             .build()
             .unwrap()
@@ -1671,8 +1672,9 @@ mod tests {
             .n_bins(16)
             .seed(0xDEAD)
             .leaf_model_type(crate::tree::leaf_model::LeafModelType::Linear {
-                learning_rate: 0.1, // higher base rate -- AdaGrad self-regulates
+                learning_rate: 0.1,
                 decay: None,
+                use_adagrad: false,
             })
             .build()
             .unwrap();
@@ -1722,6 +1724,7 @@ mod tests {
                 promote_to: Box::new(crate::tree::leaf_model::LeafModelType::Linear {
                     learning_rate: 0.1,
                     decay: None,
+                    use_adagrad: false,
                 }),
             })
             .build()
@@ -1753,6 +1756,7 @@ mod tests {
             .leaf_model_type(crate::tree::leaf_model::LeafModelType::Linear {
                 learning_rate: 0.1,
                 decay: Some(0.995),
+                use_adagrad: false,
             })
             .build()
             .unwrap();

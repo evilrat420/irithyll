@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   auto-promote to a trainable model when the Hoeffding bound confirms it is
   statistically superior. Uses the tree's existing `delta` parameter -- no
   arbitrary thresholds. New `LeafModelType::Adaptive { promote_to }` variant.
-- **AdaGrad optimization for linear leaves** -- per-weight squared gradient
-  accumulators give each feature its own adaptive learning rate. Features at
-  different scales converge at their natural rates without manual tuning.
+- **Optional AdaGrad optimization for linear leaves** -- `use_adagrad: true`
+  enables per-weight squared gradient accumulators, giving each feature its
+  own adaptive learning rate. Default is `false` (plain Newton-scaled SGD).
 - **Exponential forgetting** -- optional `decay` parameter on `Linear` and `MLP`
   leaf models. Applies exponential weight decay before each update, giving the
   model a finite memory horizon for non-stationary streams.
@@ -26,9 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- `LeafModelType::Linear` and `LeafModelType::MLP` now include an optional
-  `decay: Option<f64>` field (serde-defaulted to `None`). Existing configs
-  that omit `decay` deserialize correctly.
+- `LeafModelType::Linear` now includes `decay: Option<f64>` and
+  `use_adagrad: bool` fields (both serde-defaulted). `LeafModelType::MLP`
+  includes `decay: Option<f64>`. Existing configs deserialize correctly.
 - `LeafModelType::create()` now takes an additional `delta: f64` parameter
   for adaptive leaf construction.
 - Tree cloning now uses `clone_warm()` instead of `clone_fresh()`, preserving

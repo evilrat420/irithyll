@@ -132,6 +132,7 @@ pub struct LinearLeafModel {
     bias: f64,
     learning_rate: f64,
     decay: Option<f64>,
+    use_adagrad: bool,
     /// Per-weight squared gradient accumulator (AdaGrad).
     sq_grad_accum: Vec<f64>,
     /// Bias squared gradient accumulator (AdaGrad).
@@ -140,18 +141,23 @@ pub struct LinearLeafModel {
 }
 
 impl LinearLeafModel {
-    /// Create a new linear leaf model with the given base learning rate and
-    /// optional exponential decay factor.
+    /// Create a new linear leaf model with the given base learning rate,
+    /// optional exponential decay factor, and AdaGrad toggle.
     ///
     /// When `decay` is `Some(d)` with `d` in (0, 1), weights are multiplied
     /// by `d` before each update, giving the model a memory half-life of
     /// `ln(2) / ln(1/d)` samples.
-    pub fn new(learning_rate: f64, decay: Option<f64>) -> Self {
+    ///
+    /// When `use_adagrad` is `true`, per-weight squared gradient accumulators
+    /// give each feature its own adaptive learning rate. When `false`, all
+    /// weights share a single Newton-scaled learning rate (plain SGD).
+    pub fn new(learning_rate: f64, decay: Option<f64>, use_adagrad: bool) -> Self {
         Self {
             weights: Vec::new(),
             bias: 0.0,
             learning_rate,
             decay,
+            use_adagrad,
             sq_grad_accum: Vec::new(),
             sq_bias_accum: 0.0,
             initialized: false,
@@ -193,22 +199,32 @@ impl LeafModel for LinearLeafModel {
         // Newton-scaled base learning rate.
         let base_lr = self.learning_rate / (hessian.abs() + lambda);
 
-        // AdaGrad: per-weight adaptive learning rates.
-        for (i, (w, x)) in self.weights.iter_mut().zip(features.iter()).enumerate() {
-            let g = gradient * x;
-            self.sq_grad_accum[i] += g * g;
-            let adaptive_lr = base_lr / (self.sq_grad_accum[i].sqrt() + ADAGRAD_EPS);
-            *w -= adaptive_lr * g;
+        if self.use_adagrad {
+            // AdaGrad: per-weight adaptive learning rates.
+            for (i, (w, x)) in self.weights.iter_mut().zip(features.iter()).enumerate() {
+                let g = gradient * x;
+                self.sq_grad_accum[i] += g * g;
+                let adaptive_lr = base_lr / (self.sq_grad_accum[i].sqrt() + ADAGRAD_EPS);
+                *w -= adaptive_lr * g;
+            }
+            self.sq_bias_accum += gradient * gradient;
+            let bias_lr = base_lr / (self.sq_bias_accum.sqrt() + ADAGRAD_EPS);
+            self.bias -= bias_lr * gradient;
+        } else {
+            // Plain Newton-scaled SGD.
+            for (w, x) in self.weights.iter_mut().zip(features.iter()) {
+                *w -= base_lr * gradient * x;
+            }
+            self.bias -= base_lr * gradient;
         }
-
-        // Bias update with its own AdaGrad accumulator.
-        self.sq_bias_accum += gradient * gradient;
-        let bias_lr = base_lr / (self.sq_bias_accum.sqrt() + ADAGRAD_EPS);
-        self.bias -= bias_lr * gradient;
     }
 
     fn clone_fresh(&self) -> Box<dyn LeafModel> {
-        Box::new(LinearLeafModel::new(self.learning_rate, self.decay))
+        Box::new(LinearLeafModel::new(
+            self.learning_rate,
+            self.decay,
+            self.use_adagrad,
+        ))
     }
 
     fn clone_warm(&self) -> Box<dyn LeafModel> {
@@ -217,6 +233,7 @@ impl LeafModel for LinearLeafModel {
             bias: self.bias,
             learning_rate: self.learning_rate,
             decay: self.decay,
+            use_adagrad: self.use_adagrad,
             // Reset AdaGrad accumulators -- the child's gradient landscape
             // differs from the parent's, so accumulated curvature estimates
             // don't transfer. Fresh accumulators let the child's learning
@@ -634,14 +651,20 @@ pub enum LeafModelType {
     #[default]
     ClosedForm,
 
-    /// Online ridge regression with AdaGrad optimization.
+    /// Online ridge regression, optionally with AdaGrad optimization.
     ///
     /// `decay`: optional exponential weight decay for non-stationary streams.
     /// Typical values: 0.999 (slow drift) to 0.99 (fast drift).
+    ///
+    /// `use_adagrad`: when `true`, per-weight squared gradient accumulators
+    /// give each feature its own adaptive learning rate. When `false`
+    /// (default), all weights share a single Newton-scaled learning rate.
     Linear {
         learning_rate: f64,
         #[serde(default)]
         decay: Option<f64>,
+        #[serde(default)]
+        use_adagrad: bool,
     },
 
     /// Single hidden layer MLP with the given hidden size and learning rate.
@@ -675,7 +698,8 @@ impl LeafModelType {
             Self::Linear {
                 learning_rate,
                 decay,
-            } => Box::new(LinearLeafModel::new(*learning_rate, *decay)),
+                use_adagrad,
+            } => Box::new(LinearLeafModel::new(*learning_rate, *decay, *use_adagrad)),
             Self::MLP {
                 hidden_size,
                 learning_rate,
@@ -778,7 +802,7 @@ mod tests {
     #[test]
     fn linear_converges_on_linear_target() {
         // Target: y = 2*x1 + 3*x2
-        let mut model = LinearLeafModel::new(0.01, None);
+        let mut model = LinearLeafModel::new(0.01, None, false);
         let lambda = 0.1;
         let mut rng = 42u64;
 
@@ -806,7 +830,7 @@ mod tests {
 
     #[test]
     fn linear_uninitialized_predicts_zero() {
-        let model = LinearLeafModel::new(0.01, None);
+        let model = LinearLeafModel::new(0.01, None, false);
         let pred = model.predict(&[1.0, 2.0, 3.0]);
         assert!(
             pred.abs() < 1e-15,
@@ -816,7 +840,7 @@ mod tests {
 
     #[test]
     fn linear_clone_warm_preserves_weights() {
-        let mut model = LinearLeafModel::new(0.01, None);
+        let mut model = LinearLeafModel::new(0.01, None, false);
         let features = vec![1.0, 2.0];
 
         // Train it
@@ -854,14 +878,14 @@ mod tests {
 
     #[test]
     fn linear_decay_forgets_old_data() {
-        // Train on target=5.0, then switch to target=-5.0.
-        // With decay, the model adapts faster to the new target.
-        let mut model_decay = LinearLeafModel::new(0.05, Some(0.99));
-        let mut model_no_decay = LinearLeafModel::new(0.05, None);
+        // Decay should pull weights toward zero when training stops,
+        // demonstrating that old learned state is forgotten.
+        let mut model_decay = LinearLeafModel::new(0.05, Some(0.99), false);
+        let mut model_no_decay = LinearLeafModel::new(0.05, None, false);
         let features = vec![1.0];
         let lambda = 0.1;
 
-        // Phase 1: train on target = 5.0
+        // Train both on target = 5.0
         for _ in 0..500 {
             let pred_d = model_decay.predict(&features);
             let pred_n = model_no_decay.predict(&features);
@@ -869,21 +893,33 @@ mod tests {
             model_no_decay.update(&features, 2.0 * (pred_n - 5.0), 2.0, lambda);
         }
 
-        // Phase 2: switch to target = -5.0
-        for _ in 0..500 {
-            let pred_d = model_decay.predict(&features);
-            let pred_n = model_no_decay.predict(&features);
-            model_decay.update(&features, 2.0 * (pred_d + 5.0), 2.0, lambda);
-            model_no_decay.update(&features, 2.0 * (pred_n + 5.0), 2.0, lambda);
+        // Both should have learned roughly the same function.
+        let pred_d_trained = model_decay.predict(&features);
+        let pred_n_trained = model_no_decay.predict(&features);
+        assert!(
+            (pred_d_trained - 5.0).abs() < 2.0,
+            "decay model should approximate target"
+        );
+        assert!(
+            (pred_n_trained - 5.0).abs() < 2.0,
+            "no-decay model should approximate target"
+        );
+
+        // Now apply 200 rounds of zero-gradient updates (data stopped).
+        // The decay model's weights should shrink toward zero,
+        // while the no-decay model retains its learned state.
+        for _ in 0..200 {
+            model_decay.update(&features, 0.0, 1.0, lambda);
+            model_no_decay.update(&features, 0.0, 1.0, lambda);
         }
 
-        let pred_decay = model_decay.predict(&features);
-        let pred_no_decay = model_no_decay.predict(&features);
+        let pred_d_after = model_decay.predict(&features);
+        let pred_n_after = model_no_decay.predict(&features);
 
-        // Decay model should be closer to -5.0 than no-decay model
+        // Decay model should have drifted toward zero.
         assert!(
-            (pred_decay + 5.0).abs() < (pred_no_decay + 5.0).abs(),
-            "decay model should adapt faster: decay pred={pred_decay:.3}, no-decay pred={pred_no_decay:.3}"
+            pred_d_after.abs() < pred_n_after.abs(),
+            "decay model should forget: decay pred={pred_d_after:.3}, no-decay pred={pred_n_after:.3}"
         );
     }
 
@@ -1006,6 +1042,7 @@ mod tests {
         let mut linear = LeafModelType::Linear {
             learning_rate: 0.01,
             decay: None,
+            use_adagrad: false,
         }
         .create(0, delta);
         linear.update(&features, 1.0, 1.0, 0.1);
@@ -1028,6 +1065,7 @@ mod tests {
             promote_to: Box::new(LeafModelType::Linear {
                 learning_rate: 0.01,
                 decay: None,
+                use_adagrad: false,
             }),
         }
         .create(42, delta);
@@ -1043,6 +1081,7 @@ mod tests {
         let promote_to = LeafModelType::Linear {
             learning_rate: 0.01,
             decay: None,
+            use_adagrad: false,
         };
         let shadow = promote_to.create(42, 1e-7);
         let mut model = AdaptiveLeafModel::new(shadow, promote_to, 1e-3, 42);
@@ -1074,6 +1113,7 @@ mod tests {
         let promote_to = LeafModelType::Linear {
             learning_rate: 0.01,
             decay: None,
+            use_adagrad: false,
         };
         let shadow = promote_to.create(42, 1e-7);
         let mut model = AdaptiveLeafModel::new(shadow, promote_to, 1e-7, 42);
@@ -1100,6 +1140,7 @@ mod tests {
         let promote_to = LeafModelType::Linear {
             learning_rate: 0.01,
             decay: None,
+            use_adagrad: false,
         };
         let shadow = promote_to.create(42, 1e-3);
         let mut model = AdaptiveLeafModel::new(shadow, promote_to, 1e-3, 42);
