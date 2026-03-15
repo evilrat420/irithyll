@@ -47,6 +47,29 @@ pub enum FeatureType {
 }
 
 // ---------------------------------------------------------------------------
+// ScaleMode
+// ---------------------------------------------------------------------------
+
+/// How [`DistributionalSGBT`](super::distributional::DistributionalSGBT)
+/// estimates uncertainty (σ).
+///
+/// - **`Empirical`** (default): tracks an EWMA of squared prediction errors.
+///   `σ = sqrt(ewma_sq_err)`.  Always calibrated, zero tuning, O(1) compute.
+///   Use this when σ drives learning-rate modulation (σ high → learn faster).
+///
+/// - **`TreeChain`**: trains a full second ensemble of Hoeffding trees to predict
+///   log(σ) from features (NGBoost-style dual chain).  Gives *feature-conditional*
+///   uncertainty but requires strong signal in the scale gradients.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ScaleMode {
+    /// EWMA of squared prediction errors — always calibrated, O(1).
+    #[default]
+    Empirical,
+    /// Full Hoeffding-tree ensemble for feature-conditional log(σ) prediction.
+    TreeChain,
+}
+
+// ---------------------------------------------------------------------------
 // DriftDetectorType
 // ---------------------------------------------------------------------------
 
@@ -318,6 +341,29 @@ pub struct SGBTConfig {
     #[serde(default)]
     pub uncertainty_modulated_lr: bool,
 
+    /// How the scale (σ) is estimated in [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
+    ///
+    /// - [`Empirical`](ScaleMode::Empirical) (default): EWMA of squared prediction
+    ///   errors.  `σ = sqrt(ewma_sq_err)`.  Always calibrated, zero tuning, O(1).
+    /// - [`TreeChain`](ScaleMode::TreeChain): full dual-chain NGBoost with a
+    ///   separate tree ensemble predicting log(σ) from features.
+    ///
+    /// For σ-modulated learning (`uncertainty_modulated_lr = true`), `Empirical`
+    /// is strongly recommended — scale tree gradients are inherently weak and
+    /// the trees often fail to split.
+    #[serde(default)]
+    pub scale_mode: ScaleMode,
+
+    /// EWMA smoothing factor for empirical σ estimation.
+    ///
+    /// Controls the adaptation speed of `σ = sqrt(ewma_sq_err)` when
+    /// [`scale_mode`](Self::scale_mode) is [`Empirical`](ScaleMode::Empirical).
+    /// Higher values react faster to regime changes but are noisier.
+    ///
+    /// Default: `0.01` (~100-sample effective window).
+    #[serde(default = "default_empirical_sigma_alpha")]
+    pub empirical_sigma_alpha: f64,
+
     /// Leaf prediction model type.
     ///
     /// Controls how each leaf computes its prediction:
@@ -333,6 +379,10 @@ pub struct SGBTConfig {
     /// Default: [`ClosedForm`](LeafModelType::ClosedForm).
     #[serde(default)]
     pub leaf_model_type: LeafModelType,
+}
+
+fn default_empirical_sigma_alpha() -> f64 {
+    0.01
 }
 
 fn default_quality_prune_threshold() -> f64 {
@@ -371,6 +421,8 @@ impl Default for SGBTConfig {
             quality_prune_patience: 500,
             error_weight_alpha: None,
             uncertainty_modulated_lr: false,
+            scale_mode: ScaleMode::default(),
+            empirical_sigma_alpha: 0.01,
             leaf_model_type: LeafModelType::default(),
         }
     }
@@ -599,8 +651,28 @@ impl SGBTConfigBuilder {
     /// Scales the location (μ) learning rate by `current_sigma / rolling_sigma_mean`,
     /// so the model adapts faster during high-uncertainty regimes and conserves
     /// during stable periods. Only affects [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
+    ///
+    /// By default uses empirical σ (EWMA of squared errors).  Set
+    /// [`scale_mode(ScaleMode::TreeChain)`](Self::scale_mode) for feature-conditional σ.
     pub fn uncertainty_modulated_lr(mut self, enabled: bool) -> Self {
         self.config.uncertainty_modulated_lr = enabled;
+        self
+    }
+
+    /// Set the scale estimation mode for [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
+    ///
+    /// - [`Empirical`](ScaleMode::Empirical): EWMA of squared prediction errors (default, recommended).
+    /// - [`TreeChain`](ScaleMode::TreeChain): dual-chain NGBoost with scale tree ensemble.
+    pub fn scale_mode(mut self, mode: ScaleMode) -> Self {
+        self.config.scale_mode = mode;
+        self
+    }
+
+    /// EWMA alpha for empirical σ. Controls adaptation speed. Default `0.01`.
+    ///
+    /// Only used when `scale_mode` is [`Empirical`](ScaleMode::Empirical).
+    pub fn empirical_sigma_alpha(mut self, alpha: f64) -> Self {
+        self.config.empirical_sigma_alpha = alpha;
         self
     }
 

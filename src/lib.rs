@@ -110,7 +110,7 @@ pub mod onnx_export;
 pub use drift::{DriftDetector, DriftSignal};
 pub use ensemble::adaptive::AdaptiveSGBT;
 pub use ensemble::bagged::BaggedSGBT;
-pub use ensemble::config::{FeatureType, SGBTConfig};
+pub use ensemble::config::{FeatureType, SGBTConfig, ScaleMode};
 pub use ensemble::distributional::{
     DecomposedPrediction, DistributionalSGBT, GaussianPrediction, ModelDiagnostics, TreeDiagnostic,
 };

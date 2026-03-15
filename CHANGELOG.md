@@ -5,10 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [6.5.2] - 2026-03-15
+## [7.0.0] - 2026-03-15
 
 ### Added
 
+- **Empirical σ estimation** (`ScaleMode::Empirical`, now default) -- replaces
+  the scale tree chain with an EWMA of squared prediction errors:
+  `σ = sqrt(ewma_sq_err)`.  Always calibrated, zero tuning, O(1) compute.
+  The scale tree chain was frozen in practice (scale gradients too weak for
+  Hoeffding trees to split), making σ-modulated learning a no-op.  Empirical σ
+  is self-calibrating by definition: high recent errors → σ large → location LR
+  scales up → model corrects faster.
+- `ScaleMode` enum (`Empirical` / `TreeChain`) on `SGBTConfig` for choosing
+  the σ estimation strategy.  `ScaleMode::TreeChain` preserves the full
+  dual-chain NGBoost behavior for users who need feature-conditional uncertainty.
+- `empirical_sigma_alpha` config parameter (default `0.01`) -- controls EWMA
+  adaptation speed for empirical σ.
+- `empirical_sigma()` method on `DistributionalSGBT` -- returns current σ.
+- `scale_mode()` method on `DistributionalSGBT`.
+- `ModelDiagnostics` now includes `empirical_sigma`, `scale_mode`,
+  `scale_trees_active`, and separate `location_trees` / `scale_trees` vectors
+  for independent inspection.
+- `ScaleMode` re-exported at crate root.
+- ASCII art header in README.
 - **DistributionalSGBT diagnostics** -- three new diagnostic capabilities:
   - `ModelDiagnostics` struct with per-tree summaries (leaf count, max depth,
     samples seen, leaf weight statistics, split features) and global feature
@@ -21,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     location/scale views.
 - `TreeDiagnostic`, `ModelDiagnostics`, `DecomposedPrediction` re-exported at
   crate root.
+
+### Changed
+
+- **BREAKING:** `DistributionalSGBT` defaults to empirical σ (`ScaleMode::Empirical`).
+  Users who relied on the dual-chain behavior must explicitly set
+  `scale_mode(ScaleMode::TreeChain)` in their config builder.
+- `ModelDiagnostics` struct has new fields: `location_trees`, `scale_trees`,
+  `empirical_sigma`, `scale_mode`, `scale_trees_active`.
 
 ## [6.5.1] - 2026-03-15
 

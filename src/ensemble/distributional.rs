@@ -1,29 +1,33 @@
-//! NGBoost-style distributional SGBT -- outputs Gaussian N(μ, σ²) instead of a point estimate.
+//! Distributional SGBT -- outputs Gaussian N(μ, σ²) instead of a point estimate.
 //!
-//! [`DistributionalSGBT`] maintains two independent ensembles of streaming trees:
-//! one targeting the location (mean) and one targeting the scale (log-sigma).
-//! The combined output is a full predictive Gaussian distribution, enabling
-//! uncertainty quantification per prediction.
+//! [`DistributionalSGBT`] supports two scale estimation modes via
+//! [`ScaleMode`](crate::ensemble::config::ScaleMode):
 //!
-//! # Gradient Derivation
+//! ## Empirical σ (default)
 //!
-//! The negative log-likelihood of N(μ, σ²) decomposes into two sets of gradients:
+//! Tracks an EWMA of squared prediction errors:
 //!
-//! **Location (w.r.t. μ):** standard squared-loss gradients
-//! - gradient = μ - y
-//! - hessian = 1.0
+//! ```text
+//! err = target - mu
+//! ewma_sq_err = alpha * err² + (1 - alpha) * ewma_sq_err
+//! sigma = sqrt(ewma_sq_err)
+//! ```
 //!
-//! **Scale (w.r.t. log σ):** where z = (y - μ) / σ
-//! - gradient = 1.0 - z²
-//! - hessian = max(2z², 0.01)
+//! Always calibrated (σ literally *is* recent error magnitude), zero tuning,
+//! O(1) memory and compute.  When `uncertainty_modulated_lr` is enabled,
+//! high recent errors → σ large → location LR scales up → faster correction.
 //!
-//! The scale is parameterized in log-space to guarantee σ > 0.
+//! ## Tree chain (NGBoost-style)
+//!
+//! Maintains two independent tree ensembles: one for location (μ), one for
+//! scale (log σ).  Gives feature-conditional uncertainty but requires strong
+//! scale-gradient signal for the trees to split.
 //!
 //! # References
 //!
 //! Duan et al. (2020). "NGBoost: Natural Gradient Boosting for Probabilistic Prediction."
 
-use crate::ensemble::config::SGBTConfig;
+use crate::ensemble::config::{SGBTConfig, ScaleMode};
 use crate::ensemble::step::BoostingStep;
 use crate::sample::{Observation, SampleRef};
 use crate::tree::builder::TreeConfig;
@@ -76,19 +80,28 @@ pub struct TreeDiagnostic {
 
 /// Full model diagnostics for [`DistributionalSGBT`].
 ///
-/// Contains per-tree summaries, feature usage, and base predictions.
-/// The `trees` vector contains location trees first (indices `0..n_steps`),
-/// then scale trees (`n_steps..2*n_steps`).
+/// Contains per-tree summaries, feature usage, base predictions, and
+/// empirical σ state.
 #[derive(Debug, Clone)]
 pub struct ModelDiagnostics {
-    /// Per-tree diagnostic summaries.
+    /// Per-tree diagnostic summaries (location trees first, then scale trees).
     pub trees: Vec<TreeDiagnostic>,
+    /// Location trees only (view into `trees`).
+    pub location_trees: Vec<TreeDiagnostic>,
+    /// Scale trees only (view into `trees`).
+    pub scale_trees: Vec<TreeDiagnostic>,
     /// How many trees each feature is used in (split count per feature).
     pub feature_split_counts: Vec<usize>,
     /// Base prediction for location (mean).
     pub location_base: f64,
     /// Base prediction for scale (log-sigma).
     pub scale_base: f64,
+    /// Current empirical σ (`sqrt(ewma_sq_err)`), always available.
+    pub empirical_sigma: f64,
+    /// Scale mode in use.
+    pub scale_mode: ScaleMode,
+    /// Number of scale trees that actually split (>1 leaf). 0 = frozen chain.
+    pub scale_trees_active: usize,
 }
 
 /// Decomposed prediction showing each tree's contribution.
@@ -153,7 +166,7 @@ pub struct DistributionalSGBT {
     config: SGBTConfig,
     /// Location (mean) boosting steps.
     location_steps: Vec<BoostingStep>,
-    /// Scale (log-sigma) boosting steps.
+    /// Scale (log-sigma) boosting steps (only used in `TreeChain` mode).
     scale_steps: Vec<BoostingStep>,
     /// Base prediction for location (mean of initial targets).
     location_base: f64,
@@ -176,6 +189,15 @@ pub struct DistributionalSGBT {
     /// Updated with alpha = 0.001 (slow adaptation) after each training step.
     /// Initialized from the standard deviation of the initial target collection.
     rolling_sigma_mean: f64,
+    /// Scale estimation mode: Empirical (default) or TreeChain.
+    scale_mode: ScaleMode,
+    /// EWMA of squared prediction errors (empirical σ mode).
+    ///
+    /// `sigma = sqrt(ewma_sq_err)`. Updated every training step with
+    /// `ewma_sq_err = alpha * err² + (1 - alpha) * ewma_sq_err`.
+    ewma_sq_err: f64,
+    /// EWMA alpha for empirical σ.
+    empirical_sigma_alpha: f64,
 }
 
 impl Clone for DistributionalSGBT {
@@ -193,6 +215,9 @@ impl Clone for DistributionalSGBT {
             rng_state: self.rng_state,
             uncertainty_modulated_lr: self.uncertainty_modulated_lr,
             rolling_sigma_mean: self.rolling_sigma_mean,
+            scale_mode: self.scale_mode,
+            ewma_sq_err: self.ewma_sq_err,
+            empirical_sigma_alpha: self.empirical_sigma_alpha,
         }
     }
 }
@@ -203,8 +228,16 @@ impl std::fmt::Debug for DistributionalSGBT {
         s.field("n_steps", &self.location_steps.len())
             .field("samples_seen", &self.samples_seen)
             .field("location_base", &self.location_base)
-            .field("scale_base", &self.scale_base)
+            .field("scale_mode", &self.scale_mode)
             .field("base_initialized", &self.base_initialized);
+        match self.scale_mode {
+            ScaleMode::Empirical => {
+                s.field("empirical_sigma", &self.ewma_sq_err.sqrt());
+            }
+            ScaleMode::TreeChain => {
+                s.field("scale_base", &self.scale_base);
+            }
+        }
         if self.uncertainty_modulated_lr {
             s.field("rolling_sigma_mean", &self.rolling_sigma_mean);
         }
@@ -215,8 +248,9 @@ impl std::fmt::Debug for DistributionalSGBT {
 impl DistributionalSGBT {
     /// Create a new distributional SGBT with the given configuration.
     ///
-    /// Both location and scale ensembles use the same tree configuration
-    /// but with different seeds to ensure independence.
+    /// When `scale_mode` is `Empirical` (default), scale trees are still allocated
+    /// but never trained — only the EWMA error tracker produces σ.  When
+    /// `scale_mode` is `TreeChain`, both location and scale ensembles are active.
     pub fn new(config: SGBTConfig) -> Self {
         let leaf_decay_alpha = config
             .leaf_half_life
@@ -249,7 +283,7 @@ impl DistributionalSGBT {
             })
             .collect();
 
-        // Scale ensemble (seed offset: 0xSCALE)
+        // Scale ensemble (seed offset: 0xSCALE) -- only trained in TreeChain mode
         let scale_steps: Vec<BoostingStep> = (0..config.n_steps)
             .map(|i| {
                 let mut tc = tree_config.clone();
@@ -262,6 +296,8 @@ impl DistributionalSGBT {
         let seed = config.seed;
         let initial_target_count = config.initial_target_count;
         let uncertainty_modulated_lr = config.uncertainty_modulated_lr;
+        let scale_mode = config.scale_mode;
+        let empirical_sigma_alpha = config.empirical_sigma_alpha;
         Self {
             config,
             location_steps,
@@ -275,6 +311,9 @@ impl DistributionalSGBT {
             rng_state: seed,
             uncertainty_modulated_lr,
             rolling_sigma_mean: 1.0, // overwritten during base initialization
+            scale_mode,
+            ewma_sq_err: 1.0, // overwritten during base initialization
+            empirical_sigma_alpha,
         }
     }
 
@@ -303,8 +342,9 @@ impl DistributionalSGBT {
                 let initial_std = var.sqrt().max(1e-6);
                 self.scale_base = initial_std.ln();
 
-                // Initialize rolling sigma mean from initial targets std
+                // Initialize rolling sigma mean and ewma from initial targets std
                 self.rolling_sigma_mean = initial_std;
+                self.ewma_sq_err = var.max(1e-12);
 
                 self.base_initialized = true;
                 self.initial_targets.clear();
@@ -313,17 +353,64 @@ impl DistributionalSGBT {
             return;
         }
 
-        // Current predictions
+        match self.scale_mode {
+            ScaleMode::Empirical => self.train_one_empirical(target, features),
+            ScaleMode::TreeChain => self.train_one_tree_chain(target, features),
+        }
+    }
+
+    /// Empirical-σ training: location trees only, σ from EWMA of squared errors.
+    fn train_one_empirical(&mut self, target: f64, features: &[f64]) {
+        // Current location prediction (before this step's update)
+        let mut mu = self.location_base;
+        for s in 0..self.location_steps.len() {
+            mu += self.config.learning_rate * self.location_steps[s].predict(features);
+        }
+
+        // Empirical sigma from EWMA of squared prediction errors
+        let err = target - mu;
+        let alpha = self.empirical_sigma_alpha;
+        self.ewma_sq_err = (1.0 - alpha) * self.ewma_sq_err + alpha * err * err;
+        let empirical_sigma = self.ewma_sq_err.sqrt().max(1e-8);
+
+        // Compute σ-ratio for uncertainty-modulated learning rate
+        let sigma_ratio = if self.uncertainty_modulated_lr {
+            let ratio = (empirical_sigma / self.rolling_sigma_mean).clamp(0.1, 10.0);
+
+            // Update rolling sigma mean with slow EWMA
+            const SIGMA_EWMA_ALPHA: f64 = 0.001;
+            self.rolling_sigma_mean = (1.0 - SIGMA_EWMA_ALPHA) * self.rolling_sigma_mean
+                + SIGMA_EWMA_ALPHA * empirical_sigma;
+
+            ratio
+        } else {
+            1.0
+        };
+
+        let base_lr = self.config.learning_rate;
+
+        // Train location steps only -- no scale trees needed
+        let mut mu_accum = self.location_base;
+        for s in 0..self.location_steps.len() {
+            let g_mu = mu_accum - target;
+            let h_mu = 1.0;
+            let train_count = self.config.variant.train_count(h_mu, &mut self.rng_state);
+            let loc_pred =
+                self.location_steps[s].train_and_predict(features, g_mu, h_mu, train_count);
+            mu_accum += (base_lr * sigma_ratio) * loc_pred;
+        }
+    }
+
+    /// Tree-chain training: full NGBoost dual-chain with location + scale trees.
+    fn train_one_tree_chain(&mut self, target: f64, features: &[f64]) {
         let mut mu = self.location_base;
         let mut log_sigma = self.scale_base;
 
         // Compute σ-ratio for uncertainty-modulated learning rate.
-        // Only computed once per sample (uses current ensemble σ before the step loop).
         let sigma_ratio = if self.uncertainty_modulated_lr {
             let current_sigma = log_sigma.exp().max(1e-8);
             let ratio = (current_sigma / self.rolling_sigma_mean).clamp(0.1, 10.0);
 
-            // Update rolling sigma mean with slow EWMA (alpha = 0.001)
             const SIGMA_EWMA_ALPHA: f64 = 0.001;
             self.rolling_sigma_mean = (1.0 - SIGMA_EWMA_ALPHA) * self.rolling_sigma_mean
                 + SIGMA_EWMA_ALPHA * current_sigma;
@@ -356,25 +443,38 @@ impl DistributionalSGBT {
             mu += (base_lr * sigma_ratio) * loc_pred;
 
             // Train scale step -- ALWAYS at unmodulated base rate.
-            // Critical: modulating σ's own LR by σ creates a positive feedback loop
-            // (σ high → learn σ faster → σ changes faster → instability).
             let scale_pred =
                 self.scale_steps[s].train_and_predict(features, g_sigma, h_sigma, train_count);
             log_sigma += base_lr * scale_pred;
         }
+
+        // Also update empirical sigma tracker for diagnostics
+        let err = target - mu;
+        let alpha = self.empirical_sigma_alpha;
+        self.ewma_sq_err = (1.0 - alpha) * self.ewma_sq_err + alpha * err * err;
     }
 
     /// Predict the full Gaussian distribution for a feature vector.
     pub fn predict(&self, features: &[f64]) -> GaussianPrediction {
         let mut mu = self.location_base;
-        let mut log_sigma = self.scale_base;
-
         for s in 0..self.location_steps.len() {
             mu += self.config.learning_rate * self.location_steps[s].predict(features);
-            log_sigma += self.config.learning_rate * self.scale_steps[s].predict(features);
         }
 
-        let sigma = log_sigma.exp().max(1e-8);
+        let (sigma, log_sigma) = match self.scale_mode {
+            ScaleMode::Empirical => {
+                let s = self.ewma_sq_err.sqrt().max(1e-8);
+                (s, s.ln())
+            }
+            ScaleMode::TreeChain => {
+                let mut ls = self.scale_base;
+                for s in 0..self.scale_steps.len() {
+                    ls += self.config.learning_rate * self.scale_steps[s].predict(features);
+                }
+                (ls.exp().max(1e-8), ls)
+            }
+        };
+
         GaussianPrediction {
             mu,
             sigma,
@@ -390,9 +490,6 @@ impl DistributionalSGBT {
     /// is enabled.
     ///
     /// When σ-modulation is disabled, `sigma_ratio` is always `1.0`.
-    ///
-    /// Use this to monitor the effective learning rate in real-time and verify
-    /// the model's uncertainty behavior.
     pub fn predict_distributional(&self, features: &[f64]) -> (f64, f64, f64) {
         let pred = self.predict(features);
         let sigma_ratio = if self.uncertainty_modulated_lr {
@@ -401,6 +498,20 @@ impl DistributionalSGBT {
             1.0
         };
         (pred.mu, pred.sigma, sigma_ratio)
+    }
+
+    /// Current empirical sigma (`sqrt(ewma_sq_err)`).
+    ///
+    /// Returns the model's recent error magnitude. Available in both scale modes.
+    #[inline]
+    pub fn empirical_sigma(&self) -> f64 {
+        self.ewma_sq_err.sqrt()
+    }
+
+    /// Current scale mode.
+    #[inline]
+    pub fn scale_mode(&self) -> ScaleMode {
+        self.scale_mode
     }
 
     /// Predict the mean (location parameter) only.
@@ -473,6 +584,7 @@ impl DistributionalSGBT {
         self.samples_seen = 0;
         self.rng_state = self.config.seed;
         self.rolling_sigma_mean = 1.0;
+        self.ewma_sq_err = 1.0;
     }
 
     /// Total samples trained.
@@ -545,18 +657,24 @@ impl DistributionalSGBT {
     ///
     /// The `trees` vector contains location trees first (indices `0..n_steps`),
     /// then scale trees (`n_steps..2*n_steps`).
+    ///
+    /// `scale_trees_active` counts how many scale trees have actually split
+    /// (more than 1 leaf). If this is 0, the scale chain is effectively frozen.
     pub fn diagnostics(&self) -> ModelDiagnostics {
         let n = self.location_steps.len();
         let mut trees = Vec::with_capacity(2 * n);
         let mut feature_split_counts: Vec<usize> = Vec::new();
 
-        for steps in [&self.location_steps, &self.scale_steps] {
+        fn collect_tree_diags(
+            steps: &[BoostingStep],
+            trees: &mut Vec<TreeDiagnostic>,
+            feature_split_counts: &mut Vec<usize>,
+        ) {
             for step in steps {
                 let slot = step.slot();
                 let tree = slot.active_tree();
                 let arena = tree.arena();
 
-                // Leaf weight stats
                 let leaf_values: Vec<f64> = (0..arena.is_leaf.len())
                     .filter(|&i| arena.is_leaf[i])
                     .map(|i| arena.leaf_value[i])
@@ -591,7 +709,6 @@ impl DistributionalSGBT {
                     .map(|(i, _)| i)
                     .collect();
 
-                // Accumulate per-feature split counts (how many trees split on each feature)
                 if !gains.is_empty() {
                     if feature_split_counts.is_empty() {
                         feature_split_counts.resize(gains.len(), 0);
@@ -613,11 +730,23 @@ impl DistributionalSGBT {
             }
         }
 
+        collect_tree_diags(&self.location_steps, &mut trees, &mut feature_split_counts);
+        collect_tree_diags(&self.scale_steps, &mut trees, &mut feature_split_counts);
+
+        let location_trees = trees[..n].to_vec();
+        let scale_trees = trees[n..].to_vec();
+        let scale_trees_active = scale_trees.iter().filter(|t| t.n_leaves > 1).count();
+
         ModelDiagnostics {
             trees,
+            location_trees,
+            scale_trees,
             feature_split_counts,
             location_base: self.location_base,
             scale_base: self.scale_base,
+            empirical_sigma: self.ewma_sq_err.sqrt(),
+            scale_mode: self.scale_mode,
+            scale_trees_active,
         }
     }
 
@@ -629,6 +758,9 @@ impl DistributionalSGBT {
     ///
     /// Summing `location_base + sum(location_contributions)` recovers μ.
     /// Summing `scale_base + sum(scale_contributions)` recovers log(σ).
+    ///
+    /// In `Empirical` scale mode, `scale_base` is `ln(empirical_sigma)` and
+    /// `scale_contributions` are all zero (σ is not tree-derived).
     pub fn predict_decomposed(&self, features: &[f64]) -> DecomposedPrediction {
         let lr = self.config.learning_rate;
         let location: Vec<f64> = self
@@ -636,15 +768,25 @@ impl DistributionalSGBT {
             .iter()
             .map(|s| lr * s.predict(features))
             .collect();
-        let scale: Vec<f64> = self
-            .scale_steps
-            .iter()
-            .map(|s| lr * s.predict(features))
-            .collect();
+
+        let (sb, scale) = match self.scale_mode {
+            ScaleMode::Empirical => {
+                let empirical_sigma = self.ewma_sq_err.sqrt().max(1e-8);
+                (empirical_sigma.ln(), vec![0.0; self.location_steps.len()])
+            }
+            ScaleMode::TreeChain => {
+                let s: Vec<f64> = self
+                    .scale_steps
+                    .iter()
+                    .map(|s| lr * s.predict(features))
+                    .collect();
+                (self.scale_base, s)
+            }
+        };
 
         DecomposedPrediction {
             location_base: self.location_base,
-            scale_base: self.scale_base,
+            scale_base: sb,
             location_contributions: location,
             scale_contributions: scale,
         }
@@ -744,6 +886,7 @@ impl DistributionalSGBT {
             rng_state: self.rng_state,
             uncertainty_modulated_lr: self.uncertainty_modulated_lr,
             rolling_sigma_mean: self.rolling_sigma_mean,
+            ewma_sq_err: self.ewma_sq_err,
         }
     }
 
@@ -817,6 +960,8 @@ impl DistributionalSGBT {
         let location_steps = rebuild_steps(&state.location_steps, 0);
         let scale_steps = rebuild_steps(&state.scale_steps, 0x0005_CA1E_0000_0000);
 
+        let scale_mode = state.config.scale_mode;
+        let empirical_sigma_alpha = state.config.empirical_sigma_alpha;
         Self {
             config: state.config,
             location_steps,
@@ -830,6 +975,9 @@ impl DistributionalSGBT {
             rng_state: state.rng_state,
             uncertainty_modulated_lr: state.uncertainty_modulated_lr,
             rolling_sigma_mean: state.rolling_sigma_mean,
+            scale_mode,
+            ewma_sq_err: state.ewma_sq_err,
+            empirical_sigma_alpha,
         }
     }
 }
@@ -1303,6 +1451,133 @@ mod tests {
                 assert!(v >= 0.0 && v.is_finite());
             }
         }
+    }
+
+    // -- Empirical σ tests --
+
+    #[test]
+    fn empirical_sigma_default_mode() {
+        use crate::ensemble::config::ScaleMode;
+        let config = test_config();
+        let model = DistributionalSGBT::new(config);
+        assert_eq!(model.scale_mode(), ScaleMode::Empirical);
+    }
+
+    #[test]
+    fn empirical_sigma_tracks_errors() {
+        let mut model = DistributionalSGBT::new(test_config());
+
+        // Train on clean linear data
+        for i in 0..200 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + 1.0));
+        }
+
+        let sigma_clean = model.empirical_sigma();
+        assert!(sigma_clean > 0.0, "sigma should be positive");
+        assert!(sigma_clean.is_finite(), "sigma should be finite");
+
+        // Now train on noisy data — sigma should increase
+        let mut rng: u64 = 42;
+        for i in 200..400 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let noise = (rng % 10000) as f64 / 100.0 - 50.0; // big noise
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + noise));
+        }
+
+        let sigma_noisy = model.empirical_sigma();
+        assert!(
+            sigma_noisy > sigma_clean,
+            "noisy regime should increase sigma: clean={sigma_clean}, noisy={sigma_noisy}"
+        );
+    }
+
+    #[test]
+    fn empirical_sigma_modulated_lr_adapts() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(16)
+            .initial_target_count(10)
+            .uncertainty_modulated_lr(true)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        // Train and verify sigma_ratio changes
+        for i in 0..300 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x], x * 2.0 + 1.0));
+        }
+
+        let (_, _, sigma_ratio) = model.predict_distributional(&[5.0]);
+        assert!(sigma_ratio.is_finite());
+        assert!(
+            (0.1..=10.0).contains(&sigma_ratio),
+            "sigma_ratio={sigma_ratio}"
+        );
+    }
+
+    #[test]
+    fn tree_chain_mode_trains_scale_trees() {
+        use crate::ensemble::config::ScaleMode;
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(4)
+            .n_bins(16)
+            .initial_target_count(10)
+            .scale_mode(ScaleMode::TreeChain)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+        assert_eq!(model.scale_mode(), ScaleMode::TreeChain);
+
+        for i in 0..500 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5, (i % 3) as f64], x * 2.0 + 1.0));
+        }
+
+        let pred = model.predict(&[5.0, 2.5, 1.0]);
+        assert!(pred.mu.is_finite());
+        assert!(pred.sigma > 0.0);
+        assert!(pred.sigma.is_finite());
+    }
+
+    #[test]
+    fn diagnostics_shows_empirical_sigma() {
+        let model = trained_model();
+        let diag = model.diagnostics();
+        assert!(diag.empirical_sigma > 0.0, "empirical_sigma should be positive");
+        assert!(diag.empirical_sigma.is_finite(), "empirical_sigma should be finite");
+    }
+
+    #[test]
+    fn diagnostics_scale_trees_split_fields() {
+        let model = trained_model();
+        let diag = model.diagnostics();
+        assert_eq!(diag.location_trees.len(), model.n_steps());
+        assert_eq!(diag.scale_trees.len(), model.n_steps());
+        // In empirical mode, scale_trees_active might be 0 (trees not trained)
+        // This is expected and actually the point.
+    }
+
+    #[test]
+    fn reset_clears_empirical_sigma() {
+        let mut model = DistributionalSGBT::new(test_config());
+        for i in 0..200 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x], x * 2.0));
+        }
+        model.reset();
+        // After reset, ewma_sq_err resets to 1.0
+        assert!((model.empirical_sigma() - 1.0).abs() < 1e-12);
     }
 }
 

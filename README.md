@@ -1,4 +1,11 @@
-# irithyll
+```
+.__       .__  __  .__           .__  .__
+│__│______│__│╱  │_│  │__ ___.__.│  │ │  │
+│  ╲_  __ ╲  ╲   __╲  │  <   │  ││  │ │  │
+│  ││  │ ╲╱  ││  │ │   Y  ╲___  ││  │_│  │__
+│__││__│  │__││__│ │___│  ╱ ____││____╱____╱
+                        ╲╱╲╱
+```
 
 [![Crates.io](https://img.shields.io/crates/v/irithyll.svg)](https://crates.io/crates/irithyll)
 [![Documentation](https://docs.rs/irithyll/badge.svg)](https://docs.rs/irithyll)

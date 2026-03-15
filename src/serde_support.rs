@@ -266,6 +266,13 @@ pub struct DistributionalModelState {
     pub rng_state: u64,
     pub uncertainty_modulated_lr: bool,
     pub rolling_sigma_mean: f64,
+    /// EWMA of squared prediction errors (for empirical σ mode).
+    #[serde(default = "default_ewma_sq_err")]
+    pub ewma_sq_err: f64,
+}
+
+fn default_ewma_sq_err() -> f64 {
+    1.0
 }
 
 /// Serialize a [`DistributionalModelState`] to JSON.
