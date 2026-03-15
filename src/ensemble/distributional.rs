@@ -55,6 +55,78 @@ impl GaussianPrediction {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostic structs
+// ---------------------------------------------------------------------------
+
+/// Per-tree diagnostic summary.
+#[derive(Debug, Clone)]
+pub struct TreeDiagnostic {
+    /// Number of leaf nodes in this tree.
+    pub n_leaves: usize,
+    /// Maximum depth reached by any leaf.
+    pub max_depth_reached: usize,
+    /// Total samples this tree has seen.
+    pub samples_seen: u64,
+    /// Leaf weight statistics: `(min, max, mean, std)`.
+    pub leaf_weight_stats: (f64, f64, f64, f64),
+    /// Feature indices this tree has split on (non-zero gain).
+    pub split_features: Vec<usize>,
+}
+
+/// Full model diagnostics for [`DistributionalSGBT`].
+///
+/// Contains per-tree summaries, feature usage, and base predictions.
+/// The `trees` vector contains location trees first (indices `0..n_steps`),
+/// then scale trees (`n_steps..2*n_steps`).
+#[derive(Debug, Clone)]
+pub struct ModelDiagnostics {
+    /// Per-tree diagnostic summaries.
+    pub trees: Vec<TreeDiagnostic>,
+    /// How many trees each feature is used in (split count per feature).
+    pub feature_split_counts: Vec<usize>,
+    /// Base prediction for location (mean).
+    pub location_base: f64,
+    /// Base prediction for scale (log-sigma).
+    pub scale_base: f64,
+}
+
+/// Decomposed prediction showing each tree's contribution.
+#[derive(Debug, Clone)]
+pub struct DecomposedPrediction {
+    /// Base location prediction (mean of initial targets).
+    pub location_base: f64,
+    /// Base scale prediction (log-sigma of initial targets).
+    pub scale_base: f64,
+    /// Per-step location contributions: `learning_rate * tree_prediction`.
+    /// `location_base + sum(location_contributions)` = μ.
+    pub location_contributions: Vec<f64>,
+    /// Per-step scale contributions: `learning_rate * tree_prediction`.
+    /// `scale_base + sum(scale_contributions)` = log(σ).
+    pub scale_contributions: Vec<f64>,
+}
+
+impl DecomposedPrediction {
+    /// Reconstruct the final μ from base + contributions.
+    pub fn mu(&self) -> f64 {
+        self.location_base + self.location_contributions.iter().sum::<f64>()
+    }
+
+    /// Reconstruct the final log(σ) from base + contributions.
+    pub fn log_sigma(&self) -> f64 {
+        self.scale_base + self.scale_contributions.iter().sum::<f64>()
+    }
+
+    /// Reconstruct the final σ (exponentiated).
+    pub fn sigma(&self) -> f64 {
+        self.log_sigma().exp().max(1e-8)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DistributionalSGBT
+// ---------------------------------------------------------------------------
+
 /// NGBoost-style distributional streaming gradient boosted trees.
 ///
 /// Outputs a full Gaussian predictive distribution N(μ, σ²) by maintaining two
@@ -463,6 +535,176 @@ impl DistributionalSGBT {
     #[inline]
     pub fn is_uncertainty_modulated(&self) -> bool {
         self.uncertainty_modulated_lr
+    }
+
+    // -------------------------------------------------------------------
+    // Diagnostics
+    // -------------------------------------------------------------------
+
+    /// Full model diagnostics: per-tree structure, feature usage, base predictions.
+    ///
+    /// The `trees` vector contains location trees first (indices `0..n_steps`),
+    /// then scale trees (`n_steps..2*n_steps`).
+    pub fn diagnostics(&self) -> ModelDiagnostics {
+        let n = self.location_steps.len();
+        let mut trees = Vec::with_capacity(2 * n);
+        let mut feature_split_counts: Vec<usize> = Vec::new();
+
+        for steps in [&self.location_steps, &self.scale_steps] {
+            for step in steps {
+                let slot = step.slot();
+                let tree = slot.active_tree();
+                let arena = tree.arena();
+
+                // Leaf weight stats
+                let leaf_values: Vec<f64> = (0..arena.is_leaf.len())
+                    .filter(|&i| arena.is_leaf[i])
+                    .map(|i| arena.leaf_value[i])
+                    .collect();
+
+                let max_depth_reached = (0..arena.is_leaf.len())
+                    .filter(|&i| arena.is_leaf[i])
+                    .map(|i| arena.depth[i] as usize)
+                    .max()
+                    .unwrap_or(0);
+
+                let leaf_weight_stats = if leaf_values.is_empty() {
+                    (0.0, 0.0, 0.0, 0.0)
+                } else {
+                    let min = leaf_values.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let max = leaf_values
+                        .iter()
+                        .cloned()
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    let sum: f64 = leaf_values.iter().sum();
+                    let mean = sum / leaf_values.len() as f64;
+                    let var: f64 = leaf_values.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
+                        / leaf_values.len() as f64;
+                    (min, max, mean, var.sqrt())
+                };
+
+                let gains = slot.split_gains();
+                let split_features: Vec<usize> = gains
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &g)| g > 0.0)
+                    .map(|(i, _)| i)
+                    .collect();
+
+                // Accumulate per-feature split counts (how many trees split on each feature)
+                if !gains.is_empty() {
+                    if feature_split_counts.is_empty() {
+                        feature_split_counts.resize(gains.len(), 0);
+                    }
+                    for &fi in &split_features {
+                        if fi < feature_split_counts.len() {
+                            feature_split_counts[fi] += 1;
+                        }
+                    }
+                }
+
+                trees.push(TreeDiagnostic {
+                    n_leaves: leaf_values.len(),
+                    max_depth_reached,
+                    samples_seen: step.n_samples_seen(),
+                    leaf_weight_stats,
+                    split_features,
+                });
+            }
+        }
+
+        ModelDiagnostics {
+            trees,
+            feature_split_counts,
+            location_base: self.location_base,
+            scale_base: self.scale_base,
+        }
+    }
+
+    /// Per-tree contribution to the final prediction.
+    ///
+    /// Returns two vectors: location contributions and scale contributions.
+    /// Each entry is `learning_rate * tree_prediction` -- the additive
+    /// contribution of that boosting step to the final μ or log(σ).
+    ///
+    /// Summing `location_base + sum(location_contributions)` recovers μ.
+    /// Summing `scale_base + sum(scale_contributions)` recovers log(σ).
+    pub fn predict_decomposed(&self, features: &[f64]) -> DecomposedPrediction {
+        let lr = self.config.learning_rate;
+        let location: Vec<f64> = self
+            .location_steps
+            .iter()
+            .map(|s| lr * s.predict(features))
+            .collect();
+        let scale: Vec<f64> = self
+            .scale_steps
+            .iter()
+            .map(|s| lr * s.predict(features))
+            .collect();
+
+        DecomposedPrediction {
+            location_base: self.location_base,
+            scale_base: self.scale_base,
+            location_contributions: location,
+            scale_contributions: scale,
+        }
+    }
+
+    /// Feature importances based on accumulated split gains across all trees.
+    ///
+    /// Aggregates gains from both location and scale ensembles, then
+    /// normalizes to sum to 1.0. Indexed by feature.
+    /// Returns an empty Vec if no splits have occurred yet.
+    pub fn feature_importances(&self) -> Vec<f64> {
+        let mut totals: Vec<f64> = Vec::new();
+        for steps in [&self.location_steps, &self.scale_steps] {
+            for step in steps {
+                let gains = step.slot().split_gains();
+                if totals.is_empty() && !gains.is_empty() {
+                    totals.resize(gains.len(), 0.0);
+                }
+                for (i, &g) in gains.iter().enumerate() {
+                    if i < totals.len() {
+                        totals[i] += g;
+                    }
+                }
+            }
+        }
+        let sum: f64 = totals.iter().sum();
+        if sum > 0.0 {
+            totals.iter_mut().for_each(|v| *v /= sum);
+        }
+        totals
+    }
+
+    /// Feature importances split by ensemble: `(location_importances, scale_importances)`.
+    ///
+    /// Each vector is independently normalized to sum to 1.0.
+    /// Useful for understanding which features drive the mean vs. the uncertainty.
+    pub fn feature_importances_split(&self) -> (Vec<f64>, Vec<f64>) {
+        fn aggregate(steps: &[BoostingStep]) -> Vec<f64> {
+            let mut totals: Vec<f64> = Vec::new();
+            for step in steps {
+                let gains = step.slot().split_gains();
+                if totals.is_empty() && !gains.is_empty() {
+                    totals.resize(gains.len(), 0.0);
+                }
+                for (i, &g) in gains.iter().enumerate() {
+                    if i < totals.len() {
+                        totals[i] += g;
+                    }
+                }
+            }
+            let sum: f64 = totals.iter().sum();
+            if sum > 0.0 {
+                totals.iter_mut().for_each(|v| *v /= sum);
+            }
+            totals
+        }
+        (
+            aggregate(&self.location_steps),
+            aggregate(&self.scale_steps),
+        )
     }
 
     /// Convert this model into a serializable [`crate::serde_support::DistributionalModelState`].
@@ -923,6 +1165,144 @@ mod tests {
             (pred - gaussian.mu).abs() < 1e-12,
             "StreamingLearner::predict should return mu"
         );
+    }
+
+    // -- Diagnostics tests --
+
+    fn trained_model() -> DistributionalSGBT {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(10) // low grace period to ensure splits
+            .max_depth(4)
+            .n_bins(16)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+        for i in 0..500 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5, (i % 3) as f64], x * 2.0 + 1.0));
+        }
+        model
+    }
+
+    #[test]
+    fn diagnostics_returns_correct_tree_count() {
+        let model = trained_model();
+        let diag = model.diagnostics();
+        // 10 location + 10 scale = 20 trees
+        assert_eq!(diag.trees.len(), 20, "should have 2*n_steps trees");
+    }
+
+    #[test]
+    fn diagnostics_trees_have_leaves() {
+        let model = trained_model();
+        let diag = model.diagnostics();
+        for (i, tree) in diag.trees.iter().enumerate() {
+            assert!(tree.n_leaves >= 1, "tree {i} should have at least 1 leaf");
+        }
+        // At least some trees should have seen samples.
+        let total_samples: u64 = diag.trees.iter().map(|t| t.samples_seen).sum();
+        assert!(total_samples > 0, "at least some trees should have seen samples");
+    }
+
+    #[test]
+    fn diagnostics_leaf_weight_stats_finite() {
+        let model = trained_model();
+        let diag = model.diagnostics();
+        for (i, tree) in diag.trees.iter().enumerate() {
+            let (min, max, mean, std) = tree.leaf_weight_stats;
+            assert!(min.is_finite(), "tree {i} min not finite");
+            assert!(max.is_finite(), "tree {i} max not finite");
+            assert!(mean.is_finite(), "tree {i} mean not finite");
+            assert!(std.is_finite(), "tree {i} std not finite");
+            assert!(min <= max, "tree {i} min > max");
+        }
+    }
+
+    #[test]
+    fn diagnostics_base_predictions_match() {
+        let model = trained_model();
+        let diag = model.diagnostics();
+        assert!(
+            (diag.location_base - model.predict(&[0.0, 0.0, 0.0]).mu).abs() < 100.0,
+            "location_base should be plausible"
+        );
+    }
+
+    #[test]
+    fn predict_decomposed_reconstructs_prediction() {
+        let model = trained_model();
+        let features = [5.0, 2.5, 1.0];
+        let pred = model.predict(&features);
+        let decomp = model.predict_decomposed(&features);
+
+        assert!(
+            (decomp.mu() - pred.mu).abs() < 1e-10,
+            "decomposed mu ({}) != predict mu ({})",
+            decomp.mu(),
+            pred.mu
+        );
+        assert!(
+            (decomp.sigma() - pred.sigma).abs() < 1e-10,
+            "decomposed sigma ({}) != predict sigma ({})",
+            decomp.sigma(),
+            pred.sigma
+        );
+    }
+
+    #[test]
+    fn predict_decomposed_correct_lengths() {
+        let model = trained_model();
+        let decomp = model.predict_decomposed(&[1.0, 0.5, 0.0]);
+        assert_eq!(
+            decomp.location_contributions.len(),
+            model.n_steps(),
+            "location contributions should have n_steps entries"
+        );
+        assert_eq!(
+            decomp.scale_contributions.len(),
+            model.n_steps(),
+            "scale contributions should have n_steps entries"
+        );
+    }
+
+    #[test]
+    fn feature_importances_work() {
+        let model = trained_model();
+        let imp = model.feature_importances();
+        // After enough training, importances should be non-empty and non-negative.
+        // They may or may not sum to 1.0 if no splits have occurred yet.
+        for (i, &v) in imp.iter().enumerate() {
+            assert!(v >= 0.0, "importance {i} should be non-negative, got {v}");
+            assert!(v.is_finite(), "importance {i} should be finite");
+        }
+        let sum: f64 = imp.iter().sum();
+        if sum > 0.0 {
+            assert!(
+                (sum - 1.0).abs() < 1e-10,
+                "non-zero importances should sum to 1.0, got {sum}"
+            );
+        }
+    }
+
+    #[test]
+    fn feature_importances_split_works() {
+        let model = trained_model();
+        let (loc_imp, scale_imp) = model.feature_importances_split();
+        for (name, imp) in [("location", &loc_imp), ("scale", &scale_imp)] {
+            let sum: f64 = imp.iter().sum();
+            if sum > 0.0 {
+                assert!(
+                    (sum - 1.0).abs() < 1e-10,
+                    "{name} importances should sum to 1.0, got {sum}"
+                );
+            }
+            for &v in imp.iter() {
+                assert!(v >= 0.0 && v.is_finite());
+            }
+        }
     }
 }
 

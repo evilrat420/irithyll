@@ -111,7 +111,9 @@ pub use drift::{DriftDetector, DriftSignal};
 pub use ensemble::adaptive::AdaptiveSGBT;
 pub use ensemble::bagged::BaggedSGBT;
 pub use ensemble::config::{FeatureType, SGBTConfig};
-pub use ensemble::distributional::{DistributionalSGBT, GaussianPrediction};
+pub use ensemble::distributional::{
+    DecomposedPrediction, DistributionalSGBT, GaussianPrediction, ModelDiagnostics, TreeDiagnostic,
+};
 pub use ensemble::multi_target::MultiTargetSGBT;
 pub use ensemble::multiclass::MulticlassSGBT;
 pub use ensemble::quantile_regressor::QuantileRegressorSGBT;

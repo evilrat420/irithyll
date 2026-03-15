@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.2] - 2026-03-15
+
+### Added
+
+- **DistributionalSGBT diagnostics** -- three new diagnostic capabilities:
+  - `ModelDiagnostics` struct with per-tree summaries (leaf count, max depth,
+    samples seen, leaf weight statistics, split features) and global feature
+    split counts. Access via `model.diagnostics()`.
+  - `DecomposedPrediction` struct with `predict_decomposed(features)` -- returns
+    per-tree additive contributions for both location and scale ensembles.
+    Includes `mu()`, `log_sigma()`, `sigma()` reconstruction methods.
+  - `feature_importances()` and `feature_importances_split()` -- normalized
+    split-gain-weighted feature importance vectors, with optional separate
+    location/scale views.
+- `TreeDiagnostic`, `ModelDiagnostics`, `DecomposedPrediction` re-exported at
+  crate root.
+
 ## [6.5.1] - 2026-03-15
 
 ### Changed
