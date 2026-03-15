@@ -1,7 +1,7 @@
 //! Distributional SGBT -- outputs Gaussian N(μ, σ²) instead of a point estimate.
 //!
 //! [`DistributionalSGBT`] supports two scale estimation modes via
-//! [`ScaleMode`](crate::ensemble::config::ScaleMode):
+//! [`ScaleMode`]:
 //!
 //! ## Empirical σ (default)
 //!
@@ -1352,7 +1352,10 @@ mod tests {
         }
         // At least some trees should have seen samples.
         let total_samples: u64 = diag.trees.iter().map(|t| t.samples_seen).sum();
-        assert!(total_samples > 0, "at least some trees should have seen samples");
+        assert!(
+            total_samples > 0,
+            "at least some trees should have seen samples"
+        );
     }
 
     #[test]
@@ -1554,8 +1557,14 @@ mod tests {
     fn diagnostics_shows_empirical_sigma() {
         let model = trained_model();
         let diag = model.diagnostics();
-        assert!(diag.empirical_sigma > 0.0, "empirical_sigma should be positive");
-        assert!(diag.empirical_sigma.is_finite(), "empirical_sigma should be finite");
+        assert!(
+            diag.empirical_sigma > 0.0,
+            "empirical_sigma should be positive"
+        );
+        assert!(
+            diag.empirical_sigma.is_finite(),
+            "empirical_sigma should be finite"
+        );
     }
 
     #[test]
