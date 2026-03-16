@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.5.0] - 2026-03-16
+
+### Added
+
+- **Hoeffding Tree Classifier** (`HoeffdingTreeClassifier`) -- standalone streaming
+  decision tree for classification based on the VFDT algorithm (Domingos & Hulten,
+  2000). Maintains per-leaf class distributions, splits using information gain with
+  Hoeffding bound. Configurable via `HoeffdingClassifierConfig` builder. Implements
+  `StreamingLearner`.
+- **Multinomial Naive Bayes** (`MultinomialNB`) -- streaming classifier for
+  count/frequency features with Laplace smoothing. Automatic class discovery,
+  predict_proba/predict_log_proba support.
+- **Bernoulli Naive Bayes** (`BernoulliNB`) -- streaming classifier for binary
+  features with configurable binarization threshold. Explicitly models feature
+  absence unlike Multinomial NB.
+- **Adaptive Random Forest** (`AdaptiveRandomForest`) -- ensemble of streaming
+  learners with ADWIN drift detection and automatic tree replacement
+  (Gomes et al., 2017). Poisson(lambda)-weighted bootstrap, random feature
+  subspaces, generic over any `StreamingLearner` via factory closure.
+- New re-exports at crate root: `HoeffdingTreeClassifier`, `MultinomialNB`,
+  `BernoulliNB`, `AdaptiveRandomForest`.
+
 ## [7.4.0] - 2026-03-16
 
 ### Added
@@ -560,6 +582,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[7.5.0]: https://github.com/evilrat420/irithyll/compare/v7.4.0...v7.5.0
 [7.4.0]: https://github.com/evilrat420/irithyll/compare/v7.3.0...v7.4.0
 [7.3.0]: https://github.com/evilrat420/irithyll/compare/v7.2.0...v7.3.0
 [7.2.0]: https://github.com/evilrat420/irithyll/compare/v7.1.0...v7.2.0

@@ -158,6 +158,11 @@ pub use clustering::{
     StreamingKMeans, StreamingKMeansConfig,
 };
 
+// Re-exports -- classification
+pub use ensemble::adaptive_forest::AdaptiveRandomForest;
+pub use learners::{BernoulliNB, MultinomialNB};
+pub use tree::hoeffding_classifier::HoeffdingTreeClassifier;
+
 // Re-exports -- anomaly detection
 pub use anomaly::hst::{AnomalyScore, HSTConfig, HalfSpaceTree};
 

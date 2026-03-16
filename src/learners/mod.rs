@@ -18,11 +18,13 @@
 pub mod krls;
 pub mod linear;
 pub mod mondrian;
+pub mod multinomial_bernoulli_nb;
 pub mod naive_bayes;
 pub mod rls;
 
 pub use krls::{Kernel, LinearKernel, PolynomialKernel, RBFKernel, KRLS};
 pub use linear::StreamingLinearModel;
 pub use mondrian::MondrianForest;
+pub use multinomial_bernoulli_nb::{BernoulliNB, MultinomialNB};
 pub use naive_bayes::GaussianNB;
 pub use rls::{LocallyWeightedRegression, RecursiveLeastSquares, StreamingPolynomialRegression};
