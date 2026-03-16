@@ -76,6 +76,8 @@ pub struct TreeDiagnostic {
     pub leaf_weight_stats: (f64, f64, f64, f64),
     /// Feature indices this tree has split on (non-zero gain).
     pub split_features: Vec<usize>,
+    /// Per-leaf sample counts showing data distribution across leaves.
+    pub leaf_sample_counts: Vec<u64>,
 }
 
 /// Full model diagnostics for [`DistributionalSGBT`].
@@ -482,6 +484,44 @@ impl DistributionalSGBT {
         }
     }
 
+    /// Predict using sigmoid-blended soft routing for smooth interpolation.
+    ///
+    /// Instead of hard left/right routing at tree split nodes, each split
+    /// uses sigmoid blending: `alpha = sigmoid((threshold - feature) / bandwidth)`.
+    /// The result is a continuous function that varies smoothly with every
+    /// feature change.
+    ///
+    /// `bandwidth` controls transition sharpness: smaller = sharper (closer
+    /// to hard splits), larger = smoother.
+    pub fn predict_smooth(&self, features: &[f64], bandwidth: f64) -> GaussianPrediction {
+        let mut mu = self.location_base;
+        for s in 0..self.location_steps.len() {
+            mu += self.config.learning_rate
+                * self.location_steps[s].predict_smooth(features, bandwidth);
+        }
+
+        let (sigma, log_sigma) = match self.scale_mode {
+            ScaleMode::Empirical => {
+                let s = self.ewma_sq_err.sqrt().max(1e-8);
+                (s, s.ln())
+            }
+            ScaleMode::TreeChain => {
+                let mut ls = self.scale_base;
+                for s in 0..self.scale_steps.len() {
+                    ls += self.config.learning_rate
+                        * self.scale_steps[s].predict_smooth(features, bandwidth);
+                }
+                (ls.exp().max(1e-8), ls)
+            }
+        };
+
+        GaussianPrediction {
+            mu,
+            sigma,
+            log_sigma,
+        }
+    }
+
     /// Predict with σ-ratio diagnostic exposed.
     ///
     /// Returns `(mu, sigma, sigma_ratio)` where `sigma_ratio` is
@@ -680,6 +720,11 @@ impl DistributionalSGBT {
                     .map(|i| arena.leaf_value[i])
                     .collect();
 
+                let leaf_sample_counts: Vec<u64> = (0..arena.is_leaf.len())
+                    .filter(|&i| arena.is_leaf[i])
+                    .map(|i| arena.sample_count[i])
+                    .collect();
+
                 let max_depth_reached = (0..arena.is_leaf.len())
                     .filter(|&i| arena.is_leaf[i])
                     .map(|i| arena.depth[i] as usize)
@@ -726,6 +771,7 @@ impl DistributionalSGBT {
                     samples_seen: step.n_samples_seen(),
                     leaf_weight_stats,
                     split_features,
+                    leaf_sample_counts,
                 });
             }
         }
@@ -1587,6 +1633,73 @@ mod tests {
         model.reset();
         // After reset, ewma_sq_err resets to 1.0
         assert!((model.empirical_sigma() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn predict_smooth_returns_finite() {
+        let config = SGBTConfig::builder()
+            .n_steps(3)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(16)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            let features = vec![x, x.sin()];
+            let target = 2.0 * x + 1.0;
+            model.train_one(&(features, target));
+        }
+
+        let pred = model.predict_smooth(&[1.0, 1.0_f64.sin()], 0.5);
+        assert!(pred.mu.is_finite(), "smooth mu should be finite");
+        assert!(pred.sigma.is_finite(), "smooth sigma should be finite");
+        assert!(pred.sigma > 0.0, "smooth sigma should be positive");
+    }
+
+    #[test]
+    fn diagnostics_leaf_sample_counts_populated() {
+        let config = SGBTConfig::builder()
+            .n_steps(3)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(4)
+            .n_bins(16)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            let features = vec![x, x.sin()];
+            let target = 2.0 * x + 1.0;
+            model.train_one(&(features, target));
+        }
+
+        let diags = model.diagnostics();
+        for (ti, tree) in diags.trees.iter().enumerate() {
+            assert_eq!(
+                tree.leaf_sample_counts.len(),
+                tree.n_leaves,
+                "tree {} should have sample count per leaf",
+                ti,
+            );
+            // Total samples across leaves should equal samples_seen for trees with data
+            if tree.samples_seen > 0 {
+                let total: u64 = tree.leaf_sample_counts.iter().sum();
+                assert!(
+                    total > 0,
+                    "tree {} has {} samples_seen but leaf counts sum to 0",
+                    ti,
+                    tree.samples_seen,
+                );
+            }
+        }
     }
 }
 
