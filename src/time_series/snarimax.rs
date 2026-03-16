@@ -906,9 +906,9 @@ mod tests {
 
         // Train on many cycles
         for _cycle in 0..2000 {
-            for phase in 0..period {
+            for sp_val in seasonal_pattern.iter().take(period) {
                 let noise = rng.next_f64(0.5);
-                let y = seasonal_pattern[phase] + noise;
+                let y = sp_val + noise;
                 model.train_one(y, &[]);
             }
         }
