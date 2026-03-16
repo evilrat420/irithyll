@@ -93,6 +93,7 @@ pub mod stream;
 pub mod tree;
 
 pub mod anomaly;
+pub mod bandits;
 pub mod clustering;
 pub mod evaluation;
 pub mod explain;
@@ -187,6 +188,11 @@ pub use learners::{
 pub use time_series::{
     DecomposedPoint, DecompositionConfig, HoltWinters, HoltWintersConfig, SNARIMAXCoefficients,
     SNARIMAXConfig, Seasonality, StreamingDecomposition, SNARIMAX,
+};
+
+// Re-exports -- bandits
+pub use bandits::{
+    Bandit, ContextualBandit, EpsilonGreedy, LinUCB, ThompsonSampling, UCBTuned, UCB1,
 };
 
 // ---------------------------------------------------------------------------
@@ -336,4 +342,72 @@ pub fn adaptive_sgbt(
         .build()
         .expect("adaptive_sgbt() factory: invalid parameters");
     AdaptiveSGBT::new(config, scheduler)
+}
+
+/// Create an epsilon-greedy bandit with the given number of arms and exploration rate.
+///
+/// ```
+/// use irithyll::{epsilon_greedy, Bandit};
+///
+/// let mut bandit = epsilon_greedy(3, 0.1);
+/// let arm = bandit.select_arm();
+/// bandit.update(arm, 1.0);
+/// ```
+pub fn epsilon_greedy(n_arms: usize, epsilon: f64) -> EpsilonGreedy {
+    EpsilonGreedy::new(n_arms, epsilon)
+}
+
+/// Create a UCB1 bandit with the given number of arms.
+///
+/// ```
+/// use irithyll::{ucb1, Bandit};
+///
+/// let mut bandit = ucb1(3);
+/// let arm = bandit.select_arm();
+/// bandit.update(arm, 1.0);
+/// ```
+pub fn ucb1(n_arms: usize) -> UCB1 {
+    UCB1::new(n_arms)
+}
+
+/// Create a UCB-Tuned bandit with the given number of arms.
+///
+/// ```
+/// use irithyll::{ucb_tuned, Bandit};
+///
+/// let mut bandit = ucb_tuned(3);
+/// let arm = bandit.select_arm();
+/// bandit.update(arm, 1.0);
+/// ```
+pub fn ucb_tuned(n_arms: usize) -> UCBTuned {
+    UCBTuned::new(n_arms)
+}
+
+/// Create a Thompson Sampling bandit with Beta(1,1) prior.
+///
+/// Rewards should be in `[0, 1]` (Bernoulli setting).
+///
+/// ```
+/// use irithyll::{thompson, Bandit};
+///
+/// let mut bandit = thompson(3);
+/// let arm = bandit.select_arm();
+/// bandit.update(arm, 1.0);
+/// ```
+pub fn thompson(n_arms: usize) -> ThompsonSampling {
+    ThompsonSampling::new(n_arms)
+}
+
+/// Create a LinUCB contextual bandit.
+///
+/// ```
+/// use irithyll::{lin_ucb, ContextualBandit};
+///
+/// let mut bandit = lin_ucb(3, 5, 1.0);
+/// let ctx = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+/// let arm = bandit.select_arm(&ctx);
+/// bandit.update(arm, &ctx, 1.0);
+/// ```
+pub fn lin_ucb(n_arms: usize, n_features: usize, alpha: f64) -> LinUCB {
+    LinUCB::new(n_arms, n_features, alpha)
 }

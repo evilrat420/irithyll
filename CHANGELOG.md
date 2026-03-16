@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.7.0] - 2026-03-16
+
+### Added
+
+- **Multi-armed bandits** (`bandits` module) -- online decision-making algorithms
+  for the exploration-exploitation trade-off in streaming settings.
+- **`Bandit` trait** -- unified interface for context-free bandits: `select_arm()`,
+  `update(arm, reward)`, `arm_values()`, `arm_counts()`.
+- **`ContextualBandit` trait** -- feature-conditioned arm selection:
+  `select_arm(context)`, `update(arm, context, reward)`.
+- **`EpsilonGreedy`** -- random exploration with probability epsilon (optionally
+  decaying via exponential schedule). Constructors: `new()`, `with_seed()`,
+  `with_decay()`.
+- **`UCB1`** -- Upper Confidence Bound (Auer et al., 2002). Deterministic,
+  round-robin initial exploration, `Q(a) + sqrt(2 ln(t) / N(a))` selection.
+- **`UCBTuned`** -- UCB with per-arm variance estimates for tighter confidence
+  bounds. Tracks sum of squared rewards for empirical variance computation.
+- **`ThompsonSampling`** -- Bayesian arm selection via Beta posterior sampling.
+  Marsaglia-Tsang Gamma sampler + Box-Muller normals for dependency-free Beta
+  samples. Constructors: `new()`, `with_seed()`, `with_prior()`.
+- **`LinUCB`** -- contextual bandit with per-arm ridge regression and
+  Sherman-Morrison inverse updates (Li et al., 2010). O(d²) per update,
+  O(kd²) total space for k arms with d features.
+- New factory functions: `epsilon_greedy()`, `ucb1()`, `ucb_tuned()`,
+  `thompson()`, `lin_ucb()`.
+- New re-exports at crate root: `Bandit`, `ContextualBandit`, `EpsilonGreedy`,
+  `UCB1`, `UCBTuned`, `ThompsonSampling`, `LinUCB`.
+
 ## [7.6.1] - 2026-03-16
 
 ### Changed
@@ -639,6 +667,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[7.7.0]: https://github.com/evilrat420/irithyll/compare/v7.6.1...v7.7.0
 [7.6.1]: https://github.com/evilrat420/irithyll/compare/v7.6.0...v7.6.1
 [7.6.0]: https://github.com/evilrat420/irithyll/compare/v7.5.0...v7.6.0
 [7.5.0]: https://github.com/evilrat420/irithyll/compare/v7.4.0...v7.5.0
