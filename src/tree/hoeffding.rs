@@ -422,7 +422,7 @@ impl HoeffdingTree {
     /// Read-only access to the gradient and hessian sums for a leaf node.
     ///
     /// Returns `Some((grad_sum, hess_sum))` if `node` is a leaf with an active
-    /// [`LeafState`], or `None` if the node has no state (e.g. internal node
+    /// leaf state, or `None` if the node has no state (e.g. internal node
     /// or freshly allocated).
     ///
     /// These sums enable inverse-hessian confidence estimation:
@@ -1901,7 +1901,8 @@ mod tests {
         assert!(
             (hard - smooth).abs() < 0.1,
             "smooth with tiny bandwidth should approximate hard: hard={}, smooth={}",
-            hard, smooth,
+            hard,
+            smooth,
         );
     }
 
@@ -1936,7 +1937,9 @@ mod tests {
         assert!(
             diff < 0.1,
             "smooth prediction should be continuous: base={}, nudged={}, diff={}",
-            base, nudged, diff,
+            base,
+            nudged,
+            diff,
         );
     }
 
@@ -1957,12 +1960,22 @@ mod tests {
 
         // The root should be a leaf (grace_period=100, only 10 samples)
         let root = tree.root();
-        let (grad, hess) = tree.leaf_grad_hess(root).expect("root should have leaf state");
+        let (grad, hess) = tree
+            .leaf_grad_hess(root)
+            .expect("root should have leaf state");
 
         // grad_sum should be sum of all gradients: 10 * (-0.5) = -5.0
-        assert!((grad - (-5.0)).abs() < 1e-10, "grad_sum should be -5.0, got {}", grad);
+        assert!(
+            (grad - (-5.0)).abs() < 1e-10,
+            "grad_sum should be -5.0, got {}",
+            grad
+        );
         // hess_sum should be sum of all hessians: 10 * 1.0 = 10.0
-        assert!((hess - 10.0).abs() < 1e-10, "hess_sum should be 10.0, got {}", hess);
+        assert!(
+            (hess - 10.0).abs() < 1e-10,
+            "hess_sum should be 10.0, got {}",
+            hess
+        );
     }
 
     #[test]

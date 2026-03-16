@@ -200,6 +200,11 @@ pub struct DistributionalSGBT {
     ewma_sq_err: f64,
     /// EWMA alpha for empirical σ.
     empirical_sigma_alpha: f64,
+    /// Previous empirical σ value for computing σ velocity.
+    prev_sigma: f64,
+    /// EWMA-smoothed derivative of empirical σ (σ velocity).
+    /// Positive = σ increasing (errors growing), negative = σ decreasing.
+    sigma_velocity: f64,
 }
 
 impl Clone for DistributionalSGBT {
@@ -220,6 +225,8 @@ impl Clone for DistributionalSGBT {
             scale_mode: self.scale_mode,
             ewma_sq_err: self.ewma_sq_err,
             empirical_sigma_alpha: self.empirical_sigma_alpha,
+            prev_sigma: self.prev_sigma,
+            sigma_velocity: self.sigma_velocity,
         }
     }
 }
@@ -316,6 +323,8 @@ impl DistributionalSGBT {
             scale_mode,
             ewma_sq_err: 1.0, // overwritten during base initialization
             empirical_sigma_alpha,
+            prev_sigma: 0.0,
+            sigma_velocity: 0.0,
         }
     }
 
@@ -348,6 +357,10 @@ impl DistributionalSGBT {
                 self.rolling_sigma_mean = initial_std;
                 self.ewma_sq_err = var.max(1e-12);
 
+                // Initialize PD sigma state
+                self.prev_sigma = initial_std;
+                self.sigma_velocity = 0.0;
+
                 self.base_initialized = true;
                 self.initial_targets.clear();
                 self.initial_targets.shrink_to_fit();
@@ -375,9 +388,25 @@ impl DistributionalSGBT {
         self.ewma_sq_err = (1.0 - alpha) * self.ewma_sq_err + alpha * err * err;
         let empirical_sigma = self.ewma_sq_err.sqrt().max(1e-8);
 
-        // Compute σ-ratio for uncertainty-modulated learning rate
+        // Compute σ-ratio for uncertainty-modulated learning rate (PD controller)
         let sigma_ratio = if self.uncertainty_modulated_lr {
-            let ratio = (empirical_sigma / self.rolling_sigma_mean).clamp(0.1, 10.0);
+            // Compute sigma velocity (derivative of sigma over time)
+            let d_sigma = empirical_sigma - self.prev_sigma;
+            self.prev_sigma = empirical_sigma;
+
+            // EWMA-smooth the velocity (same alpha as empirical sigma for synchronization)
+            self.sigma_velocity = (1.0 - alpha) * self.sigma_velocity + alpha * d_sigma;
+
+            // Adaptive derivative gain: self-calibrating, no config needed
+            let k_d = if self.rolling_sigma_mean > 1e-12 {
+                self.sigma_velocity.abs() / self.rolling_sigma_mean
+            } else {
+                0.0
+            };
+
+            // PD ratio: proportional + derivative
+            let pd_sigma = empirical_sigma + k_d * self.sigma_velocity;
+            let ratio = (pd_sigma / self.rolling_sigma_mean).clamp(0.1, 10.0);
 
             // Update rolling sigma mean with slow EWMA
             const SIGMA_EWMA_ALPHA: f64 = 0.001;
@@ -408,10 +437,28 @@ impl DistributionalSGBT {
         let mut mu = self.location_base;
         let mut log_sigma = self.scale_base;
 
-        // Compute σ-ratio for uncertainty-modulated learning rate.
+        // Compute σ-ratio for uncertainty-modulated learning rate (PD controller).
         let sigma_ratio = if self.uncertainty_modulated_lr {
             let current_sigma = log_sigma.exp().max(1e-8);
-            let ratio = (current_sigma / self.rolling_sigma_mean).clamp(0.1, 10.0);
+
+            // Compute sigma velocity (derivative of sigma over time)
+            let d_sigma = current_sigma - self.prev_sigma;
+            self.prev_sigma = current_sigma;
+
+            // EWMA-smooth the velocity (same alpha as empirical sigma for synchronization)
+            let alpha = self.empirical_sigma_alpha;
+            self.sigma_velocity = (1.0 - alpha) * self.sigma_velocity + alpha * d_sigma;
+
+            // Adaptive derivative gain: self-calibrating, no config needed
+            let k_d = if self.rolling_sigma_mean > 1e-12 {
+                self.sigma_velocity.abs() / self.rolling_sigma_mean
+            } else {
+                0.0
+            };
+
+            // PD ratio: proportional + derivative
+            let pd_sigma = current_sigma + k_d * self.sigma_velocity;
+            let ratio = (pd_sigma / self.rolling_sigma_mean).clamp(0.1, 10.0);
 
             const SIGMA_EWMA_ALPHA: f64 = 0.001;
             self.rolling_sigma_mean = (1.0 - SIGMA_EWMA_ALPHA) * self.rolling_sigma_mean
@@ -457,10 +504,20 @@ impl DistributionalSGBT {
     }
 
     /// Predict the full Gaussian distribution for a feature vector.
+    ///
+    /// When [`bandwidth`](SGBTConfig::bandwidth) is set, automatically uses
+    /// sigmoid-blended soft routing instead of hard splits.
     pub fn predict(&self, features: &[f64]) -> GaussianPrediction {
         let mut mu = self.location_base;
-        for s in 0..self.location_steps.len() {
-            mu += self.config.learning_rate * self.location_steps[s].predict(features);
+        if let Some(bw) = self.config.bandwidth {
+            for s in 0..self.location_steps.len() {
+                mu +=
+                    self.config.learning_rate * self.location_steps[s].predict_smooth(features, bw);
+            }
+        } else {
+            for s in 0..self.location_steps.len() {
+                mu += self.config.learning_rate * self.location_steps[s].predict(features);
+            }
         }
 
         let (sigma, log_sigma) = match self.scale_mode {
@@ -470,8 +527,15 @@ impl DistributionalSGBT {
             }
             ScaleMode::TreeChain => {
                 let mut ls = self.scale_base;
-                for s in 0..self.scale_steps.len() {
-                    ls += self.config.learning_rate * self.scale_steps[s].predict(features);
+                if let Some(bw) = self.config.bandwidth {
+                    for s in 0..self.scale_steps.len() {
+                        ls += self.config.learning_rate
+                            * self.scale_steps[s].predict_smooth(features, bw);
+                    }
+                } else {
+                    for s in 0..self.scale_steps.len() {
+                        ls += self.config.learning_rate * self.scale_steps[s].predict(features);
+                    }
                 }
                 (ls.exp().max(1e-8), ls)
             }
@@ -554,6 +618,16 @@ impl DistributionalSGBT {
         self.scale_mode
     }
 
+    /// Current σ velocity -- the EWMA-smoothed derivative of empirical σ.
+    ///
+    /// Positive values indicate growing prediction errors (model deteriorating
+    /// or regime change). Negative values indicate improving predictions.
+    /// Only meaningful when `ScaleMode::Empirical` is active.
+    #[inline]
+    pub fn sigma_velocity(&self) -> f64 {
+        self.sigma_velocity
+    }
+
     /// Predict the mean (location parameter) only.
     #[inline]
     pub fn predict_mu(&self, features: &[f64]) -> f64 {
@@ -625,6 +699,8 @@ impl DistributionalSGBT {
         self.rng_state = self.config.seed;
         self.rolling_sigma_mean = 1.0;
         self.ewma_sq_err = 1.0;
+        self.prev_sigma = 0.0;
+        self.sigma_velocity = 0.0;
     }
 
     /// Total samples trained.
@@ -1024,6 +1100,8 @@ impl DistributionalSGBT {
             scale_mode,
             ewma_sq_err: state.ewma_sq_err,
             empirical_sigma_alpha,
+            prev_sigma: 0.0,
+            sigma_velocity: 0.0,
         }
     }
 }
@@ -1661,6 +1739,63 @@ mod tests {
         assert!(pred.sigma > 0.0, "smooth sigma should be positive");
     }
 
+    // -- PD sigma modulation tests --
+
+    #[test]
+    fn sigma_velocity_responds_to_error_spike() {
+        let config = SGBTConfig::builder()
+            .n_steps(3)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(16)
+            .initial_target_count(10)
+            .uncertainty_modulated_lr(true)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        // Stable phase
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&(vec![x, x.sin()], 2.0 * x + 1.0));
+        }
+
+        let velocity_before = model.sigma_velocity();
+
+        // Error spike -- sudden regime change
+        for i in 0..50 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&(vec![x, x.sin()], 100.0 * x + 50.0));
+        }
+
+        let velocity_after = model.sigma_velocity();
+
+        // Velocity should be positive (sigma increasing due to errors)
+        assert!(
+            velocity_after > velocity_before,
+            "sigma velocity should increase after error spike: before={}, after={}",
+            velocity_before,
+            velocity_after,
+        );
+    }
+
+    #[test]
+    fn sigma_velocity_getter_works() {
+        let config = SGBTConfig::builder()
+            .n_steps(2)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(16)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let model = DistributionalSGBT::new(config);
+        // Fresh model should have zero velocity
+        assert_eq!(model.sigma_velocity(), 0.0);
+    }
+
     #[test]
     fn diagnostics_leaf_sample_counts_populated() {
         let config = SGBTConfig::builder()
@@ -1777,5 +1912,28 @@ mod serde_tests {
 
         let restored = DistributionalSGBT::from_distributional_state(state);
         assert_eq!(model.n_samples_seen(), restored.n_samples_seen());
+    }
+
+    #[test]
+    fn bandwidth_config_enables_smooth_distributional() {
+        let config = SGBTConfig::builder()
+            .n_steps(3)
+            .learning_rate(0.1)
+            .bandwidth(0.5)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&(vec![x, x.sin()], 2.0 * x + 1.0));
+        }
+
+        let pred = model.predict(&[1.0, 1.0_f64.sin()]);
+        assert!(pred.mu.is_finite(), "bandwidth-enabled mu should be finite");
+        assert!(
+            pred.sigma > 0.0,
+            "bandwidth-enabled sigma should be positive"
+        );
     }
 }

@@ -379,6 +379,15 @@ pub struct SGBTConfig {
     /// Default: [`ClosedForm`](LeafModelType::ClosedForm).
     #[serde(default)]
     pub leaf_model_type: LeafModelType,
+
+    /// Smooth prediction bandwidth. When `Some(bw)`, `predict()` uses
+    /// sigmoid-blended soft routing through tree splits instead of hard
+    /// threshold comparisons. `None` (default) uses standard hard splits.
+    ///
+    /// Bandwidth controls transition sharpness: smaller = sharper (closer
+    /// to hard splits), larger = smoother interpolation.
+    #[serde(default)]
+    pub bandwidth: Option<f64>,
 }
 
 fn default_empirical_sigma_alpha() -> f64 {
@@ -424,6 +433,7 @@ impl Default for SGBTConfig {
             scale_mode: ScaleMode::default(),
             empirical_sigma_alpha: 0.01,
             leaf_model_type: LeafModelType::default(),
+            bandwidth: None,
         }
     }
 }
@@ -688,6 +698,15 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Set the smooth prediction bandwidth.
+    ///
+    /// When set, `predict()` uses sigmoid-blended soft routing through
+    /// tree splits for continuous, boundary-free predictions.
+    pub fn bandwidth(mut self, bw: f64) -> Self {
+        self.config.bandwidth = Some(bw);
+        self
+    }
+
     /// Validate and build the configuration.
     ///
     /// # Errors
@@ -854,6 +873,17 @@ impl SGBTConfigBuilder {
                 c.quality_prune_patience,
             )
             .into());
+        }
+
+        // -- Smooth prediction bandwidth --
+        if let Some(bw) = c.bandwidth {
+            if bw <= 0.0 || !bw.is_finite() {
+                return Err(ConfigError::invalid(
+                    "bandwidth",
+                    "must be positive and finite".to_string(),
+                )
+                .into());
+            }
         }
 
         // -- Error-weighted sample importance --

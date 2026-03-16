@@ -441,10 +441,36 @@ impl<L: Loss> SGBT<L> {
     }
 
     /// Predict the raw output for a feature vector.
+    ///
+    /// When [`bandwidth`](SGBTConfig::bandwidth) is set, automatically uses
+    /// sigmoid-blended soft routing instead of hard splits.
     pub fn predict(&self, features: &[f64]) -> f64 {
         let mut pred = self.base_prediction;
+        if let Some(bw) = self.config.bandwidth {
+            for step in &self.steps {
+                pred += self.config.learning_rate * step.predict_smooth(features, bw);
+            }
+        } else {
+            for step in &self.steps {
+                pred += self.config.learning_rate * step.predict(features);
+            }
+        }
+        pred
+    }
+
+    /// Predict using sigmoid-blended soft routing for smooth interpolation.
+    ///
+    /// Instead of hard left/right routing at tree split nodes, each split
+    /// uses sigmoid blending: `alpha = sigmoid((threshold - feature) / bandwidth)`.
+    /// The result is a continuous function that varies smoothly with every
+    /// feature change.
+    ///
+    /// `bandwidth` controls transition sharpness: smaller = sharper (closer
+    /// to hard splits), larger = smoother.
+    pub fn predict_smooth(&self, features: &[f64], bandwidth: f64) -> f64 {
+        let mut pred = self.base_prediction;
         for step in &self.steps {
-            pred += self.config.learning_rate * step.predict(features);
+            pred += self.config.learning_rate * step.predict_smooth(features, bandwidth);
         }
         pred
     }
@@ -1773,6 +1799,88 @@ mod tests {
         assert!(
             pred.is_finite(),
             "decay leaf prediction should be finite, got {pred}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // predict_smooth returns finite values
+    // -------------------------------------------------------------------
+    #[test]
+    fn predict_smooth_returns_finite() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x.sin()], 2.0 * x + 1.0));
+        }
+
+        let pred_hard = model.predict(&[1.0, 1.0_f64.sin()]);
+        let pred_smooth = model.predict_smooth(&[1.0, 1.0_f64.sin()], 0.5);
+
+        assert!(pred_hard.is_finite(), "hard prediction should be finite");
+        assert!(
+            pred_smooth.is_finite(),
+            "smooth prediction should be finite"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // predict_smooth converges to hard predict at small bandwidth
+    // -------------------------------------------------------------------
+    #[test]
+    fn predict_smooth_converges_to_hard_at_small_bandwidth() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..300 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 0.5], 2.0 * x + 1.0));
+        }
+
+        let features = [5.0, 2.5];
+        let hard = model.predict(&features);
+        let smooth = model.predict_smooth(&features, 0.001);
+
+        assert!(
+            (hard - smooth).abs() < 0.5,
+            "smooth with tiny bandwidth should approximate hard: hard={}, smooth={}",
+            hard,
+            smooth,
+        );
+    }
+
+    #[test]
+    fn bandwidth_config_enables_smooth_predict() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .bandwidth(0.5)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 0.5], 2.0 * x + 1.0));
+        }
+
+        // predict() should use smooth routing when bandwidth is set
+        let pred = model.predict(&[5.0, 2.5]);
+        assert!(
+            pred.is_finite(),
+            "bandwidth-enabled predict should be finite: {}",
+            pred
         );
     }
 }
