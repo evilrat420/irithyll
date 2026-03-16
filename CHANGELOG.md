@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.6.0] - 2026-03-16
+
+### Added
+
+- **SNARIMAX** (`SNARIMAX`) -- streaming non-linear ARIMA with seasonal,
+  exogenous, and autoregressive/moving-average components. Online SGD
+  parameter updates with gradient clipping for stability on unnormalized data.
+  Configurable AR/MA orders, seasonal period, and exogenous feature count.
+  Multi-step recursive forecasting via `forecast(horizon)`.
+- **Holt-Winters** (`HoltWinters`) -- streaming triple exponential smoothing
+  with additive and multiplicative seasonality modes. Buffered initialization
+  from the first seasonal period. Level, trend, and seasonal components
+  updated incrementally per observation. Multi-step forecasting.
+- **Streaming Decomposition** (`StreamingDecomposition`) -- online seasonal
+  decomposition into trend, seasonal, and residual components. EWMA-based
+  trend estimation with per-position seasonal factor tracking. Returns
+  `DecomposedPoint` with the identity `observed = trend + seasonal + residual`.
+- `Seasonality` enum (`Additive` / `Multiplicative`) for Holt-Winters.
+- `DecomposedPoint` struct for decomposition output.
+- `SNARIMAXCoefficients` snapshot struct for model introspection.
+- New re-exports at crate root: `SNARIMAX`, `SNARIMAXConfig`,
+  `SNARIMAXCoefficients`, `HoltWinters`, `HoltWintersConfig`, `Seasonality`,
+  `StreamingDecomposition`, `DecompositionConfig`, `DecomposedPoint`.
+
 ## [7.5.0] - 2026-03-16
 
 ### Added
@@ -582,6 +606,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[7.6.0]: https://github.com/evilrat420/irithyll/compare/v7.5.0...v7.6.0
 [7.5.0]: https://github.com/evilrat420/irithyll/compare/v7.4.0...v7.5.0
 [7.4.0]: https://github.com/evilrat420/irithyll/compare/v7.3.0...v7.4.0
 [7.3.0]: https://github.com/evilrat420/irithyll/compare/v7.2.0...v7.3.0

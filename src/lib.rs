@@ -101,6 +101,7 @@ pub mod learners;
 pub mod pipeline;
 pub mod preprocessing;
 pub mod serde_support;
+pub mod time_series;
 
 #[cfg(feature = "arrow")]
 pub mod arrow_support;
@@ -180,6 +181,12 @@ pub use ensemble::lr_schedule::LRScheduler;
 pub use learners::{
     GaussianNB, Kernel, LinearKernel, LocallyWeightedRegression, MondrianForest, PolynomialKernel,
     RBFKernel, RecursiveLeastSquares, StreamingLinearModel, StreamingPolynomialRegression, KRLS,
+};
+
+// Re-exports -- time series
+pub use time_series::{
+    DecomposedPoint, DecompositionConfig, HoltWinters, HoltWintersConfig, SNARIMAXCoefficients,
+    SNARIMAXConfig, Seasonality, StreamingDecomposition, SNARIMAX,
 };
 
 // ---------------------------------------------------------------------------
