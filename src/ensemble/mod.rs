@@ -107,6 +107,12 @@ pub struct SGBT<L: Loss = SquaredLoss> {
     /// Rolling mean absolute error for error-weighted sample importance.
     /// Only used when `error_weight_alpha` is `Some`.
     rolling_mean_error: f64,
+    /// Per-feature auto-calibrated bandwidths for smooth prediction.
+    /// Computed from median split threshold gaps across all trees.
+    auto_bandwidths: Vec<f64>,
+    /// Sum of replacement counts across all steps at last bandwidth computation.
+    /// Used to detect when trees have been replaced and bandwidths need refresh.
+    last_replacement_sum: u64,
 }
 
 impl<L: Loss + Clone> Clone for SGBT<L> {
@@ -124,6 +130,8 @@ impl<L: Loss + Clone> Clone for SGBT<L> {
             contribution_ewma: self.contribution_ewma.clone(),
             low_contrib_count: self.low_contrib_count.clone(),
             rolling_mean_error: self.rolling_mean_error,
+            auto_bandwidths: self.auto_bandwidths.clone(),
+            last_replacement_sum: self.last_replacement_sum,
         }
     }
 }
@@ -222,6 +230,8 @@ impl<L: Loss> SGBT<L> {
             },
             low_contrib_count: if has_pruning { vec![0; n] } else { Vec::new() },
             rolling_mean_error: 0.0,
+            auto_bandwidths: Vec::new(),
+            last_replacement_sum: 0,
         }
     }
 
@@ -301,6 +311,9 @@ impl<L: Loss> SGBT<L> {
                 }
             }
         }
+
+        // Refresh auto-bandwidths when trees have been replaced or not yet computed.
+        self.refresh_bandwidths();
     }
 
     /// Train on a batch of observations.
@@ -443,37 +456,44 @@ impl<L: Loss> SGBT<L> {
 
     /// Predict the raw output for a feature vector.
     ///
-    /// When [`bandwidth`](SGBTConfig::bandwidth) is set, automatically uses
-    /// sigmoid-blended soft routing instead of hard splits.
+    /// Always uses sigmoid-blended soft routing with auto-calibrated per-feature
+    /// bandwidths derived from median split threshold gaps. Features that have
+    /// never been split on use hard routing (bandwidth = infinity).
     pub fn predict(&self, features: &[f64]) -> f64 {
         let mut pred = self.base_prediction;
-        if let Some(bw) = self.config.bandwidth {
+        if self.auto_bandwidths.is_empty() {
+            // No bandwidths computed yet (no training) — hard routing fallback
             for step in &self.steps {
-                pred += self.config.learning_rate * step.predict_smooth(features, bw);
+                pred += self.config.learning_rate * step.predict(features);
             }
         } else {
             for step in &self.steps {
-                pred += self.config.learning_rate * step.predict(features);
+                pred += self.config.learning_rate
+                    * step.predict_smooth_auto(features, &self.auto_bandwidths);
             }
         }
         pred
     }
 
-    /// Predict using sigmoid-blended soft routing for smooth interpolation.
+    /// Predict using sigmoid-blended soft routing with an explicit bandwidth.
     ///
-    /// Instead of hard left/right routing at tree split nodes, each split
-    /// uses sigmoid blending: `alpha = sigmoid((threshold - feature) / bandwidth)`.
-    /// The result is a continuous function that varies smoothly with every
-    /// feature change.
-    ///
-    /// `bandwidth` controls transition sharpness: smaller = sharper (closer
-    /// to hard splits), larger = smoother.
+    /// Uses a single bandwidth for all features. For auto-calibrated per-feature
+    /// bandwidths, use [`predict()`](SGBT::predict) which always uses smooth routing.
     pub fn predict_smooth(&self, features: &[f64], bandwidth: f64) -> f64 {
         let mut pred = self.base_prediction;
         for step in &self.steps {
             pred += self.config.learning_rate * step.predict_smooth(features, bandwidth);
         }
         pred
+    }
+
+    /// Per-feature auto-calibrated bandwidths used by `predict()`.
+    ///
+    /// Empty before the first training sample. Each entry corresponds to a
+    /// feature index; `f64::INFINITY` means that feature has no splits and
+    /// uses hard routing.
+    pub fn auto_bandwidths(&self) -> &[f64] {
+        &self.auto_bandwidths
     }
 
     /// Predict with loss transform applied (e.g., sigmoid for logistic loss).
@@ -714,6 +734,101 @@ impl<L: Loss> SGBT<L> {
         })
     }
 
+    /// Refresh auto-bandwidths if any tree has been replaced since last computation.
+    fn refresh_bandwidths(&mut self) {
+        let current_sum: u64 = self.steps.iter().map(|s| s.slot().replacements()).sum();
+        if current_sum != self.last_replacement_sum || self.auto_bandwidths.is_empty() {
+            self.auto_bandwidths = self.compute_auto_bandwidths();
+            self.last_replacement_sum = current_sum;
+        }
+    }
+
+    /// Compute per-feature auto-calibrated bandwidths from all trees.
+    ///
+    /// For each feature, collects all split thresholds across all trees,
+    /// computes the median gap between consecutive unique thresholds, and
+    /// returns `median_gap * K` (K = 2.0).
+    ///
+    /// Edge cases:
+    /// - Feature with < 3 unique thresholds: `range / n_bins * K`
+    /// - Feature never split on (< 2 unique thresholds): `f64::INFINITY` (hard routing)
+    fn compute_auto_bandwidths(&self) -> Vec<f64> {
+        const K: f64 = 2.0;
+
+        // Determine n_features from the trees
+        let n_features = self
+            .steps
+            .iter()
+            .filter_map(|s| s.slot().active_tree().n_features())
+            .max()
+            .unwrap_or(0);
+
+        if n_features == 0 {
+            return Vec::new();
+        }
+
+        // Collect all thresholds from all trees per feature
+        let mut all_thresholds: Vec<Vec<f64>> = vec![Vec::new(); n_features];
+
+        for step in &self.steps {
+            let tree_thresholds = step
+                .slot()
+                .active_tree()
+                .collect_split_thresholds_per_feature();
+            for (i, ts) in tree_thresholds.into_iter().enumerate() {
+                if i < n_features {
+                    all_thresholds[i].extend(ts);
+                }
+            }
+        }
+
+        let n_bins = self.config.n_bins as f64;
+
+        // Compute per-feature bandwidth
+        all_thresholds
+            .iter()
+            .map(|ts| {
+                if ts.is_empty() {
+                    return f64::INFINITY; // Never split on → hard routing
+                }
+
+                let mut sorted = ts.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.dedup_by(|a, b| (*a - *b).abs() < 1e-15);
+
+                if sorted.len() < 2 {
+                    return f64::INFINITY; // Single threshold → hard routing
+                }
+
+                // Compute gaps between consecutive unique thresholds
+                let mut gaps: Vec<f64> = sorted.windows(2).map(|w| w[1] - w[0]).collect();
+
+                if sorted.len() < 3 {
+                    // Fallback: feature_range / n_bins * K
+                    let range = sorted.last().unwrap() - sorted.first().unwrap();
+                    if range < 1e-15 {
+                        return f64::INFINITY;
+                    }
+                    return (range / n_bins) * K;
+                }
+
+                // Median gap
+                gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let median_gap = if gaps.len() % 2 == 0 {
+                    (gaps[gaps.len() / 2 - 1] + gaps[gaps.len() / 2]) / 2.0
+                } else {
+                    gaps[gaps.len() / 2]
+                };
+
+                if median_gap < 1e-15 {
+                    f64::INFINITY
+                } else {
+                    median_gap * K
+                }
+            })
+            .collect()
+    }
+
     /// Reset the ensemble to initial state.
     pub fn reset(&mut self) {
         for step in &mut self.steps {
@@ -724,6 +839,8 @@ impl<L: Loss> SGBT<L> {
         self.initial_targets.clear();
         self.samples_seen = 0;
         self.rng_state = self.config.seed;
+        self.auto_bandwidths.clear();
+        self.last_replacement_sum = 0;
     }
 
     /// Serialize the model into a [`ModelState`](crate::serde_support::ModelState).
@@ -898,6 +1015,8 @@ impl SGBT<Box<dyn Loss>> {
             contribution_ewma,
             low_contrib_count,
             rolling_mean_error: state.rolling_mean_error,
+            auto_bandwidths: Vec::new(),
+            last_replacement_sum: 0,
         }
     }
 }
@@ -1862,25 +1981,32 @@ mod tests {
     }
 
     #[test]
-    fn bandwidth_config_enables_smooth_predict() {
+    fn auto_bandwidth_computed_after_training() {
         let config = SGBTConfig::builder()
             .n_steps(5)
             .learning_rate(0.1)
-            .bandwidth(0.5)
+            .grace_period(10)
             .build()
             .unwrap();
         let mut model = SGBT::new(config);
+
+        // Before training, no bandwidths
+        assert!(model.auto_bandwidths().is_empty());
 
         for i in 0..200 {
             let x = (i as f64) * 0.1;
             model.train_one(&Sample::new(vec![x, x * 0.5], 2.0 * x + 1.0));
         }
 
-        // predict() should use smooth routing when bandwidth is set
+        // After training, auto_bandwidths should be populated
+        let bws = model.auto_bandwidths();
+        assert_eq!(bws.len(), 2, "should have 2 feature bandwidths");
+
+        // predict() always uses smooth routing with auto-bandwidths
         let pred = model.predict(&[5.0, 2.5]);
         assert!(
             pred.is_finite(),
-            "bandwidth-enabled predict should be finite: {}",
+            "auto-bandwidth predict should be finite: {}",
             pred
         );
     }

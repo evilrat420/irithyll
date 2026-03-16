@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.6.1] - 2026-03-16
+
+### Changed
+
+- **Auto-bandwidth smooth routing** -- `predict()` on both `SGBT` and
+  `DistributionalSGBT` now always uses sigmoid-blended soft routing with
+  per-feature auto-calibrated bandwidths. Bandwidths are computed as
+  `median_gap × 2.0` from the split thresholds of all trees in the ensemble.
+  Features with fewer than 3 unique thresholds fall back to `range / n_bins × 2`,
+  and features never split on use hard routing (bandwidth = ∞).
+- **Removed `bandwidth` from `SGBTConfig`** -- the `bandwidth()` builder method,
+  field, and validation have been removed. Auto-bandwidth is the only mode.
+- Bandwidth cache refreshes automatically when tree replacements (drift or
+  time-based) are detected, via a lightweight replacement counter on `TreeSlot`.
+
+### Added
+
+- `HoeffdingTree::collect_split_thresholds_per_feature()` -- collects all
+  continuous split thresholds per feature from the tree arena.
+- `HoeffdingTree::predict_smooth_auto()` -- per-feature bandwidth smooth
+  prediction.
+- `TreeSlot::replacements()` -- counts tree replacements for cache invalidation.
+- `TreeSlot::prediction_mean()` / `prediction_std()` -- Welford online stats
+  tracking per-tree prediction distribution for anomaly detection.
+- `SGBT::auto_bandwidths()` / `DistributionalSGBT::auto_bandwidths()` --
+  exposes the current per-feature bandwidth vector.
+- `auto_bandwidths: Vec<f64>` in `ModelDiagnostics`.
+- `prediction_mean` / `prediction_std` in `TreeDiagnostic`.
+
+### Fixed
+
+- Clippy `needless_range_loop` warning in Holt-Winters seasonal initialization.
+
 ## [7.6.0] - 2026-03-16
 
 ### Added
@@ -606,6 +639,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[7.6.1]: https://github.com/evilrat420/irithyll/compare/v7.6.0...v7.6.1
 [7.6.0]: https://github.com/evilrat420/irithyll/compare/v7.5.0...v7.6.0
 [7.5.0]: https://github.com/evilrat420/irithyll/compare/v7.4.0...v7.5.0
 [7.4.0]: https://github.com/evilrat420/irithyll/compare/v7.3.0...v7.4.0

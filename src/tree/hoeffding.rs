@@ -510,6 +510,34 @@ impl HoeffdingTree {
         self.predict_smooth_recursive(self.root, features, bandwidth)
     }
 
+    /// Predict using per-feature auto-calibrated bandwidths.
+    ///
+    /// Each feature uses its own bandwidth derived from median split threshold
+    /// gaps. Features with `f64::INFINITY` bandwidth fall back to hard routing.
+    pub fn predict_smooth_auto(&self, features: &[f64], bandwidths: &[f64]) -> f64 {
+        self.predict_smooth_auto_recursive(self.root, features, bandwidths)
+    }
+
+    /// Collect all split thresholds per feature from the tree arena.
+    ///
+    /// Returns a `Vec<Vec<f64>>` indexed by feature, containing all thresholds
+    /// used in continuous splits. Categorical splits are excluded.
+    pub fn collect_split_thresholds_per_feature(&self) -> Vec<Vec<f64>> {
+        let n = self.n_features.unwrap_or(0);
+        let mut thresholds: Vec<Vec<f64>> = vec![Vec::new(); n];
+
+        for i in 0..self.arena.n_nodes() {
+            if !self.arena.is_leaf[i] && self.arena.categorical_mask[i].is_none() {
+                let feat_idx = self.arena.feature_idx[i] as usize;
+                if feat_idx < n {
+                    thresholds[feat_idx].push(self.arena.threshold[i]);
+                }
+            }
+        }
+
+        thresholds
+    }
+
     /// Recursive sigmoid-blended prediction traversal.
     fn predict_smooth_recursive(&self, node: NodeId, features: &[f64], bandwidth: f64) -> f64 {
         if self.arena.is_leaf(node) {
@@ -538,6 +566,53 @@ impl HoeffdingTree {
 
         let left_pred = self.predict_smooth_recursive(left, features, bandwidth);
         let right_pred = self.predict_smooth_recursive(right, features, bandwidth);
+
+        alpha * left_pred + (1.0 - alpha) * right_pred
+    }
+
+    /// Recursive per-feature-bandwidth smooth prediction traversal.
+    fn predict_smooth_auto_recursive(
+        &self,
+        node: NodeId,
+        features: &[f64],
+        bandwidths: &[f64],
+    ) -> f64 {
+        if self.arena.is_leaf(node) {
+            return self.leaf_prediction(node, features);
+        }
+
+        let feat_idx = self.arena.get_feature_idx(node) as usize;
+        let left = self.arena.get_left(node);
+        let right = self.arena.get_right(node);
+
+        // Categorical splits: always hard routing
+        if let Some(mask) = self.arena.get_categorical_mask(node) {
+            let cat_val = features[feat_idx] as u64;
+            return if cat_val < 64 && (mask >> cat_val) & 1 == 1 {
+                self.predict_smooth_auto_recursive(left, features, bandwidths)
+            } else {
+                self.predict_smooth_auto_recursive(right, features, bandwidths)
+            };
+        }
+
+        let threshold = self.arena.get_threshold(node);
+        let bw = bandwidths.get(feat_idx).copied().unwrap_or(f64::INFINITY);
+
+        // Infinite bandwidth = feature never split on across ensemble → hard routing
+        if !bw.is_finite() {
+            return if features[feat_idx] <= threshold {
+                self.predict_smooth_auto_recursive(left, features, bandwidths)
+            } else {
+                self.predict_smooth_auto_recursive(right, features, bandwidths)
+            };
+        }
+
+        // Sigmoid-blended soft routing with per-feature bandwidth
+        let z = (threshold - features[feat_idx]) / bw;
+        let alpha = 1.0 / (1.0 + (-z).exp());
+
+        let left_pred = self.predict_smooth_auto_recursive(left, features, bandwidths);
+        let right_pred = self.predict_smooth_auto_recursive(right, features, bandwidths);
 
         alpha * left_pred + (1.0 - alpha) * right_pred
     }
