@@ -203,7 +203,7 @@ impl TreeSlot {
 
     /// Predict using sigmoid-blended soft routing for smooth interpolation.
     ///
-    /// See [`HoeffdingTree::predict_smooth`] for details.
+    /// See [`crate::tree::hoeffding::HoeffdingTree::predict_smooth`] for details.
     #[inline]
     pub fn predict_smooth(&self, features: &[f64], bandwidth: f64) -> f64 {
         self.active.predict_smooth(features, bandwidth)

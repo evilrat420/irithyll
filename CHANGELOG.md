@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.2.0] - 2026-03-16
+
+### Added
+
+- **PD sigma modulation** -- proportional-derivative controller for uncertainty-
+  modulated learning rate in `DistributionalSGBT`. Tracks `sigma_velocity`
+  (EWMA-smoothed derivative of empirical σ) with self-calibrating derivative
+  gain `k_d = |sigma_velocity| / rolling_sigma_mean`. The PD ratio
+  `(sigma + k_d * sigma_velocity) / rolling_sigma_mean` anticipates regime
+  changes, boosting the learning rate *before* errors fully propagate.
+  New `sigma_velocity()` getter exposes the signal.
+- **Smooth prediction on SGBT** -- `predict_smooth(features, bandwidth)` now
+  available on `SGBT` (not just `DistributionalSGBT`), aggregating per-tree
+  smooth predictions through the full boosting ensemble.
+- **Config-driven smooth prediction** -- `bandwidth: Option<f64>` field on
+  `SGBTConfig`. When set, `predict()` on both `SGBT` and `DistributionalSGBT`
+  automatically uses sigmoid-blended soft routing with no API change required.
+  Builder method: `.bandwidth(0.5)`. Validated as positive and finite.
+
 ## [7.1.0] - 2026-03-16
 
 ### Added
@@ -491,6 +510,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[7.2.0]: https://github.com/evilrat420/irithyll/compare/v7.1.0...v7.2.0
+[7.1.0]: https://github.com/evilrat420/irithyll/compare/v7.0.0...v7.1.0
+[7.0.0]: https://github.com/evilrat420/irithyll/compare/v6.4.0...v7.0.0
 [6.4.0]: https://github.com/evilrat420/irithyll/compare/v6.3.0...v6.4.0
 [6.3.0]: https://github.com/evilrat420/irithyll/compare/v6.2.0...v6.3.0
 [6.2.0]: https://github.com/evilrat420/irithyll/compare/v6.1.1...v6.2.0
