@@ -127,6 +127,14 @@ impl BoostingStep {
         self.slot.predict_with_variance(features)
     }
 
+    /// Predict using sigmoid-blended soft routing for smooth interpolation.
+    ///
+    /// See [`HoeffdingTree::predict_smooth`] for details.
+    #[inline]
+    pub fn predict_smooth(&self, features: &[f64], bandwidth: f64) -> f64 {
+        self.slot.predict_smooth(features, bandwidth)
+    }
+
     /// Number of leaves in the active tree.
     #[inline]
     pub fn n_leaves(&self) -> usize {

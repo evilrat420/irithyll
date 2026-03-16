@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.1.0] - 2026-03-16
+
+### Added
+
+- **Smooth prediction** (`predict_smooth`) -- sigmoid-blended soft routing
+  through tree split nodes. Instead of hard left/right decisions, each split
+  uses `alpha = sigmoid((threshold - feature) / bandwidth)` and recursively
+  blends subtree predictions. Produces a continuous function with no bins,
+  boundaries, or jumps. Available on `HoeffdingTree`, `TreeSlot`,
+  `BoostingStep`, and `DistributionalSGBT`. Bandwidth parameter controls
+  transition sharpness.
+- **Leaf state accessor** (`HoeffdingTree::leaf_grad_hess`) -- read-only access
+  to per-leaf gradient and hessian sums. Enables inverse-hessian confidence
+  estimation: `confidence = 1.0 / (hess_sum + lambda)`.
+- **Per-leaf sample counts in diagnostics** -- `TreeDiagnostic` now includes
+  `leaf_sample_counts: Vec<u64>` showing data distribution across leaves.
+- Internal `leaf_prediction` helper on `HoeffdingTree` reducing code duplication
+  across `predict`, `predict_with_variance`, and `predict_smooth`.
+
 ## [7.0.0] - 2026-03-15
 
 ### Added

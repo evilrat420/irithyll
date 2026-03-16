@@ -419,6 +419,23 @@ impl HoeffdingTree {
         self.rng_state
     }
 
+    /// Read-only access to the gradient and hessian sums for a leaf node.
+    ///
+    /// Returns `Some((grad_sum, hess_sum))` if `node` is a leaf with an active
+    /// [`LeafState`], or `None` if the node has no state (e.g. internal node
+    /// or freshly allocated).
+    ///
+    /// These sums enable inverse-hessian confidence estimation:
+    /// `confidence = 1.0 / (hess_sum + lambda)`. High hessian means the leaf
+    /// has seen consistent, informative data; low hessian means uncertainty.
+    #[inline]
+    pub fn leaf_grad_hess(&self, node: NodeId) -> Option<(f64, f64)> {
+        self.leaf_states
+            .get(node.0 as usize)
+            .and_then(|o| o.as_ref())
+            .map(|state| (state.grad_sum, state.hess_sum))
+    }
+
     /// Route a feature vector from the root down to a leaf, returning the leaf's NodeId.
     fn route_to_leaf(&self, features: &[f64]) -> NodeId {
         let mut current = self.root;
@@ -448,6 +465,81 @@ impl HoeffdingTree {
             };
         }
         current
+    }
+
+    /// Get the prediction value for a leaf node.
+    ///
+    /// Checks (in order): leaf model, live grad/hess statistics, stored leaf value.
+    /// Returns `0.0` if no leaf state exists.
+    #[inline]
+    fn leaf_prediction(&self, leaf_id: NodeId, features: &[f64]) -> f64 {
+        if let Some(state) = self
+            .leaf_states
+            .get(leaf_id.0 as usize)
+            .and_then(|o| o.as_ref())
+        {
+            if let Some(ref model) = state.leaf_model {
+                return model.predict(features);
+            }
+            if state.hess_sum != 0.0 {
+                leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda)
+            } else {
+                self.arena.leaf_value[leaf_id.0 as usize]
+            }
+        } else {
+            0.0
+        }
+    }
+
+    /// Predict using sigmoid-blended soft routing for smooth interpolation.
+    ///
+    /// Instead of hard left/right routing at each split node, uses sigmoid
+    /// blending: `alpha = sigmoid((threshold - feature) / bandwidth)`. The
+    /// prediction is `alpha * left_pred + (1 - alpha) * right_pred`, computed
+    /// recursively from root to leaves.
+    ///
+    /// The result is a continuous function that varies smoothly with every
+    /// feature change — no bins, no boundaries, no jumps.
+    ///
+    /// # Arguments
+    ///
+    /// * `features` - Input feature vector.
+    /// * `bandwidth` - Controls transition sharpness. Smaller = sharper
+    ///   (closer to hard splits), larger = smoother.
+    pub fn predict_smooth(&self, features: &[f64], bandwidth: f64) -> f64 {
+        self.predict_smooth_recursive(self.root, features, bandwidth)
+    }
+
+    /// Recursive sigmoid-blended prediction traversal.
+    fn predict_smooth_recursive(&self, node: NodeId, features: &[f64], bandwidth: f64) -> f64 {
+        if self.arena.is_leaf(node) {
+            // At a leaf, return the leaf prediction (same as regular predict)
+            return self.leaf_prediction(node, features);
+        }
+
+        let feat_idx = self.arena.get_feature_idx(node) as usize;
+        let left = self.arena.get_left(node);
+        let right = self.arena.get_right(node);
+
+        // Categorical splits: hard routing (sigmoid blending is meaningless for categories)
+        if let Some(mask) = self.arena.get_categorical_mask(node) {
+            let cat_val = features[feat_idx] as u64;
+            return if cat_val < 64 && (mask >> cat_val) & 1 == 1 {
+                self.predict_smooth_recursive(left, features, bandwidth)
+            } else {
+                self.predict_smooth_recursive(right, features, bandwidth)
+            };
+        }
+
+        // Continuous split: sigmoid blending for smooth transition around the threshold
+        let threshold = self.arena.get_threshold(node);
+        let z = (threshold - features[feat_idx]) / bandwidth;
+        let alpha = 1.0 / (1.0 + (-z).exp());
+
+        let left_pred = self.predict_smooth_recursive(left, features, bandwidth);
+        let right_pred = self.predict_smooth_recursive(right, features, bandwidth);
+
+        alpha * left_pred + (1.0 - alpha) * right_pred
     }
 
     /// Generate the feature mask for split evaluation.
@@ -1069,26 +1161,7 @@ impl StreamingTree for HoeffdingTree {
     /// the leaf's current weight.
     fn predict(&self, features: &[f64]) -> f64 {
         let leaf_id = self.route_to_leaf(features);
-        if let Some(state) = self
-            .leaf_states
-            .get(leaf_id.0 as usize)
-            .and_then(|o| o.as_ref())
-        {
-            // Delegate to the leaf model when one exists (linear / MLP).
-            if let Some(ref model) = state.leaf_model {
-                return model.predict(features);
-            }
-            if state.hess_sum != 0.0 {
-                // Compute live prediction from accumulated statistics.
-                leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda)
-            } else {
-                // Leaf has no accumulated data yet (e.g. freshly restored from
-                // a serialized snapshot). Fall back to the stored leaf value.
-                self.arena.leaf_value[leaf_id.0 as usize]
-            }
-        } else {
-            0.0
-        }
+        self.leaf_prediction(leaf_id, features)
     }
 
     /// Current number of leaf nodes.
@@ -1131,23 +1204,17 @@ impl StreamingTree for HoeffdingTree {
 
     fn predict_with_variance(&self, features: &[f64]) -> (f64, f64) {
         let leaf_id = self.route_to_leaf(features);
+        let value = self.leaf_prediction(leaf_id, features);
         if let Some(state) = self
             .leaf_states
             .get(leaf_id.0 as usize)
             .and_then(|o| o.as_ref())
         {
-            let value = if let Some(ref model) = state.leaf_model {
-                model.predict(features)
-            } else if state.hess_sum != 0.0 {
-                leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda)
-            } else {
-                self.arena.leaf_value[leaf_id.0 as usize]
-            };
             // Variance of the leaf weight estimate = 1 / (H_sum + lambda)
             let variance = 1.0 / (state.hess_sum + self.config.lambda);
             (value, variance)
         } else {
-            (0.0, f64::INFINITY)
+            (value, f64::INFINITY)
         }
     }
 }
@@ -1801,5 +1868,111 @@ mod tests {
             var_20,
             var_220,
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: predict_smooth matches hard prediction at small bandwidth
+    // -----------------------------------------------------------------------
+    #[test]
+    fn predict_smooth_matches_hard_at_small_bandwidth() {
+        let config = TreeConfig::new()
+            .max_depth(3)
+            .n_bins(16)
+            .grace_period(20)
+            .lambda(1.0);
+        let mut tree = HoeffdingTree::new(config);
+
+        // Train enough to get splits
+        let mut rng = 42u64;
+        for _ in 0..500 {
+            let x = test_rand_f64(&mut rng) * 10.0;
+            let y = 2.0 * x + 1.0;
+            let features = vec![x, x * 0.5];
+            let pred = tree.predict(&features);
+            let grad = pred - y;
+            let hess = 1.0;
+            tree.train_one(&features, grad, hess);
+        }
+
+        // With very small bandwidth, smooth prediction should approximate hard prediction
+        let features = vec![5.0, 2.5];
+        let hard = tree.predict(&features);
+        let smooth = tree.predict_smooth(&features, 0.001);
+        assert!(
+            (hard - smooth).abs() < 0.1,
+            "smooth with tiny bandwidth should approximate hard: hard={}, smooth={}",
+            hard, smooth,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: predict_smooth is continuous
+    // -----------------------------------------------------------------------
+    #[test]
+    fn predict_smooth_is_continuous() {
+        let config = TreeConfig::new()
+            .max_depth(3)
+            .n_bins(16)
+            .grace_period(20)
+            .lambda(1.0);
+        let mut tree = HoeffdingTree::new(config);
+
+        // Train to get splits
+        let mut rng = 42u64;
+        for _ in 0..500 {
+            let x = test_rand_f64(&mut rng) * 10.0;
+            let y = 2.0 * x + 1.0;
+            let features = vec![x, x * 0.5];
+            let pred = tree.predict(&features);
+            let grad = pred - y;
+            tree.train_one(&features, grad, 1.0);
+        }
+
+        // Check that small input changes produce small output changes (continuity)
+        let bandwidth = 1.0;
+        let base = tree.predict_smooth(&[5.0, 2.5], bandwidth);
+        let nudged = tree.predict_smooth(&[5.001, 2.5], bandwidth);
+        let diff = (base - nudged).abs();
+        assert!(
+            diff < 0.1,
+            "smooth prediction should be continuous: base={}, nudged={}, diff={}",
+            base, nudged, diff,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: leaf_grad_hess returns valid sums after training.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn leaf_grad_hess_returns_sums() {
+        let config = TreeConfig::new().grace_period(100).lambda(1.0);
+        let mut tree = HoeffdingTree::new(config);
+
+        let features = vec![1.0, 2.0, 3.0];
+
+        // Train several samples with known gradients
+        for _ in 0..10 {
+            tree.train_one(&features, -0.5, 1.0);
+        }
+
+        // The root should be a leaf (grace_period=100, only 10 samples)
+        let root = tree.root();
+        let (grad, hess) = tree.leaf_grad_hess(root).expect("root should have leaf state");
+
+        // grad_sum should be sum of all gradients: 10 * (-0.5) = -5.0
+        assert!((grad - (-5.0)).abs() < 1e-10, "grad_sum should be -5.0, got {}", grad);
+        // hess_sum should be sum of all hessians: 10 * 1.0 = 10.0
+        assert!((hess - 10.0).abs() < 1e-10, "hess_sum should be 10.0, got {}", hess);
+    }
+
+    #[test]
+    fn leaf_grad_hess_returns_none_for_invalid_node() {
+        let config = TreeConfig::new();
+        let tree = HoeffdingTree::new(config);
+
+        // NodeId::NONE should return None
+        assert!(tree.leaf_grad_hess(NodeId::NONE).is_none());
+        // A non-existent node should return None
+        assert!(tree.leaf_grad_hess(NodeId(999)).is_none());
     }
 }
