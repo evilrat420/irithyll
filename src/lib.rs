@@ -93,6 +93,7 @@ pub mod stream;
 pub mod tree;
 
 pub mod anomaly;
+pub mod evaluation;
 pub mod explain;
 pub mod learner;
 pub mod learners;
@@ -138,10 +139,17 @@ pub use ensemble::parallel::ParallelSGBT;
 pub use stream::{AsyncSGBT, Prediction, PredictionStream, Predictor, SampleSender};
 
 // Re-exports -- metrics
+pub use metrics::auc::StreamingAUC;
 pub use metrics::conformal::AdaptiveConformalInterval;
 pub use metrics::ewma::{EwmaClassificationMetrics, EwmaRegressionMetrics};
+pub use metrics::kappa::{CohenKappa, KappaM, KappaT};
 pub use metrics::rolling::{RollingClassificationMetrics, RollingRegressionMetrics};
 pub use metrics::{ClassificationMetrics, FeatureImportance, MetricSet, RegressionMetrics};
+
+// Re-exports -- evaluation
+pub use evaluation::{
+    HoldoutStrategy, PrequentialConfig, PrequentialEvaluator, ProgressiveValidator,
+};
 
 // Re-exports -- anomaly detection
 pub use anomaly::hst::{AnomalyScore, HSTConfig, HalfSpaceTree};

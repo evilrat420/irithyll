@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.3.0] - 2026-03-16
+
+### Added
+
+- **Prequential evaluation** -- `PrequentialEvaluator` implements the standard
+  streaming ML evaluation protocol (Gama et al., 2009): test-then-train on each
+  sample. Configurable warmup period and step interval. Optional rolling-window
+  and EWMA metric tracking alongside cumulative `RegressionMetrics`.
+- **Progressive validation** -- `ProgressiveValidator` with configurable holdout
+  strategies: `HoldoutStrategy::None` (pure prequential), `Periodic { period }`
+  (every N-th sample held out), `Random { holdout_fraction, seed }` (stochastic
+  holdout with deterministic xorshift64 PRNG). All strategies always evaluate;
+  only training is gated.
+- **Cohen's Kappa** (`CohenKappa`) -- streaming classification agreement metric
+  adjusted for chance. Auto-growing confusion matrix discovers new classes on
+  the fly. Tie-breaking by lowest class index.
+- **Kappa-M** (`KappaM`) -- compares model against a majority-class baseline
+  classifier. Tracks per-class counts to determine the current majority class.
+- **Kappa-T** (`KappaT`) -- compares model against a no-change (temporal)
+  classifier that always predicts the previous true label.
+- **Streaming AUC-ROC** (`StreamingAUC`) -- windowed approximation of AUC-ROC
+  via the Wilcoxon-Mann-Whitney U statistic over a fixed-size circular buffer
+  of `(score, is_positive)` pairs. O(n^2) over the window per computation.
+- New re-exports at crate root: `PrequentialEvaluator`, `PrequentialConfig`,
+  `ProgressiveValidator`, `HoldoutStrategy`, `CohenKappa`, `KappaM`, `KappaT`,
+  `StreamingAUC`.
+
 ## [7.2.0] - 2026-03-16
 
 ### Added
@@ -510,6 +537,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[7.3.0]: https://github.com/evilrat420/irithyll/compare/v7.2.0...v7.3.0
 [7.2.0]: https://github.com/evilrat420/irithyll/compare/v7.1.0...v7.2.0
 [7.1.0]: https://github.com/evilrat420/irithyll/compare/v7.0.0...v7.1.0
 [7.0.0]: https://github.com/evilrat420/irithyll/compare/v6.4.0...v7.0.0

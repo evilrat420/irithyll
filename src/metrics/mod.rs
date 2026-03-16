@@ -8,10 +8,12 @@
 //! - [`FeatureImportance`] -- Accumulated split gain per feature.
 //! - [`MetricSet`] -- Convenience wrapper combining regression and classification.
 
+pub mod auc;
 pub mod classification;
 pub mod conformal;
 pub mod ewma;
 pub mod importance;
+pub mod kappa;
 pub mod regression;
 pub mod rolling;
 
