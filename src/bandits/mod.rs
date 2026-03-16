@@ -240,7 +240,7 @@ mod tests {
             for _ in 0..200 {
                 let v = beta_sample(a, b, &mut s);
                 assert!(
-                    v >= 0.0 && v <= 1.0 && v.is_finite(),
+                    (0.0..=1.0).contains(&v) && v.is_finite(),
                     "beta({}, {}) should be in [0, 1], got {}",
                     a,
                     b,

@@ -508,8 +508,8 @@ fn weighted_kmeans(centers: &[Vec<f64>], weights: &[u64], k: usize, max_iter: us
 
         for c in 0..effective_k {
             if total_weight[c] > 0.0 {
-                for j in 0..d {
-                    new_centroids[c][j] /= total_weight[c];
+                for val in new_centroids[c].iter_mut().take(d) {
+                    *val /= total_weight[c];
                 }
             }
             // If a centroid has no assigned points, keep the old one.

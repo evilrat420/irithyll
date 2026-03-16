@@ -202,8 +202,8 @@ mod tests {
 
         // Construct two vectors with a large, well-defined inner product.
         let dim = 50;
-        let a: Vec<f64> = (0..dim).map(|i| (i as f64 + 1.0)).collect();
-        let b: Vec<f64> = (0..dim).map(|i| ((i as f64 + 1.0) * 0.5)).collect();
+        let a: Vec<f64> = (0..dim).map(|i| i as f64 + 1.0).collect();
+        let b: Vec<f64> = (0..dim).map(|i| (i as f64 + 1.0) * 0.5).collect();
 
         let true_ip: f64 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
         // true_ip = sum_{i=1}^{50} i * (i * 0.5) = 0.5 * sum(i^2) = 0.5 * 42925 = 21462.5

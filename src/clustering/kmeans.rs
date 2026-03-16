@@ -554,8 +554,8 @@ mod tests {
         let test_data: Vec<&[f64]> = test_data_vecs.iter().map(|v| v.as_slice()).collect();
 
         // Initialize with first two distinct points from test data.
-        km.train_one(&test_data[0]);
-        km.train_one(&test_data[50]);
+        km.train_one(test_data[0]);
+        km.train_one(test_data[50]);
         let inertia_before = km.inertia(&test_data);
 
         // Train on all data.
