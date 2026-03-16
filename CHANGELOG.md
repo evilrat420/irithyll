@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.4.0] - 2026-03-16
+
+### Added
+
+- **Streaming K-Means** (`StreamingKMeans`) -- mini-batch online K-Means with
+  optional forgetting factor for non-stationary streams (Sculley, 2010). Lazy
+  initialization from first k distinct samples. Decaying learning rate
+  `eta = 1/count` per centroid. Configurable via `StreamingKMeansConfig` builder.
+- **DBSTREAM** (`DBStream`) -- density-based streaming clustering with weighted
+  micro-clusters and shared-density graph for macro-cluster merging
+  (Hahsler & Bolanos, 2016). Exponential decay, periodic cleanup of dead MCs,
+  connected-component macro-cluster extraction via DFS.
+- **CluStream** (`CluStream`) -- micro/macro streaming clustering via Cluster
+  Feature vectors (Aggarwal et al., 2003). Online phase maintains CF summaries
+  with absorb/merge logic. Offline phase produces k macro-clusters via weighted
+  K-Means on micro-cluster centers.
+- `ClusterFeature` -- sufficient statistics `(n, LS, SS)` for streaming cluster
+  summarization. Supports absorb, merge, center, and radius computation.
+- `MicroCluster` -- weighted centroid with creation time for DBSTREAM.
+- New re-exports at crate root: `StreamingKMeans`, `StreamingKMeansConfig`,
+  `DBStream`, `DBStreamConfig`, `MicroCluster`, `CluStream`, `CluStreamConfig`,
+  `ClusterFeature`.
+
 ## [7.3.0] - 2026-03-16
 
 ### Added
@@ -537,6 +560,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial development release. Core SGBT algorithm with Hoeffding trees, histogram
 binning, drift detection, and online metrics.
 
+[7.4.0]: https://github.com/evilrat420/irithyll/compare/v7.3.0...v7.4.0
 [7.3.0]: https://github.com/evilrat420/irithyll/compare/v7.2.0...v7.3.0
 [7.2.0]: https://github.com/evilrat420/irithyll/compare/v7.1.0...v7.2.0
 [7.1.0]: https://github.com/evilrat420/irithyll/compare/v7.0.0...v7.1.0
