@@ -173,7 +173,10 @@ pub use learner::{SGBTLearner, StreamingLearner};
 
 // Re-exports -- preprocessing & pipeline
 pub use pipeline::{Pipeline, PipelineBuilder, StreamingPreprocessor};
-pub use preprocessing::{IncrementalNormalizer, OnlineFeatureSelector, CCIPCA};
+pub use preprocessing::{
+    FeatureHasher, IncrementalNormalizer, MinMaxScaler, OneHotEncoder, OnlineFeatureSelector,
+    PolynomialFeatures, TargetEncoder, CCIPCA,
+};
 
 // Re-exports -- learning rate scheduling
 pub use ensemble::lr_schedule::LRScheduler;
@@ -320,6 +323,72 @@ pub fn krls(gamma: f64, budget: usize, ald_threshold: f64) -> KRLS {
 /// ```
 pub fn ccipca(n_components: usize) -> CCIPCA {
     CCIPCA::new(n_components)
+}
+
+/// Create a feature hasher for fixed-size dimensionality reduction.
+///
+/// ```
+/// use irithyll::{feature_hasher, StreamingPreprocessor};
+///
+/// let mut h = feature_hasher(32);
+/// let hashed = h.update_and_transform(&[1.0, 2.0, 3.0]);
+/// assert_eq!(hashed.len(), 32);
+/// ```
+pub fn feature_hasher(n_buckets: usize) -> FeatureHasher {
+    FeatureHasher::new(n_buckets)
+}
+
+/// Create a min-max scaler that normalizes features to `[0, 1]`.
+///
+/// ```
+/// use irithyll::{min_max_scaler, StreamingPreprocessor};
+///
+/// let mut scaler = min_max_scaler();
+/// let _ = scaler.update_and_transform(&[10.0, 200.0]);
+/// ```
+pub fn min_max_scaler() -> MinMaxScaler {
+    MinMaxScaler::new()
+}
+
+/// Create a one-hot encoder for the given categorical feature indices.
+///
+/// ```
+/// use irithyll::{one_hot, StreamingPreprocessor};
+///
+/// let mut enc = one_hot(vec![0]); // feature 0 is categorical
+/// let encoded = enc.update_and_transform(&[2.0, 3.5]);
+/// ```
+pub fn one_hot(categorical_indices: Vec<usize>) -> OneHotEncoder {
+    OneHotEncoder::new(categorical_indices)
+}
+
+/// Create a degree-2 polynomial feature generator (interactions + squares).
+///
+/// ```
+/// use irithyll::{polynomial_features, StreamingPreprocessor};
+///
+/// let poly = polynomial_features();
+/// let expanded = poly.transform(&[1.0, 2.0]);
+/// assert_eq!(expanded.len(), 5); // [x0, x1, x0*x0, x0*x1, x1*x1]
+/// ```
+pub fn polynomial_features() -> PolynomialFeatures {
+    PolynomialFeatures::new()
+}
+
+/// Create a target encoder with Bayesian smoothing for categorical features.
+///
+/// Note: [`TargetEncoder`] does not implement [`StreamingPreprocessor`] because
+/// it requires the target value. Use its methods directly.
+///
+/// ```
+/// use irithyll::target_encoder;
+///
+/// let mut enc = target_encoder(vec![0]); // feature 0 is categorical
+/// enc.update(&[1.0, 3.5], 10.0);
+/// let encoded = enc.transform(&[1.0, 3.5]);
+/// ```
+pub fn target_encoder(categorical_indices: Vec<usize>) -> TargetEncoder {
+    TargetEncoder::new(categorical_indices)
 }
 
 /// Create an adaptive SGBT with a learning rate scheduler.

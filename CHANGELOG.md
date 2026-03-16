@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.8.0] - 2026-03-16
+
+### Added
+
+- **Preprocessing expansion** -- 5 new streaming preprocessors for feature
+  engineering in online pipelines.
+- **`FeatureHasher`** -- hashing trick (Weinberger et al., 2009) for
+  fixed-size dimensionality reduction. Dual-seed multiply-xorshift hash
+  with sign bit preserving inner products in expectation. Implements
+  `StreamingPreprocessor` (stateless).
+- **`OneHotEncoder`** -- streaming one-hot encoding with online category
+  discovery. Configurable `max_categories` cap per feature. Sorted
+  category storage for deterministic encoding. Implements
+  `StreamingPreprocessor`.
+- **`TargetEncoder`** -- Bayesian-smoothed target encoding for categorical
+  features. Formula: `(n * cat_mean + m * global_mean) / (n + m)`.
+  Standalone (requires target, does not implement `StreamingPreprocessor`).
+- **`MinMaxScaler`** -- streaming min/max tracking with configurable output
+  range (default `[0, 1]`). Constant features map to range midpoint.
+  Implements `StreamingPreprocessor`.
+- **`PolynomialFeatures`** -- degree-2 polynomial feature generation
+  (squares + pairwise interactions). Optional `interaction_only` mode
+  for cross-terms without squared terms. Stateless, implements
+  `StreamingPreprocessor`.
+- New factory functions: `feature_hasher()`, `min_max_scaler()`, `one_hot()`,
+  `polynomial_features()`, `target_encoder()`.
+- New re-exports at crate root: `FeatureHasher`, `MinMaxScaler`,
+  `OneHotEncoder`, `PolynomialFeatures`, `TargetEncoder`.
+
 ## [7.7.0] - 2026-03-16
 
 ### Added
