@@ -6,6 +6,7 @@
 
 pub mod builder;
 pub mod hoeffding;
+pub mod hoeffding_classifier;
 pub mod node;
 pub mod predict;
 pub mod split;

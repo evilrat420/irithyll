@@ -17,6 +17,7 @@
 //!    of all preceding trees.
 
 pub mod adaptive;
+pub mod adaptive_forest;
 pub mod bagged;
 pub mod config;
 pub mod distributional;
