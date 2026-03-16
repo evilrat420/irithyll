@@ -93,6 +93,7 @@ pub mod stream;
 pub mod tree;
 
 pub mod anomaly;
+pub mod clustering;
 pub mod evaluation;
 pub mod explain;
 pub mod learner;
@@ -149,6 +150,12 @@ pub use metrics::{ClassificationMetrics, FeatureImportance, MetricSet, Regressio
 // Re-exports -- evaluation
 pub use evaluation::{
     HoldoutStrategy, PrequentialConfig, PrequentialEvaluator, ProgressiveValidator,
+};
+
+// Re-exports -- clustering
+pub use clustering::{
+    CluStream, CluStreamConfig, ClusterFeature, DBStream, DBStreamConfig, MicroCluster,
+    StreamingKMeans, StreamingKMeansConfig,
 };
 
 // Re-exports -- anomaly detection
