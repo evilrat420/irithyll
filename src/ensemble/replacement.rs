@@ -41,6 +41,14 @@ pub struct TreeSlot {
     tree_config: TreeConfig,
     /// Maximum samples before proactive replacement. `None` = disabled.
     max_tree_samples: Option<u64>,
+    /// Total number of tree replacements (drift or time-based).
+    replacements: u64,
+    /// Welford online count for prediction statistics.
+    pred_count: u64,
+    /// Welford online mean of predictions.
+    pred_mean: f64,
+    /// Welford online M2 accumulator for prediction variance.
+    pred_m2: f64,
 }
 
 impl fmt::Debug for TreeSlot {
@@ -62,6 +70,10 @@ impl Clone for TreeSlot {
             detector: self.detector.clone_boxed(),
             tree_config: self.tree_config.clone(),
             max_tree_samples: self.max_tree_samples,
+            replacements: self.replacements,
+            pred_count: self.pred_count,
+            pred_mean: self.pred_mean,
+            pred_m2: self.pred_m2,
         }
     }
 }
@@ -82,6 +94,10 @@ impl TreeSlot {
             detector,
             tree_config,
             max_tree_samples,
+            replacements: 0,
+            pred_count: 0,
+            pred_mean: 0.0,
+            pred_m2: 0.0,
         }
     }
 
@@ -102,6 +118,10 @@ impl TreeSlot {
             detector,
             tree_config,
             max_tree_samples,
+            replacements: 0,
+            pred_count: 0,
+            pred_mean: 0.0,
+            pred_m2: 0.0,
         }
     }
 
@@ -128,6 +148,13 @@ impl TreeSlot {
     pub fn train_and_predict(&mut self, features: &[f64], gradient: f64, hessian: f64) -> f64 {
         // 1. Predict from active tree BEFORE training.
         let prediction = self.active.predict(features);
+
+        // 1b. Update Welford running prediction statistics.
+        self.pred_count += 1;
+        let delta = prediction - self.pred_mean;
+        self.pred_mean += delta / self.pred_count as f64;
+        let delta2 = prediction - self.pred_mean;
+        self.pred_m2 += delta * delta2;
 
         // 2. Train the active tree.
         self.active.train_one(features, gradient, hessian);
@@ -163,6 +190,11 @@ impl TreeSlot {
                 self.alternate = None;
                 // Reset the drift detector to monitor the new tree cleanly.
                 self.detector = self.detector.clone_fresh();
+                // Track replacement and reset prediction stats for the new tree.
+                self.replacements += 1;
+                self.pred_count = 0;
+                self.pred_mean = 0.0;
+                self.pred_m2 = 0.0;
             }
         }
 
@@ -178,6 +210,10 @@ impl TreeSlot {
                     .unwrap_or_else(|| HoeffdingTree::new(self.tree_config.clone()));
                 self.alternate = None;
                 self.detector = self.detector.clone_fresh();
+                self.replacements += 1;
+                self.pred_count = 0;
+                self.pred_mean = 0.0;
+                self.pred_m2 = 0.0;
             }
         }
 
@@ -207,6 +243,34 @@ impl TreeSlot {
     #[inline]
     pub fn predict_smooth(&self, features: &[f64], bandwidth: f64) -> f64 {
         self.active.predict_smooth(features, bandwidth)
+    }
+
+    /// Predict using per-feature auto-calibrated bandwidths.
+    #[inline]
+    pub fn predict_smooth_auto(&self, features: &[f64], bandwidths: &[f64]) -> f64 {
+        self.active.predict_smooth_auto(features, bandwidths)
+    }
+
+    /// Total number of tree replacements (drift or time-based).
+    #[inline]
+    pub fn replacements(&self) -> u64 {
+        self.replacements
+    }
+
+    /// Running mean of predictions from the active tree.
+    #[inline]
+    pub fn prediction_mean(&self) -> f64 {
+        self.pred_mean
+    }
+
+    /// Running standard deviation of predictions from the active tree.
+    #[inline]
+    pub fn prediction_std(&self) -> f64 {
+        if self.pred_count < 2 {
+            0.0
+        } else {
+            (self.pred_m2 / (self.pred_count - 1) as f64).sqrt()
+        }
     }
 
     /// Number of leaves in the active tree.
@@ -283,6 +347,10 @@ impl TreeSlot {
         self.active = HoeffdingTree::new(self.tree_config.clone());
         self.alternate = None;
         self.detector = self.detector.clone_fresh();
+        self.replacements = 0;
+        self.pred_count = 0;
+        self.pred_mean = 0.0;
+        self.pred_m2 = 0.0;
     }
 }
 

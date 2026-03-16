@@ -135,6 +135,12 @@ impl BoostingStep {
         self.slot.predict_smooth(features, bandwidth)
     }
 
+    /// Predict using per-feature auto-calibrated bandwidths.
+    #[inline]
+    pub fn predict_smooth_auto(&self, features: &[f64], bandwidths: &[f64]) -> f64 {
+        self.slot.predict_smooth_auto(features, bandwidths)
+    }
+
     /// Number of leaves in the active tree.
     #[inline]
     pub fn n_leaves(&self) -> usize {

@@ -302,17 +302,17 @@ impl HoltWinters {
         // Seasonal factors from first season
         match self.config.seasonality {
             Seasonality::Additive => {
-                for i in 0..m {
-                    self.seasonal[i] = buf[i] - mean;
+                for (i, &b) in buf.iter().enumerate().take(m) {
+                    self.seasonal[i] = b - mean;
                 }
             }
             Seasonality::Multiplicative => {
-                for i in 0..m {
+                for (i, &b) in buf.iter().enumerate().take(m) {
                     // Guard against zero mean to avoid division by zero.
                     if mean.abs() < f64::EPSILON {
                         self.seasonal[i] = 1.0;
                     } else {
-                        self.seasonal[i] = buf[i] / mean;
+                        self.seasonal[i] = b / mean;
                     }
                 }
             }

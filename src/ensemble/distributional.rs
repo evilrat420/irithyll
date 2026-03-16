@@ -78,6 +78,10 @@ pub struct TreeDiagnostic {
     pub split_features: Vec<usize>,
     /// Per-leaf sample counts showing data distribution across leaves.
     pub leaf_sample_counts: Vec<u64>,
+    /// Running mean of predictions from this tree (Welford online).
+    pub prediction_mean: f64,
+    /// Running standard deviation of predictions from this tree.
+    pub prediction_std: f64,
 }
 
 /// Full model diagnostics for [`DistributionalSGBT`].
@@ -104,6 +108,9 @@ pub struct ModelDiagnostics {
     pub scale_mode: ScaleMode,
     /// Number of scale trees that actually split (>1 leaf). 0 = frozen chain.
     pub scale_trees_active: usize,
+    /// Per-feature auto-calibrated bandwidths for smooth prediction.
+    /// `f64::INFINITY` means that feature uses hard routing.
+    pub auto_bandwidths: Vec<f64>,
 }
 
 /// Decomposed prediction showing each tree's contribution.
@@ -205,6 +212,10 @@ pub struct DistributionalSGBT {
     /// EWMA-smoothed derivative of empirical σ (σ velocity).
     /// Positive = σ increasing (errors growing), negative = σ decreasing.
     sigma_velocity: f64,
+    /// Per-feature auto-calibrated bandwidths for smooth prediction.
+    auto_bandwidths: Vec<f64>,
+    /// Sum of replacement counts at last bandwidth computation.
+    last_replacement_sum: u64,
 }
 
 impl Clone for DistributionalSGBT {
@@ -227,6 +238,8 @@ impl Clone for DistributionalSGBT {
             empirical_sigma_alpha: self.empirical_sigma_alpha,
             prev_sigma: self.prev_sigma,
             sigma_velocity: self.sigma_velocity,
+            auto_bandwidths: self.auto_bandwidths.clone(),
+            last_replacement_sum: self.last_replacement_sum,
         }
     }
 }
@@ -325,6 +338,8 @@ impl DistributionalSGBT {
             empirical_sigma_alpha,
             prev_sigma: 0.0,
             sigma_velocity: 0.0,
+            auto_bandwidths: Vec::new(),
+            last_replacement_sum: 0,
         }
     }
 
@@ -372,6 +387,9 @@ impl DistributionalSGBT {
             ScaleMode::Empirical => self.train_one_empirical(target, features),
             ScaleMode::TreeChain => self.train_one_tree_chain(target, features),
         }
+
+        // Refresh auto-bandwidths when trees have been replaced
+        self.refresh_bandwidths();
     }
 
     /// Empirical-σ training: location trees only, σ from EWMA of squared errors.
@@ -505,18 +523,18 @@ impl DistributionalSGBT {
 
     /// Predict the full Gaussian distribution for a feature vector.
     ///
-    /// When [`bandwidth`](SGBTConfig::bandwidth) is set, automatically uses
-    /// sigmoid-blended soft routing instead of hard splits.
+    /// Always uses sigmoid-blended soft routing with auto-calibrated per-feature
+    /// bandwidths derived from median split threshold gaps.
     pub fn predict(&self, features: &[f64]) -> GaussianPrediction {
         let mut mu = self.location_base;
-        if let Some(bw) = self.config.bandwidth {
+        if self.auto_bandwidths.is_empty() {
             for s in 0..self.location_steps.len() {
-                mu +=
-                    self.config.learning_rate * self.location_steps[s].predict_smooth(features, bw);
+                mu += self.config.learning_rate * self.location_steps[s].predict(features);
             }
         } else {
             for s in 0..self.location_steps.len() {
-                mu += self.config.learning_rate * self.location_steps[s].predict(features);
+                mu += self.config.learning_rate
+                    * self.location_steps[s].predict_smooth_auto(features, &self.auto_bandwidths);
             }
         }
 
@@ -527,14 +545,15 @@ impl DistributionalSGBT {
             }
             ScaleMode::TreeChain => {
                 let mut ls = self.scale_base;
-                if let Some(bw) = self.config.bandwidth {
+                if self.auto_bandwidths.is_empty() {
                     for s in 0..self.scale_steps.len() {
-                        ls += self.config.learning_rate
-                            * self.scale_steps[s].predict_smooth(features, bw);
+                        ls += self.config.learning_rate * self.scale_steps[s].predict(features);
                     }
                 } else {
                     for s in 0..self.scale_steps.len() {
-                        ls += self.config.learning_rate * self.scale_steps[s].predict(features);
+                        ls += self.config.learning_rate
+                            * self.scale_steps[s]
+                                .predict_smooth_auto(features, &self.auto_bandwidths);
                     }
                 }
                 (ls.exp().max(1e-8), ls)
@@ -683,6 +702,98 @@ impl DistributionalSGBT {
         }
     }
 
+    /// Refresh auto-bandwidths if any tree has been replaced since last computation.
+    fn refresh_bandwidths(&mut self) {
+        let current_sum: u64 = self
+            .location_steps
+            .iter()
+            .chain(self.scale_steps.iter())
+            .map(|s| s.slot().replacements())
+            .sum();
+        if current_sum != self.last_replacement_sum || self.auto_bandwidths.is_empty() {
+            self.auto_bandwidths = self.compute_auto_bandwidths();
+            self.last_replacement_sum = current_sum;
+        }
+    }
+
+    /// Compute per-feature auto-calibrated bandwidths from all trees.
+    fn compute_auto_bandwidths(&self) -> Vec<f64> {
+        const K: f64 = 2.0;
+
+        let n_features = self
+            .location_steps
+            .iter()
+            .chain(self.scale_steps.iter())
+            .filter_map(|s| s.slot().active_tree().n_features())
+            .max()
+            .unwrap_or(0);
+
+        if n_features == 0 {
+            return Vec::new();
+        }
+
+        let mut all_thresholds: Vec<Vec<f64>> = vec![Vec::new(); n_features];
+
+        for step in self.location_steps.iter().chain(self.scale_steps.iter()) {
+            let tree_thresholds = step
+                .slot()
+                .active_tree()
+                .collect_split_thresholds_per_feature();
+            for (i, ts) in tree_thresholds.into_iter().enumerate() {
+                if i < n_features {
+                    all_thresholds[i].extend(ts);
+                }
+            }
+        }
+
+        let n_bins = self.config.n_bins as f64;
+
+        all_thresholds
+            .iter()
+            .map(|ts| {
+                if ts.is_empty() {
+                    return f64::INFINITY;
+                }
+
+                let mut sorted = ts.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                sorted.dedup_by(|a, b| (*a - *b).abs() < 1e-15);
+
+                if sorted.len() < 2 {
+                    return f64::INFINITY;
+                }
+
+                let mut gaps: Vec<f64> = sorted.windows(2).map(|w| w[1] - w[0]).collect();
+
+                if sorted.len() < 3 {
+                    let range = sorted.last().unwrap() - sorted.first().unwrap();
+                    if range < 1e-15 {
+                        return f64::INFINITY;
+                    }
+                    return (range / n_bins) * K;
+                }
+
+                gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let median_gap = if gaps.len() % 2 == 0 {
+                    (gaps[gaps.len() / 2 - 1] + gaps[gaps.len() / 2]) / 2.0
+                } else {
+                    gaps[gaps.len() / 2]
+                };
+
+                if median_gap < 1e-15 {
+                    f64::INFINITY
+                } else {
+                    median_gap * K
+                }
+            })
+            .collect()
+    }
+
+    /// Per-feature auto-calibrated bandwidths used by `predict()`.
+    pub fn auto_bandwidths(&self) -> &[f64] {
+        &self.auto_bandwidths
+    }
+
     /// Reset to initial untrained state.
     pub fn reset(&mut self) {
         for step in &mut self.location_steps {
@@ -701,6 +812,8 @@ impl DistributionalSGBT {
         self.ewma_sq_err = 1.0;
         self.prev_sigma = 0.0;
         self.sigma_velocity = 0.0;
+        self.auto_bandwidths.clear();
+        self.last_replacement_sum = 0;
     }
 
     /// Total samples trained.
@@ -848,6 +961,8 @@ impl DistributionalSGBT {
                     leaf_weight_stats,
                     split_features,
                     leaf_sample_counts,
+                    prediction_mean: slot.prediction_mean(),
+                    prediction_std: slot.prediction_std(),
                 });
             }
         }
@@ -869,6 +984,7 @@ impl DistributionalSGBT {
             empirical_sigma: self.ewma_sq_err.sqrt(),
             scale_mode: self.scale_mode,
             scale_trees_active,
+            auto_bandwidths: self.auto_bandwidths.clone(),
         }
     }
 
@@ -1102,6 +1218,8 @@ impl DistributionalSGBT {
             empirical_sigma_alpha,
             prev_sigma: 0.0,
             sigma_velocity: 0.0,
+            auto_bandwidths: Vec::new(),
+            last_replacement_sum: 0,
         }
     }
 }
@@ -1915,11 +2033,12 @@ mod serde_tests {
     }
 
     #[test]
-    fn bandwidth_config_enables_smooth_distributional() {
+    fn auto_bandwidth_computed_distributional() {
         let config = SGBTConfig::builder()
             .n_steps(3)
             .learning_rate(0.1)
-            .bandwidth(0.5)
+            .grace_period(10)
+            .initial_target_count(10)
             .build()
             .unwrap();
         let mut model = DistributionalSGBT::new(config);
@@ -1929,11 +2048,20 @@ mod serde_tests {
             model.train_one(&(vec![x, x.sin()], 2.0 * x + 1.0));
         }
 
+        // auto_bandwidths should be populated
+        let bws = model.auto_bandwidths();
+        assert_eq!(bws.len(), 2, "should have 2 feature bandwidths");
+
+        // Diagnostics should include auto_bandwidths
+        let diag = model.diagnostics();
+        assert_eq!(diag.auto_bandwidths.len(), 2);
+
+        // TreeDiagnostic should have prediction stats
+        assert!(diag.location_trees[0].prediction_mean.is_finite());
+        assert!(diag.location_trees[0].prediction_std.is_finite());
+
         let pred = model.predict(&[1.0, 1.0_f64.sin()]);
-        assert!(pred.mu.is_finite(), "bandwidth-enabled mu should be finite");
-        assert!(
-            pred.sigma > 0.0,
-            "bandwidth-enabled sigma should be positive"
-        );
+        assert!(pred.mu.is_finite(), "auto-bandwidth mu should be finite");
+        assert!(pred.sigma > 0.0, "auto-bandwidth sigma should be positive");
     }
 }
