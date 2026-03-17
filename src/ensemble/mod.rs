@@ -196,6 +196,8 @@ impl<L: Loss> SGBT<L> {
             .feature_types_opt(config.feature_types.clone())
             .gradient_clip_sigma_opt(config.gradient_clip_sigma)
             .monotone_constraints_opt(config.monotone_constraints.clone())
+            .max_leaf_output_opt(config.max_leaf_output)
+            .min_hessian_sum_opt(config.min_hessian_sum)
             .leaf_model_type(config.leaf_model_type.clone());
 
         let max_tree_samples = config.max_tree_samples;
@@ -494,6 +496,18 @@ impl<L: Loss> SGBT<L> {
     /// uses hard routing.
     pub fn auto_bandwidths(&self) -> &[f64] {
         &self.auto_bandwidths
+    }
+
+    /// Predict with parent-leaf linear interpolation.
+    ///
+    /// Blends each leaf prediction with its parent's preserved prediction
+    /// based on sample count, preventing stale predictions from fresh leaves.
+    pub fn predict_interpolated(&self, features: &[f64]) -> f64 {
+        let mut pred = self.base_prediction;
+        for step in &self.steps {
+            pred += self.config.learning_rate * step.predict_interpolated(features);
+        }
+        pred
     }
 
     /// Predict with loss transform applied (e.g., sigmoid for logistic loss).
@@ -2007,6 +2021,28 @@ mod tests {
         assert!(
             pred.is_finite(),
             "auto-bandwidth predict should be finite: {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn predict_interpolated_returns_finite() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.01)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x.sin()], x.cos()));
+        }
+
+        let pred = model.predict_interpolated(&[1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "interpolated prediction should be finite: {}",
             pred
         );
     }

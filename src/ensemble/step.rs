@@ -141,6 +141,12 @@ impl BoostingStep {
         self.slot.predict_smooth_auto(features, bandwidths)
     }
 
+    /// Predict with parent-leaf linear interpolation.
+    #[inline]
+    pub fn predict_interpolated(&self, features: &[f64]) -> f64 {
+        self.slot.predict_interpolated(features)
+    }
+
     /// Number of leaves in the active tree.
     #[inline]
     pub fn n_leaves(&self) -> usize {

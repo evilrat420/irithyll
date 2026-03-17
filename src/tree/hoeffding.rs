@@ -473,21 +473,32 @@ impl HoeffdingTree {
     /// Returns `0.0` if no leaf state exists.
     #[inline]
     fn leaf_prediction(&self, leaf_id: NodeId, features: &[f64]) -> f64 {
-        if let Some(state) = self
+        let raw = if let Some(state) = self
             .leaf_states
             .get(leaf_id.0 as usize)
             .and_then(|o| o.as_ref())
         {
-            if let Some(ref model) = state.leaf_model {
-                return model.predict(features);
+            // min_hessian_sum: suppress fresh leaves with insufficient samples
+            if let Some(min_h) = self.config.min_hessian_sum {
+                if state.hess_sum < min_h {
+                    return 0.0;
+                }
             }
-            if state.hess_sum != 0.0 {
+            if let Some(ref model) = state.leaf_model {
+                model.predict(features)
+            } else if state.hess_sum != 0.0 {
                 leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda)
             } else {
                 self.arena.leaf_value[leaf_id.0 as usize]
             }
         } else {
             0.0
+        };
+        // max_leaf_output: clamp to prevent prediction explosions
+        if let Some(max) = self.config.max_leaf_output {
+            raw.clamp(-max, max)
+        } else {
+            raw
         }
     }
 
@@ -516,6 +527,63 @@ impl HoeffdingTree {
     /// gaps. Features with `f64::INFINITY` bandwidth fall back to hard routing.
     pub fn predict_smooth_auto(&self, features: &[f64], bandwidths: &[f64]) -> f64 {
         self.predict_smooth_auto_recursive(self.root, features, bandwidths)
+    }
+
+    /// Predict with parent-leaf linear interpolation.
+    ///
+    /// Routes to the leaf but blends the leaf prediction with the parent node's
+    /// preserved prediction based on the leaf's hessian sum. Fresh leaves
+    /// (low hess_sum) smoothly transition from parent prediction to their own:
+    ///
+    /// `alpha = leaf_hess / (leaf_hess + lambda)`
+    /// `pred = alpha * leaf_pred + (1 - alpha) * parent_pred`
+    ///
+    /// This fixes static predictions from leaves that split but haven't
+    /// accumulated enough samples to outperform their parent.
+    pub fn predict_interpolated(&self, features: &[f64]) -> f64 {
+        let mut current = self.root;
+        let mut parent = None;
+        while !self.arena.is_leaf(current) {
+            parent = Some(current);
+            let feat_idx = self.arena.get_feature_idx(current) as usize;
+            current = if let Some(mask) = self.arena.get_categorical_mask(current) {
+                let cat_val = features[feat_idx] as u64;
+                if cat_val < 64 && (mask >> cat_val) & 1 == 1 {
+                    self.arena.get_left(current)
+                } else {
+                    self.arena.get_right(current)
+                }
+            } else {
+                let threshold = self.arena.get_threshold(current);
+                if features[feat_idx] <= threshold {
+                    self.arena.get_left(current)
+                } else {
+                    self.arena.get_right(current)
+                }
+            };
+        }
+
+        let leaf_pred = self.leaf_prediction(current, features);
+
+        // No parent (root is leaf) → return leaf prediction directly
+        let parent_id = match parent {
+            Some(p) => p,
+            None => return leaf_pred,
+        };
+
+        // Get parent's preserved prediction from its old leaf state
+        let parent_pred = self.leaf_prediction(parent_id, features);
+
+        // Blend: alpha = leaf_hess / (leaf_hess + lambda)
+        let leaf_hess = self
+            .leaf_states
+            .get(current.0 as usize)
+            .and_then(|o| o.as_ref())
+            .map(|s| s.hess_sum)
+            .unwrap_or(0.0);
+
+        let alpha = leaf_hess / (leaf_hess + self.config.lambda);
+        alpha * leaf_pred + (1.0 - alpha) * parent_pred
     }
 
     /// Collect all split thresholds per feature from the tree arena.

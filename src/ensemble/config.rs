@@ -364,6 +364,31 @@ pub struct SGBTConfig {
     #[serde(default = "default_empirical_sigma_alpha")]
     pub empirical_sigma_alpha: f64,
 
+    /// Maximum absolute leaf output value.
+    ///
+    /// When `Some(max)`, leaf predictions are clamped to `[-max, max]`.
+    /// Prevents runaway leaf weights from causing prediction explosions
+    /// in feedback loops. `None` (default) means no clamping.
+    #[serde(default)]
+    pub max_leaf_output: Option<f64>,
+
+    /// Minimum hessian sum before a leaf produces non-zero output.
+    ///
+    /// When `Some(min_h)`, leaves with `hess_sum < min_h` return 0.0.
+    /// Prevents post-replacement spikes from fresh leaves with insufficient
+    /// samples. `None` (default) means all leaves contribute immediately.
+    #[serde(default)]
+    pub min_hessian_sum: Option<f64>,
+
+    /// Huber loss delta multiplier for [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
+    ///
+    /// When `Some(k)`, the distributional location gradient uses Huber loss
+    /// with adaptive `delta = k * empirical_sigma`. This bounds gradients by
+    /// construction. Standard value: `1.345` (95% efficiency at Gaussian).
+    /// `None` (default) uses squared loss.
+    #[serde(default)]
+    pub huber_k: Option<f64>,
+
     /// Leaf prediction model type.
     ///
     /// Controls how each leaf computes its prediction:
@@ -423,6 +448,9 @@ impl Default for SGBTConfig {
             uncertainty_modulated_lr: false,
             scale_mode: ScaleMode::default(),
             empirical_sigma_alpha: 0.01,
+            max_leaf_output: None,
+            min_hessian_sum: None,
+            huber_k: None,
             leaf_model_type: LeafModelType::default(),
         }
     }
@@ -676,6 +704,33 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Set the maximum absolute leaf output value.
+    ///
+    /// Clamps leaf predictions to `[-max, max]`, breaking feedback loops
+    /// that cause prediction explosions.
+    pub fn max_leaf_output(mut self, max: f64) -> Self {
+        self.config.max_leaf_output = Some(max);
+        self
+    }
+
+    /// Set the minimum hessian sum for leaf output.
+    ///
+    /// Fresh leaves with `hess_sum < min_h` return 0.0, preventing
+    /// post-replacement spikes.
+    pub fn min_hessian_sum(mut self, min_h: f64) -> Self {
+        self.config.min_hessian_sum = Some(min_h);
+        self
+    }
+
+    /// Set the Huber loss delta multiplier for [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
+    ///
+    /// When set, location gradients use Huber loss with adaptive
+    /// `delta = k * empirical_sigma`. Standard value: `1.345` (95% Gaussian efficiency).
+    pub fn huber_k(mut self, k: f64) -> Self {
+        self.config.huber_k = Some(k);
+        self
+    }
+
     /// Set the leaf prediction model type.
     ///
     /// [`LeafModelType::Linear`] is recommended for low-depth configurations
@@ -825,6 +880,31 @@ impl SGBTConfigBuilder {
                     )
                     .into());
                 }
+            }
+        }
+
+        // -- Leaf output clamping --
+        if let Some(max) = c.max_leaf_output {
+            if max <= 0.0 {
+                return Err(
+                    ConfigError::out_of_range("max_leaf_output", "must be > 0", max).into(),
+                );
+            }
+        }
+
+        // -- Minimum hessian sum --
+        if let Some(min_h) = c.min_hessian_sum {
+            if min_h <= 0.0 {
+                return Err(
+                    ConfigError::out_of_range("min_hessian_sum", "must be > 0", min_h).into(),
+                );
+            }
+        }
+
+        // -- Huber loss multiplier --
+        if let Some(k) = c.huber_k {
+            if k <= 0.0 {
+                return Err(ConfigError::out_of_range("huber_k", "must be > 0", k).into());
             }
         }
 
