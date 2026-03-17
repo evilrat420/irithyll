@@ -257,6 +257,13 @@ impl TreeSlot {
         self.active.predict_interpolated(features)
     }
 
+    /// Predict with sibling-based interpolation for feature-continuous predictions.
+    #[inline]
+    pub fn predict_sibling_interpolated(&self, features: &[f64], bandwidths: &[f64]) -> f64 {
+        self.active
+            .predict_sibling_interpolated(features, bandwidths)
+    }
+
     /// Total number of tree replacements (drift or time-based).
     #[inline]
     pub fn replacements(&self) -> u64 {
