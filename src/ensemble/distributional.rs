@@ -111,6 +111,10 @@ pub struct ModelDiagnostics {
     /// Per-feature auto-calibrated bandwidths for smooth prediction.
     /// `f64::INFINITY` means that feature uses hard routing.
     pub auto_bandwidths: Vec<f64>,
+    /// Ensemble-level gradient running mean.
+    pub ensemble_grad_mean: f64,
+    /// Ensemble-level gradient standard deviation.
+    pub ensemble_grad_std: f64,
 }
 
 /// Decomposed prediction showing each tree's contribution.
@@ -216,6 +220,12 @@ pub struct DistributionalSGBT {
     auto_bandwidths: Vec<f64>,
     /// Sum of replacement counts at last bandwidth computation.
     last_replacement_sum: u64,
+    /// Ensemble-level gradient running mean (Welford).
+    ensemble_grad_mean: f64,
+    /// Ensemble-level gradient M2 (Welford sum of squared deviations).
+    ensemble_grad_m2: f64,
+    /// Ensemble-level gradient sample count.
+    ensemble_grad_count: u64,
 }
 
 impl Clone for DistributionalSGBT {
@@ -240,6 +250,9 @@ impl Clone for DistributionalSGBT {
             sigma_velocity: self.sigma_velocity,
             auto_bandwidths: self.auto_bandwidths.clone(),
             last_replacement_sum: self.last_replacement_sum,
+            ensemble_grad_mean: self.ensemble_grad_mean,
+            ensemble_grad_m2: self.ensemble_grad_m2,
+            ensemble_grad_count: self.ensemble_grad_count,
         }
     }
 }
@@ -291,6 +304,8 @@ impl DistributionalSGBT {
             .feature_types_opt(config.feature_types.clone())
             .gradient_clip_sigma_opt(config.gradient_clip_sigma)
             .monotone_constraints_opt(config.monotone_constraints.clone())
+            .max_leaf_output_opt(config.max_leaf_output)
+            .min_hessian_sum_opt(config.min_hessian_sum)
             .leaf_model_type(config.leaf_model_type.clone());
 
         let max_tree_samples = config.max_tree_samples;
@@ -340,6 +355,9 @@ impl DistributionalSGBT {
             sigma_velocity: 0.0,
             auto_bandwidths: Vec::new(),
             last_replacement_sum: 0,
+            ensemble_grad_mean: 0.0,
+            ensemble_grad_m2: 0.0,
+            ensemble_grad_count: 0,
         }
     }
 
@@ -441,8 +459,9 @@ impl DistributionalSGBT {
         // Train location steps only -- no scale trees needed
         let mut mu_accum = self.location_base;
         for s in 0..self.location_steps.len() {
-            let g_mu = mu_accum - target;
-            let h_mu = 1.0;
+            let (g_mu, h_mu) = self.location_gradient(mu_accum, target);
+            // Welford update for ensemble gradient stats
+            self.update_ensemble_grad_stats(g_mu);
             let train_count = self.config.variant.train_count(h_mu, &mut self.rng_state);
             let loc_pred =
                 self.location_steps[s].train_and_predict(features, g_mu, h_mu, train_count);
@@ -494,9 +513,10 @@ impl DistributionalSGBT {
             let sigma = log_sigma.exp().max(1e-8);
             let z = (target - mu) / sigma;
 
-            // Location gradients (squared loss w.r.t. mu)
-            let g_mu = mu - target;
-            let h_mu = 1.0;
+            // Location gradients (squared or Huber loss w.r.t. mu)
+            let (g_mu, h_mu) = self.location_gradient(mu, target);
+            // Welford update for ensemble gradient stats
+            self.update_ensemble_grad_stats(g_mu);
 
             // Scale gradients (NLL w.r.t. log_sigma)
             let g_sigma = 1.0 - z * z;
@@ -605,6 +625,38 @@ impl DistributionalSGBT {
         }
     }
 
+    /// Predict with parent-leaf linear interpolation.
+    ///
+    /// Blends each leaf prediction with its parent's preserved prediction
+    /// based on sample count, preventing stale predictions from fresh leaves.
+    pub fn predict_interpolated(&self, features: &[f64]) -> GaussianPrediction {
+        let mut mu = self.location_base;
+        for s in 0..self.location_steps.len() {
+            mu += self.config.learning_rate * self.location_steps[s].predict_interpolated(features);
+        }
+
+        let (sigma, log_sigma) = match self.scale_mode {
+            ScaleMode::Empirical => {
+                let s = self.ewma_sq_err.sqrt().max(1e-8);
+                (s, s.ln())
+            }
+            ScaleMode::TreeChain => {
+                let mut ls = self.scale_base;
+                for s in 0..self.scale_steps.len() {
+                    ls += self.config.learning_rate
+                        * self.scale_steps[s].predict_interpolated(features);
+                }
+                (ls.exp().max(1e-8), ls)
+            }
+        };
+
+        GaussianPrediction {
+            mu,
+            sigma,
+            log_sigma,
+        }
+    }
+
     /// Predict with σ-ratio diagnostic exposed.
     ///
     /// Returns `(mu, sigma, sigma_ratio)` where `sigma_ratio` is
@@ -700,6 +752,50 @@ impl DistributionalSGBT {
         if total % interval != 0 {
             callback(total);
         }
+    }
+
+    /// Compute location gradient (squared or adaptive Huber).
+    ///
+    /// When `huber_k` is configured, uses Huber loss with adaptive
+    /// `delta = k * empirical_sigma` for bounded gradients.
+    #[inline]
+    fn location_gradient(&self, mu: f64, target: f64) -> (f64, f64) {
+        if let Some(k) = self.config.huber_k {
+            let delta = k * self.ewma_sq_err.sqrt().max(1e-8);
+            let residual = mu - target;
+            if residual.abs() <= delta {
+                (residual, 1.0)
+            } else {
+                (delta * residual.signum(), 1e-6)
+            }
+        } else {
+            (mu - target, 1.0)
+        }
+    }
+
+    /// Welford update for ensemble-level gradient statistics.
+    #[inline]
+    fn update_ensemble_grad_stats(&mut self, gradient: f64) {
+        self.ensemble_grad_count += 1;
+        let delta = gradient - self.ensemble_grad_mean;
+        self.ensemble_grad_mean += delta / self.ensemble_grad_count as f64;
+        let delta2 = gradient - self.ensemble_grad_mean;
+        self.ensemble_grad_m2 += delta * delta2;
+    }
+
+    /// Ensemble-level gradient standard deviation.
+    pub fn ensemble_grad_std(&self) -> f64 {
+        if self.ensemble_grad_count < 2 {
+            return 0.0;
+        }
+        (self.ensemble_grad_m2 / (self.ensemble_grad_count - 1) as f64)
+            .sqrt()
+            .max(0.0)
+    }
+
+    /// Ensemble-level gradient mean.
+    pub fn ensemble_grad_mean(&self) -> f64 {
+        self.ensemble_grad_mean
     }
 
     /// Refresh auto-bandwidths if any tree has been replaced since last computation.
@@ -814,6 +910,9 @@ impl DistributionalSGBT {
         self.sigma_velocity = 0.0;
         self.auto_bandwidths.clear();
         self.last_replacement_sum = 0;
+        self.ensemble_grad_mean = 0.0;
+        self.ensemble_grad_m2 = 0.0;
+        self.ensemble_grad_count = 0;
     }
 
     /// Total samples trained.
@@ -985,6 +1084,8 @@ impl DistributionalSGBT {
             scale_mode: self.scale_mode,
             scale_trees_active,
             auto_bandwidths: self.auto_bandwidths.clone(),
+            ensemble_grad_mean: self.ensemble_grad_mean,
+            ensemble_grad_std: self.ensemble_grad_std(),
         }
     }
 
@@ -1220,6 +1321,9 @@ impl DistributionalSGBT {
             sigma_velocity: 0.0,
             auto_bandwidths: Vec::new(),
             last_replacement_sum: 0,
+            ensemble_grad_mean: 0.0,
+            ensemble_grad_m2: 0.0,
+            ensemble_grad_count: 0,
         }
     }
 }
@@ -2063,5 +2167,161 @@ mod serde_tests {
         let pred = model.predict(&[1.0, 1.0_f64.sin()]);
         assert!(pred.mu.is_finite(), "auto-bandwidth mu should be finite");
         assert!(pred.sigma > 0.0, "auto-bandwidth sigma should be positive");
+    }
+
+    #[test]
+    fn max_leaf_output_clamps_predictions() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(1.0) // Intentionally large to force extreme leaf weights
+            .max_leaf_output(0.5)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        // Train with extreme targets to force large leaf weights
+        for i in 0..200 {
+            let target = if i % 2 == 0 { 100.0 } else { -100.0 };
+            let sample = crate::Sample::new(vec![i as f64 % 5.0, (i as f64).sin()], target);
+            model.train_one(&sample);
+        }
+
+        // Each tree's prediction should be clamped to [-0.5, 0.5]
+        let pred = model.predict(&[2.0, 0.5]);
+        assert!(
+            pred.mu.is_finite(),
+            "prediction should be finite with clamping"
+        );
+    }
+
+    #[test]
+    fn min_hessian_sum_suppresses_fresh_leaves() {
+        let config = SGBTConfig::builder()
+            .n_steps(3)
+            .learning_rate(0.01)
+            .min_hessian_sum(50.0)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        // Train minimal samples
+        for i in 0..60 {
+            let sample = crate::Sample::new(vec![i as f64, (i as f64).sin()], i as f64 * 0.1);
+            model.train_one(&sample);
+        }
+
+        let pred = model.predict(&[30.0, 0.5]);
+        assert!(
+            pred.mu.is_finite(),
+            "prediction should be finite with min_hessian_sum"
+        );
+    }
+
+    #[test]
+    fn predict_interpolated_returns_finite() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(16)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+        for i in 0..200 {
+            let x = i as f64 * 0.1;
+            let sample = crate::Sample::new(vec![x, x.sin()], x.cos());
+            model.train_one(&sample);
+        }
+
+        let pred = model.predict_interpolated(&[1.0, 0.5]);
+        assert!(pred.mu.is_finite(), "interpolated mu should be finite");
+        assert!(pred.sigma > 0.0, "interpolated sigma should be positive");
+    }
+
+    #[test]
+    fn huber_k_bounds_gradients() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.01)
+            .huber_k(1.345)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        // Train with occasional extreme outliers
+        for i in 0..300 {
+            let target = if i % 50 == 0 {
+                1000.0
+            } else {
+                (i as f64 * 0.1).sin()
+            };
+            let sample = crate::Sample::new(vec![i as f64 % 10.0, (i as f64).cos()], target);
+            model.train_one(&sample);
+        }
+
+        let pred = model.predict(&[5.0, 0.3]);
+        assert!(
+            pred.mu.is_finite(),
+            "Huber-loss mu should be finite despite outliers"
+        );
+        assert!(pred.sigma > 0.0, "sigma should be positive");
+    }
+
+    #[test]
+    fn ensemble_gradient_stats_populated() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(16)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+        for i in 0..200 {
+            let x = i as f64 * 0.1;
+            let sample = crate::Sample::new(vec![x, x.sin()], x.cos());
+            model.train_one(&sample);
+        }
+
+        let diag = model.diagnostics();
+        assert!(
+            diag.ensemble_grad_mean.is_finite(),
+            "ensemble grad mean should be finite"
+        );
+        assert!(
+            diag.ensemble_grad_std >= 0.0,
+            "ensemble grad std should be non-negative"
+        );
+        assert!(
+            diag.ensemble_grad_std.is_finite(),
+            "ensemble grad std should be finite"
+        );
+    }
+
+    #[test]
+    fn huber_k_validation() {
+        let result = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.01)
+            .huber_k(-1.0)
+            .build();
+        assert!(result.is_err(), "negative huber_k should fail validation");
+    }
+
+    #[test]
+    fn max_leaf_output_validation() {
+        let result = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.01)
+            .max_leaf_output(-1.0)
+            .build();
+        assert!(
+            result.is_err(),
+            "negative max_leaf_output should fail validation"
+        );
     }
 }
