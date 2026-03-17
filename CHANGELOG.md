@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.9.1] - 2026-03-17
+
+### Fixed
+
+- **Cascading swap bug in graduated handoff.** When a shadow tree was promoted
+  to active, its total `n_samples_seen()` already exceeded `max_tree_samples`,
+  causing an immediate second swap that promoted a cold stump. Added
+  `samples_at_activation` tracking: time-based replacement and blend weight
+  decay now use samples-since-activation, not total lifetime sample count.
+
 ## [7.9.0] - 2026-03-17
 
 ### Added

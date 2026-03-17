@@ -52,6 +52,10 @@ pub struct TreeSlot {
     /// Shadow warmup samples (0 = disabled). When > 0, an always-on shadow
     /// tree is spawned and trained alongside the active tree.
     shadow_warmup: usize,
+    /// Sample count of the active tree when it was activated (promoted from shadow).
+    /// Used to compute samples-since-activation for time-based replacement,
+    /// preventing cascading swaps when a shadow is promoted with a high sample count.
+    samples_at_activation: u64,
 }
 
 impl fmt::Debug for TreeSlot {
@@ -78,6 +82,7 @@ impl Clone for TreeSlot {
             pred_mean: self.pred_mean,
             pred_m2: self.pred_m2,
             shadow_warmup: self.shadow_warmup,
+            samples_at_activation: self.samples_at_activation,
         }
     }
 }
@@ -122,6 +127,7 @@ impl TreeSlot {
             pred_mean: 0.0,
             pred_m2: 0.0,
             shadow_warmup,
+            samples_at_activation: 0,
         }
     }
 
@@ -147,6 +153,7 @@ impl TreeSlot {
             pred_mean: 0.0,
             pred_m2: 0.0,
             shadow_warmup: 0,
+            samples_at_activation: 0,
         }
     }
 
@@ -211,6 +218,8 @@ impl TreeSlot {
                     .alternate
                     .take()
                     .unwrap_or_else(|| HoeffdingTree::new(self.tree_config.clone()));
+                // Record activation point to prevent cascading swaps.
+                self.samples_at_activation = self.active.n_samples_seen();
                 // Reset the drift detector to monitor the new tree cleanly.
                 self.detector = self.detector.clone_fresh();
                 // Track replacement and reset prediction stats for the new tree.
@@ -226,32 +235,36 @@ impl TreeSlot {
         }
 
         // 6. Proactive time-based replacement.
+        //    Compare samples-since-activation (not total lifetime) to prevent
+        //    cascading swaps when a shadow with high sample count is promoted.
         if let Some(max_samples) = self.max_tree_samples {
-            if self.active.n_samples_seen() >= max_samples {
-                // In graduated mode, check if soft replacement should happen
-                // (predict_graduated handles the blending; here we do the swap
-                // when active has fully decayed past 120% of max_tree_samples).
-                let threshold = if self.shadow_warmup > 0 {
-                    // Soft replacement: wait until 120% of max_samples
-                    (max_samples as f64 * 1.2) as u64
-                } else {
-                    max_samples
-                };
+            let active_age = self
+                .active
+                .n_samples_seen()
+                .saturating_sub(self.samples_at_activation);
 
-                if self.active.n_samples_seen() >= threshold {
-                    self.active = self
-                        .alternate
-                        .take()
-                        .unwrap_or_else(|| HoeffdingTree::new(self.tree_config.clone()));
-                    self.detector = self.detector.clone_fresh();
-                    self.replacements += 1;
-                    self.pred_count = 0;
-                    self.pred_mean = 0.0;
-                    self.pred_m2 = 0.0;
-                    // In graduated mode, immediately spawn a new shadow.
-                    if self.shadow_warmup > 0 {
-                        self.alternate = Some(HoeffdingTree::new(self.tree_config.clone()));
-                    }
+            // In graduated mode, wait until 120% of max_samples for soft replacement.
+            let threshold = if self.shadow_warmup > 0 {
+                (max_samples as f64 * 1.2) as u64
+            } else {
+                max_samples
+            };
+
+            if active_age >= threshold {
+                self.active = self
+                    .alternate
+                    .take()
+                    .unwrap_or_else(|| HoeffdingTree::new(self.tree_config.clone()));
+                // Record activation point to prevent cascading swaps.
+                self.samples_at_activation = self.active.n_samples_seen();
+                self.detector = self.detector.clone_fresh();
+                self.replacements += 1;
+                self.pred_count = 0;
+                self.pred_mean = 0.0;
+                self.pred_m2 = 0.0;
+                // In graduated mode, immediately spawn a new shadow.
+                if self.shadow_warmup > 0 {
+                    self.alternate = Some(HoeffdingTree::new(self.tree_config.clone()));
                 }
             }
         }
@@ -369,7 +382,10 @@ impl TreeSlot {
     /// Compute the graduated blend of active and shadow predictions.
     #[inline]
     fn blend_active_shadow(&self, active_pred: f64, shadow_pred: f64, shadow_samples: u64) -> f64 {
-        let active_age = self.active.n_samples_seen();
+        let active_age = self
+            .active
+            .n_samples_seen()
+            .saturating_sub(self.samples_at_activation);
         let mts = self.max_tree_samples.unwrap_or(u64::MAX) as f64;
 
         // Active weight: 1.0 until 80% of mts, then linear decay to 0.0 at 120%
@@ -504,6 +520,7 @@ impl TreeSlot {
         self.pred_count = 0;
         self.pred_mean = 0.0;
         self.pred_m2 = 0.0;
+        self.samples_at_activation = 0;
     }
 }
 
@@ -832,6 +849,40 @@ mod tests {
         assert!(
             slot.has_alternate(),
             "reset in graduated mode should preserve shadow spawning"
+        );
+    }
+
+    #[test]
+    fn graduated_no_cascading_swap() {
+        let mut slot =
+            TreeSlot::with_shadow_warmup(test_tree_config(), test_detector(), Some(200), 50);
+
+        // Train past the 120% soft replacement threshold (240 samples).
+        // Use varying features so trees can actually split.
+        for i in 0..250 {
+            let x = (i as f64) * 0.1;
+            let features = [x, x.sin(), x.cos()];
+            let gradient = -0.1 * (1.0 + x.sin());
+            slot.train_and_predict(&features, gradient, 1.0);
+        }
+
+        let replacements_after_first_swap = slot.replacements();
+        assert!(
+            replacements_after_first_swap >= 1,
+            "should have swapped at least once after 250 samples with mts=200"
+        );
+
+        // Train 50 more samples — should NOT trigger another swap
+        for i in 250..300 {
+            let x = (i as f64) * 0.1;
+            let features = [x, x.sin(), x.cos()];
+            slot.train_and_predict(&features, -0.1, 1.0);
+        }
+
+        assert_eq!(
+            slot.replacements(),
+            replacements_after_first_swap,
+            "should not cascade-swap immediately after promotion"
         );
     }
 
