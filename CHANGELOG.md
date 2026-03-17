@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.8.1] - 2026-03-17
+
+### Added
+
+- **`max_leaf_output`** -- new `SGBTConfig`/`TreeConfig` option clamping leaf
+  predictions to `[-max, max]`. Breaks the feedback loop that causes
+  prediction explosions in streaming settings.
+- **`min_hessian_sum`** -- new `SGBTConfig`/`TreeConfig` option suppressing
+  leaf output until hessian accumulation exceeds the threshold. Prevents
+  post-replacement spikes from fresh leaves with insufficient samples.
+- **`predict_interpolated()`** -- new prediction method on `SGBT`,
+  `DistributionalSGBT`, and `HoeffdingTree`. Blends leaf predictions with
+  parent node predictions via `alpha = hess / (hess + lambda)`, fixing
+  static EWRV/OIF predictions from recently-split leaves.
+- **Ensemble-level gradient statistics** -- `DistributionalSGBT` now tracks
+  Welford running mean/variance of gradients across all trees. Exposed via
+  `ensemble_grad_mean()`, `ensemble_grad_std()`, and in `ModelDiagnostics`.
+  Enables new trees to inherit the ensemble's gradient distribution,
+  fixing the cold-start flaw in `gradient_clip_sigma`.
+- **`huber_k`** -- new `SGBTConfig` option enabling Huber loss for
+  `DistributionalSGBT` location gradients with adaptive
+  `delta = k * empirical_sigma`. Standard value 1.345 (95% Gaussian
+  efficiency). Bounds gradients by construction without per-leaf clipping.
+
 ## [7.8.0] - 2026-03-16
 
 ### Added

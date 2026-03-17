@@ -251,6 +251,12 @@ impl TreeSlot {
         self.active.predict_smooth_auto(features, bandwidths)
     }
 
+    /// Predict with parent-leaf linear interpolation.
+    #[inline]
+    pub fn predict_interpolated(&self, features: &[f64]) -> f64 {
+        self.active.predict_interpolated(features)
+    }
+
     /// Total number of tree replacements (drift or time-based).
     #[inline]
     pub fn replacements(&self) -> u64 {

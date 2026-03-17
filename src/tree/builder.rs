@@ -101,6 +101,20 @@ pub struct TreeConfig {
     /// `None` (default) means no constraints.
     pub monotone_constraints: Option<Vec<i8>>,
 
+    /// Maximum absolute leaf output value.
+    ///
+    /// When `Some(max)`, leaf predictions are clamped to `[-max, max]`.
+    /// Prevents runaway leaf weights from causing prediction explosions
+    /// in feedback loops. `None` (default) means no clamping.
+    pub max_leaf_output: Option<f64>,
+
+    /// Minimum hessian sum before a leaf produces non-zero output.
+    ///
+    /// When `Some(min_h)`, leaves with `hess_sum < min_h` return 0.0.
+    /// Prevents post-replacement spikes from fresh leaves with insufficient
+    /// samples. `None` (default) means all leaves contribute immediately.
+    pub min_hessian_sum: Option<f64>,
+
     /// Leaf prediction model type.
     ///
     /// Controls how each leaf computes its prediction:
@@ -133,6 +147,8 @@ impl Default for TreeConfig {
             feature_types: None,
             gradient_clip_sigma: None,
             monotone_constraints: None,
+            max_leaf_output: None,
+            min_hessian_sum: None,
             leaf_model_type: LeafModelType::default(),
         }
     }
@@ -273,6 +289,34 @@ impl TreeConfig {
         self
     }
 
+    /// Set the maximum absolute leaf output value.
+    #[inline]
+    pub fn max_leaf_output(mut self, max: f64) -> Self {
+        self.max_leaf_output = Some(max);
+        self
+    }
+
+    /// Optionally set the maximum absolute leaf output value.
+    #[inline]
+    pub fn max_leaf_output_opt(mut self, max: Option<f64>) -> Self {
+        self.max_leaf_output = max;
+        self
+    }
+
+    /// Set the minimum hessian sum for leaf output.
+    #[inline]
+    pub fn min_hessian_sum(mut self, min_h: f64) -> Self {
+        self.min_hessian_sum = Some(min_h);
+        self
+    }
+
+    /// Optionally set the minimum hessian sum for leaf output.
+    #[inline]
+    pub fn min_hessian_sum_opt(mut self, min_h: Option<f64>) -> Self {
+        self.min_hessian_sum = min_h;
+        self
+    }
+
     /// Set the leaf prediction model type.
     ///
     /// [`LeafModelType::Linear`] is recommended for low-depth configurations
@@ -344,5 +388,24 @@ mod tests {
 
         let cfg = TreeConfig::new().feature_subsample_rate(-0.3);
         assert!((cfg.feature_subsample_rate - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn max_leaf_output_builder() {
+        let cfg = TreeConfig::new().max_leaf_output(1.5);
+        assert_eq!(cfg.max_leaf_output, Some(1.5));
+    }
+
+    #[test]
+    fn min_hessian_sum_builder() {
+        let cfg = TreeConfig::new().min_hessian_sum(10.0);
+        assert_eq!(cfg.min_hessian_sum, Some(10.0));
+    }
+
+    #[test]
+    fn max_leaf_output_default_none() {
+        let cfg = TreeConfig::default();
+        assert!(cfg.max_leaf_output.is_none());
+        assert!(cfg.min_hessian_sum.is_none());
     }
 }
