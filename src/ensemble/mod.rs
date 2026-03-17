@@ -202,12 +202,17 @@ impl<L: Loss> SGBT<L> {
 
         let max_tree_samples = config.max_tree_samples;
 
+        let shadow_warmup = config.shadow_warmup.unwrap_or(0);
         let steps: Vec<BoostingStep> = (0..config.n_steps)
             .map(|i| {
                 let mut tc = tree_config.clone();
                 tc.seed = config.seed ^ (i as u64);
                 let detector = config.drift_detector.create();
-                BoostingStep::new_with_max_samples(tc, detector, max_tree_samples)
+                if shadow_warmup > 0 {
+                    BoostingStep::new_with_graduated(tc, detector, max_tree_samples, shadow_warmup)
+                } else {
+                    BoostingStep::new_with_max_samples(tc, detector, max_tree_samples)
+                }
             })
             .collect();
 
@@ -522,6 +527,33 @@ impl<L: Loss> SGBT<L> {
         for step in &self.steps {
             pred += self.config.learning_rate
                 * step.predict_sibling_interpolated(features, &self.auto_bandwidths);
+        }
+        pred
+    }
+
+    /// Predict with graduated active-shadow blending.
+    ///
+    /// Smoothly transitions between active and shadow trees during replacement,
+    /// eliminating prediction dips. Requires `shadow_warmup` to be configured.
+    /// When disabled, equivalent to `predict()`.
+    pub fn predict_graduated(&self, features: &[f64]) -> f64 {
+        let mut pred = self.base_prediction;
+        for step in &self.steps {
+            pred += self.config.learning_rate * step.predict_graduated(features);
+        }
+        pred
+    }
+
+    /// Predict with graduated blending + sibling interpolation (premium path).
+    ///
+    /// Combines graduated active-shadow handoff (no prediction dips during
+    /// tree replacement) with feature-continuous sibling interpolation
+    /// (no step-function artifacts near split boundaries).
+    pub fn predict_graduated_sibling_interpolated(&self, features: &[f64]) -> f64 {
+        let mut pred = self.base_prediction;
+        for step in &self.steps {
+            pred += self.config.learning_rate
+                * step.predict_graduated_sibling_interpolated(features, &self.auto_bandwidths);
         }
         pred
     }
@@ -2110,5 +2142,46 @@ mod tests {
                 hc
             );
         }
+    }
+
+    #[test]
+    fn predict_graduated_returns_finite() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.01)
+            .max_tree_samples(200)
+            .shadow_warmup(50)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..300 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x.sin()], x.cos()));
+        }
+
+        let pred = model.predict_graduated(&[1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "graduated prediction should be finite: {}",
+            pred
+        );
+
+        let pred2 = model.predict_graduated_sibling_interpolated(&[1.0, 0.5]);
+        assert!(
+            pred2.is_finite(),
+            "graduated+sibling prediction should be finite: {}",
+            pred2
+        );
+    }
+
+    #[test]
+    fn shadow_warmup_validation() {
+        let result = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.01)
+            .shadow_warmup(0)
+            .build();
+        assert!(result.is_err(), "shadow_warmup=0 should fail validation");
     }
 }

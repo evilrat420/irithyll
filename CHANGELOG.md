@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.9.0] - 2026-03-17
+
+### Added
+
+- **Graduated tree handoff** -- eliminates prediction dips during tree
+  replacement in streaming GBDT ensembles (Boulevard/GOOWE-inspired).
+- **`shadow_warmup`** -- new `SGBTConfig` option enabling always-on shadow
+  trees. When set, each tree slot immediately spawns a shadow that trains
+  alongside the active tree. After `shadow_warmup` samples, the shadow
+  contributes to graduated predictions.
+- **`predict_graduated()`** -- on `SGBT`, `DistributionalSGBT`, `TreeSlot`,
+  and `BoostingStep`. Blends active and shadow predictions based on
+  relative maturity: active weight decays linearly from 1.0 (at 80% of
+  `max_tree_samples`) to 0.0 (at 120%), shadow weight ramps from 0.0
+  to 1.0 over `shadow_warmup` samples. When active fully decays, shadow
+  is promoted and a new shadow spawns -- zero cold-start.
+- **`predict_graduated_sibling_interpolated()`** -- premium prediction path
+  combining graduated handoff (no replacement dips) with sibling-based
+  spatial interpolation (no step-function artifacts). The smoothest
+  possible prediction surface for streaming GBDT.
+- Soft replacement: when active tree's weight reaches 0, the shadow is
+  promoted to active and a new shadow is spawned immediately. The drift
+  detector is reset. No moment where a cold tree serves predictions.
+
 ## [7.8.2] - 2026-03-17
 
 ### Added

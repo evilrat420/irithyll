@@ -389,6 +389,24 @@ pub struct SGBTConfig {
     #[serde(default)]
     pub huber_k: Option<f64>,
 
+    /// Shadow warmup for graduated tree handoff.
+    ///
+    /// When `Some(n)`, an always-on shadow (alternate) tree is spawned immediately
+    /// alongside every active tree. The shadow trains on the same gradient stream
+    /// but does not contribute to predictions until it has seen `n` samples.
+    ///
+    /// As the active tree ages past 80% of `max_tree_samples`, its prediction
+    /// weight linearly decays to 0 at 120%. The shadow's weight ramps from 0 to 1
+    /// over `n` samples after warmup. When the active weight reaches 0, the shadow
+    /// is promoted and a new shadow is spawned — no cold-start prediction dip.
+    ///
+    /// Requires `max_tree_samples` to be set for time-based graduated handoff.
+    /// Drift-based replacement still uses hard swap (shadow is already warm).
+    ///
+    /// `None` (default) disables graduated handoff — uses traditional hard swap.
+    #[serde(default)]
+    pub shadow_warmup: Option<usize>,
+
     /// Leaf prediction model type.
     ///
     /// Controls how each leaf computes its prediction:
@@ -451,6 +469,7 @@ impl Default for SGBTConfig {
             max_leaf_output: None,
             min_hessian_sum: None,
             huber_k: None,
+            shadow_warmup: None,
             leaf_model_type: LeafModelType::default(),
         }
     }
@@ -731,6 +750,16 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Enable graduated tree handoff with the given shadow warmup samples.
+    ///
+    /// Spawns an always-on shadow tree that trains alongside the active tree.
+    /// After `warmup` samples, the shadow begins contributing to predictions
+    /// via graduated blending. Eliminates prediction dips during tree replacement.
+    pub fn shadow_warmup(mut self, warmup: usize) -> Self {
+        self.config.shadow_warmup = Some(warmup);
+        self
+    }
+
     /// Set the leaf prediction model type.
     ///
     /// [`LeafModelType::Linear`] is recommended for low-depth configurations
@@ -905,6 +934,18 @@ impl SGBTConfigBuilder {
         if let Some(k) = c.huber_k {
             if k <= 0.0 {
                 return Err(ConfigError::out_of_range("huber_k", "must be > 0", k).into());
+            }
+        }
+
+        // -- Shadow warmup --
+        if let Some(warmup) = c.shadow_warmup {
+            if warmup == 0 {
+                return Err(ConfigError::out_of_range(
+                    "shadow_warmup",
+                    "must be > 0",
+                    warmup as f64,
+                )
+                .into());
             }
         }
 

@@ -63,6 +63,23 @@ impl BoostingStep {
         }
     }
 
+    /// Create a new boosting step with graduated tree handoff.
+    pub fn new_with_graduated(
+        tree_config: TreeConfig,
+        detector: Box<dyn DriftDetector>,
+        max_tree_samples: Option<u64>,
+        shadow_warmup: usize,
+    ) -> Self {
+        Self {
+            slot: TreeSlot::with_shadow_warmup(
+                tree_config,
+                detector,
+                max_tree_samples,
+                shadow_warmup,
+            ),
+        }
+    }
+
     /// Reconstruct a boosting step from a pre-built tree slot.
     ///
     /// Used during model deserialization.
@@ -151,6 +168,23 @@ impl BoostingStep {
     #[inline]
     pub fn predict_sibling_interpolated(&self, features: &[f64], bandwidths: &[f64]) -> f64 {
         self.slot.predict_sibling_interpolated(features, bandwidths)
+    }
+
+    /// Predict with graduated active-shadow blending.
+    #[inline]
+    pub fn predict_graduated(&self, features: &[f64]) -> f64 {
+        self.slot.predict_graduated(features)
+    }
+
+    /// Predict with graduated blending + sibling interpolation.
+    #[inline]
+    pub fn predict_graduated_sibling_interpolated(
+        &self,
+        features: &[f64],
+        bandwidths: &[f64],
+    ) -> f64 {
+        self.slot
+            .predict_graduated_sibling_interpolated(features, bandwidths)
     }
 
     /// Number of leaves in the active tree.

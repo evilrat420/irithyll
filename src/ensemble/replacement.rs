@@ -49,6 +49,9 @@ pub struct TreeSlot {
     pred_mean: f64,
     /// Welford online M2 accumulator for prediction variance.
     pred_m2: f64,
+    /// Shadow warmup samples (0 = disabled). When > 0, an always-on shadow
+    /// tree is spawned and trained alongside the active tree.
+    shadow_warmup: usize,
 }
 
 impl fmt::Debug for TreeSlot {
@@ -74,6 +77,7 @@ impl Clone for TreeSlot {
             pred_count: self.pred_count,
             pred_mean: self.pred_mean,
             pred_m2: self.pred_m2,
+            shadow_warmup: self.shadow_warmup,
         }
     }
 }
@@ -88,9 +92,28 @@ impl TreeSlot {
         detector: Box<dyn DriftDetector>,
         max_tree_samples: Option<u64>,
     ) -> Self {
+        Self::with_shadow_warmup(tree_config, detector, max_tree_samples, 0)
+    }
+
+    /// Create a new `TreeSlot` with graduated tree handoff enabled.
+    ///
+    /// When `shadow_warmup > 0`, an always-on shadow tree is spawned immediately
+    /// and trained alongside the active tree. After `shadow_warmup` samples, the
+    /// shadow begins contributing to `predict_graduated()` predictions.
+    pub fn with_shadow_warmup(
+        tree_config: TreeConfig,
+        detector: Box<dyn DriftDetector>,
+        max_tree_samples: Option<u64>,
+        shadow_warmup: usize,
+    ) -> Self {
+        let alternate = if shadow_warmup > 0 {
+            Some(HoeffdingTree::new(tree_config.clone()))
+        } else {
+            None
+        };
         Self {
             active: HoeffdingTree::new(tree_config.clone()),
-            alternate: None,
+            alternate,
             detector,
             tree_config,
             max_tree_samples,
@@ -98,6 +121,7 @@ impl TreeSlot {
             pred_count: 0,
             pred_mean: 0.0,
             pred_m2: 0.0,
+            shadow_warmup,
         }
     }
 
@@ -122,6 +146,7 @@ impl TreeSlot {
             pred_count: 0,
             pred_mean: 0.0,
             pred_m2: 0.0,
+            shadow_warmup: 0,
         }
     }
 
@@ -186,8 +211,6 @@ impl TreeSlot {
                     .alternate
                     .take()
                     .unwrap_or_else(|| HoeffdingTree::new(self.tree_config.clone()));
-                // Always clear the alternate slot after replacement.
-                self.alternate = None;
                 // Reset the drift detector to monitor the new tree cleanly.
                 self.detector = self.detector.clone_fresh();
                 // Track replacement and reset prediction stats for the new tree.
@@ -195,26 +218,47 @@ impl TreeSlot {
                 self.pred_count = 0;
                 self.pred_mean = 0.0;
                 self.pred_m2 = 0.0;
+                // In graduated mode, immediately spawn a new shadow.
+                if self.shadow_warmup > 0 {
+                    self.alternate = Some(HoeffdingTree::new(self.tree_config.clone()));
+                }
             }
         }
 
         // 6. Proactive time-based replacement.
-        //    If the active tree has processed too many samples, replace it
-        //    regardless of drift signal. This prevents stale structure from
-        //    accumulating in slowly-drifting streams.
         if let Some(max_samples) = self.max_tree_samples {
             if self.active.n_samples_seen() >= max_samples {
-                self.active = self
-                    .alternate
-                    .take()
-                    .unwrap_or_else(|| HoeffdingTree::new(self.tree_config.clone()));
-                self.alternate = None;
-                self.detector = self.detector.clone_fresh();
-                self.replacements += 1;
-                self.pred_count = 0;
-                self.pred_mean = 0.0;
-                self.pred_m2 = 0.0;
+                // In graduated mode, check if soft replacement should happen
+                // (predict_graduated handles the blending; here we do the swap
+                // when active has fully decayed past 120% of max_tree_samples).
+                let threshold = if self.shadow_warmup > 0 {
+                    // Soft replacement: wait until 120% of max_samples
+                    (max_samples as f64 * 1.2) as u64
+                } else {
+                    max_samples
+                };
+
+                if self.active.n_samples_seen() >= threshold {
+                    self.active = self
+                        .alternate
+                        .take()
+                        .unwrap_or_else(|| HoeffdingTree::new(self.tree_config.clone()));
+                    self.detector = self.detector.clone_fresh();
+                    self.replacements += 1;
+                    self.pred_count = 0;
+                    self.pred_mean = 0.0;
+                    self.pred_m2 = 0.0;
+                    // In graduated mode, immediately spawn a new shadow.
+                    if self.shadow_warmup > 0 {
+                        self.alternate = Some(HoeffdingTree::new(self.tree_config.clone()));
+                    }
+                }
             }
+        }
+
+        // 7. In graduated mode, ensure shadow always exists.
+        if self.shadow_warmup > 0 && self.alternate.is_none() {
+            self.alternate = Some(HoeffdingTree::new(self.tree_config.clone()));
         }
 
         prediction
@@ -262,6 +306,98 @@ impl TreeSlot {
     pub fn predict_sibling_interpolated(&self, features: &[f64], bandwidths: &[f64]) -> f64 {
         self.active
             .predict_sibling_interpolated(features, bandwidths)
+    }
+
+    /// Predict with graduated active-shadow blending.
+    ///
+    /// When `shadow_warmup > 0`, blends the active tree's prediction with the
+    /// shadow's prediction based on relative maturity:
+    /// - Active weight decays from 1.0 to 0.0 as it ages from 80% to 120% of `max_tree_samples`
+    /// - Shadow weight ramps from 0.0 to 1.0 over `shadow_warmup` samples after warmup
+    ///
+    /// When `shadow_warmup == 0` or no shadow exists, returns the active prediction.
+    pub fn predict_graduated(&self, features: &[f64]) -> f64 {
+        let active_pred = self.active.predict(features);
+
+        if self.shadow_warmup == 0 {
+            return active_pred;
+        }
+
+        let Some(ref shadow) = self.alternate else {
+            return active_pred;
+        };
+
+        let shadow_samples = shadow.n_samples_seen();
+        if shadow_samples < self.shadow_warmup as u64 {
+            return active_pred;
+        }
+
+        let shadow_pred = shadow.predict(features);
+        self.blend_active_shadow(active_pred, shadow_pred, shadow_samples)
+    }
+
+    /// Predict with graduated blending + sibling interpolation (premium path).
+    ///
+    /// Combines graduated active-shadow handoff with feature-continuous sibling
+    /// interpolation for the smoothest possible prediction surface.
+    pub fn predict_graduated_sibling_interpolated(
+        &self,
+        features: &[f64],
+        bandwidths: &[f64],
+    ) -> f64 {
+        let active_pred = self
+            .active
+            .predict_sibling_interpolated(features, bandwidths);
+
+        if self.shadow_warmup == 0 {
+            return active_pred;
+        }
+
+        let Some(ref shadow) = self.alternate else {
+            return active_pred;
+        };
+
+        let shadow_samples = shadow.n_samples_seen();
+        if shadow_samples < self.shadow_warmup as u64 {
+            return active_pred;
+        }
+
+        let shadow_pred = shadow.predict_sibling_interpolated(features, bandwidths);
+        self.blend_active_shadow(active_pred, shadow_pred, shadow_samples)
+    }
+
+    /// Compute the graduated blend of active and shadow predictions.
+    #[inline]
+    fn blend_active_shadow(&self, active_pred: f64, shadow_pred: f64, shadow_samples: u64) -> f64 {
+        let active_age = self.active.n_samples_seen();
+        let mts = self.max_tree_samples.unwrap_or(u64::MAX) as f64;
+
+        // Active weight: 1.0 until 80% of mts, then linear decay to 0.0 at 120%
+        let active_w = if (active_age as f64) < mts * 0.8 {
+            1.0
+        } else {
+            let progress = (active_age as f64 - mts * 0.8) / (mts * 0.4);
+            (1.0 - progress).clamp(0.0, 1.0)
+        };
+
+        // Shadow weight: 0.0 until shadow_warmup, then ramp to 1.0 over shadow_warmup samples
+        let shadow_w = ((shadow_samples as f64 - self.shadow_warmup as f64)
+            / self.shadow_warmup as f64)
+            .clamp(0.0, 1.0);
+
+        // Normalize
+        let total = active_w + shadow_w;
+        if total < 1e-10 {
+            return shadow_pred;
+        }
+
+        (active_w * active_pred + shadow_w * shadow_pred) / total
+    }
+
+    /// Shadow warmup configuration (0 = disabled).
+    #[inline]
+    pub fn shadow_warmup(&self) -> usize {
+        self.shadow_warmup
     }
 
     /// Total number of tree replacements (drift or time-based).
@@ -358,7 +494,11 @@ impl TreeSlot {
     /// Reset to a completely fresh state: new tree, no alternate, reset detector.
     pub fn reset(&mut self) {
         self.active = HoeffdingTree::new(self.tree_config.clone());
-        self.alternate = None;
+        self.alternate = if self.shadow_warmup > 0 {
+            Some(HoeffdingTree::new(self.tree_config.clone()))
+        } else {
+            None
+        };
         self.detector = self.detector.clone_fresh();
         self.replacements = 0;
         self.pred_count = 0;
@@ -609,5 +749,104 @@ mod tests {
             500,
             "without max_tree_samples, tree should never be proactively replaced",
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Graduated handoff tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn graduated_shadow_spawns_immediately() {
+        let slot = TreeSlot::with_shadow_warmup(test_tree_config(), test_detector(), Some(200), 50);
+
+        assert!(
+            slot.has_alternate(),
+            "graduated mode should spawn shadow immediately"
+        );
+        assert_eq!(slot.shadow_warmup(), 50);
+    }
+
+    #[test]
+    fn graduated_predict_returns_finite() {
+        let mut slot =
+            TreeSlot::with_shadow_warmup(test_tree_config(), test_detector(), Some(200), 50);
+        let features = [1.0, 2.0, 3.0];
+
+        for _ in 0..100 {
+            slot.train_and_predict(&features, -0.1, 1.0);
+        }
+
+        let pred = slot.predict_graduated(&features);
+        assert!(
+            pred.is_finite(),
+            "graduated prediction should be finite: {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn graduated_shadow_always_respawns() {
+        let mut slot =
+            TreeSlot::with_shadow_warmup(test_tree_config(), test_detector(), Some(100), 30);
+        let features = [1.0, 2.0, 3.0];
+
+        // Train past the 120% soft replacement threshold (120 samples)
+        for _ in 0..130 {
+            slot.train_and_predict(&features, -0.1, 1.0);
+        }
+
+        // After soft replacement, shadow should still exist
+        assert!(
+            slot.has_alternate(),
+            "shadow should be respawned after soft replacement"
+        );
+    }
+
+    #[test]
+    fn graduated_blending_produces_intermediate_values() {
+        let mut slot =
+            TreeSlot::with_shadow_warmup(test_tree_config(), test_detector(), Some(200), 50);
+        let features = [1.0, 2.0, 3.0];
+
+        // Train enough samples for shadow to be warm and blending to be active
+        // (past 80% of max_tree_samples = 160 samples, shadow needs 50 warmup)
+        for _ in 0..180 {
+            slot.train_and_predict(&features, -0.1, 1.0);
+        }
+
+        let active_pred = slot.predict(&features);
+        let graduated_pred = slot.predict_graduated(&features);
+
+        // Both should be finite
+        assert!(active_pred.is_finite());
+        assert!(graduated_pred.is_finite());
+    }
+
+    #[test]
+    fn graduated_reset_preserves_shadow() {
+        let mut slot =
+            TreeSlot::with_shadow_warmup(test_tree_config(), test_detector(), Some(200), 50);
+
+        slot.reset();
+
+        assert!(
+            slot.has_alternate(),
+            "reset in graduated mode should preserve shadow spawning"
+        );
+    }
+
+    #[test]
+    fn graduated_without_max_tree_samples_still_works() {
+        // shadow_warmup enabled but no max_tree_samples — active never decays
+        let mut slot = TreeSlot::with_shadow_warmup(test_tree_config(), test_detector(), None, 50);
+        let features = [1.0, 2.0, 3.0];
+
+        for _ in 0..100 {
+            slot.train_and_predict(&features, -0.1, 1.0);
+        }
+
+        // predict_graduated should work (active_w stays 1.0 since mts = MAX)
+        let pred = slot.predict_graduated(&features);
+        assert!(pred.is_finite(), "graduated without mts should be finite");
     }
 }

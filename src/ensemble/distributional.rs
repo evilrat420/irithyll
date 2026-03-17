@@ -311,12 +311,17 @@ impl DistributionalSGBT {
         let max_tree_samples = config.max_tree_samples;
 
         // Location ensemble (seed offset: 0)
+        let shadow_warmup = config.shadow_warmup.unwrap_or(0);
         let location_steps: Vec<BoostingStep> = (0..config.n_steps)
             .map(|i| {
                 let mut tc = tree_config.clone();
                 tc.seed = config.seed ^ (i as u64);
                 let detector = config.drift_detector.create();
-                BoostingStep::new_with_max_samples(tc, detector, max_tree_samples)
+                if shadow_warmup > 0 {
+                    BoostingStep::new_with_graduated(tc, detector, max_tree_samples, shadow_warmup)
+                } else {
+                    BoostingStep::new_with_max_samples(tc, detector, max_tree_samples)
+                }
             })
             .collect();
 
@@ -326,7 +331,11 @@ impl DistributionalSGBT {
                 let mut tc = tree_config.clone();
                 tc.seed = config.seed ^ (i as u64) ^ 0x0005_CA1E_0000_0000;
                 let detector = config.drift_detector.create();
-                BoostingStep::new_with_max_samples(tc, detector, max_tree_samples)
+                if shadow_warmup > 0 {
+                    BoostingStep::new_with_graduated(tc, detector, max_tree_samples, shadow_warmup)
+                } else {
+                    BoostingStep::new_with_max_samples(tc, detector, max_tree_samples)
+                }
             })
             .collect();
 
@@ -681,6 +690,72 @@ impl DistributionalSGBT {
                     ls += self.config.learning_rate
                         * self.scale_steps[s]
                             .predict_sibling_interpolated(features, &self.auto_bandwidths);
+                }
+                (ls.exp().max(1e-8), ls)
+            }
+        };
+
+        GaussianPrediction {
+            mu,
+            sigma,
+            log_sigma,
+        }
+    }
+
+    /// Predict with graduated active-shadow blending.
+    ///
+    /// Smoothly transitions between active and shadow trees during replacement.
+    /// Requires `shadow_warmup` to be configured.
+    pub fn predict_graduated(&self, features: &[f64]) -> GaussianPrediction {
+        let mut mu = self.location_base;
+        for s in 0..self.location_steps.len() {
+            mu += self.config.learning_rate * self.location_steps[s].predict_graduated(features);
+        }
+
+        let (sigma, log_sigma) = match self.scale_mode {
+            ScaleMode::Empirical => {
+                let s = self.ewma_sq_err.sqrt().max(1e-8);
+                (s, s.ln())
+            }
+            ScaleMode::TreeChain => {
+                let mut ls = self.scale_base;
+                for s in 0..self.scale_steps.len() {
+                    ls +=
+                        self.config.learning_rate * self.scale_steps[s].predict_graduated(features);
+                }
+                (ls.exp().max(1e-8), ls)
+            }
+        };
+
+        GaussianPrediction {
+            mu,
+            sigma,
+            log_sigma,
+        }
+    }
+
+    /// Predict with graduated blending + sibling interpolation (premium path).
+    pub fn predict_graduated_sibling_interpolated(&self, features: &[f64]) -> GaussianPrediction {
+        let mut mu = self.location_base;
+        for s in 0..self.location_steps.len() {
+            mu += self.config.learning_rate
+                * self.location_steps[s]
+                    .predict_graduated_sibling_interpolated(features, &self.auto_bandwidths);
+        }
+
+        let (sigma, log_sigma) = match self.scale_mode {
+            ScaleMode::Empirical => {
+                let s = self.ewma_sq_err.sqrt().max(1e-8);
+                (s, s.ln())
+            }
+            ScaleMode::TreeChain => {
+                let mut ls = self.scale_base;
+                for s in 0..self.scale_steps.len() {
+                    ls += self.config.learning_rate
+                        * self.scale_steps[s].predict_graduated_sibling_interpolated(
+                            features,
+                            &self.auto_bandwidths,
+                        );
                 }
                 (ls.exp().max(1e-8), ls)
             }
