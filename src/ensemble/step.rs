@@ -147,6 +147,12 @@ impl BoostingStep {
         self.slot.predict_interpolated(features)
     }
 
+    /// Predict with sibling-based interpolation for feature-continuous predictions.
+    #[inline]
+    pub fn predict_sibling_interpolated(&self, features: &[f64], bandwidths: &[f64]) -> f64 {
+        self.slot.predict_sibling_interpolated(features, bandwidths)
+    }
+
     /// Number of leaves in the active tree.
     #[inline]
     pub fn n_leaves(&self) -> usize {

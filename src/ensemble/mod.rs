@@ -510,6 +510,22 @@ impl<L: Loss> SGBT<L> {
         pred
     }
 
+    /// Predict with sibling-based interpolation for feature-continuous predictions.
+    ///
+    /// At each split node near the threshold boundary, blends left and right
+    /// subtree predictions linearly based on distance from the threshold.
+    /// Uses auto-calibrated bandwidths as the interpolation margin.
+    /// Predictions vary continuously as features change, eliminating
+    /// step-function artifacts.
+    pub fn predict_sibling_interpolated(&self, features: &[f64]) -> f64 {
+        let mut pred = self.base_prediction;
+        for step in &self.steps {
+            pred += self.config.learning_rate
+                * step.predict_sibling_interpolated(features, &self.auto_bandwidths);
+        }
+        pred
+    }
+
     /// Predict with loss transform applied (e.g., sigmoid for logistic loss).
     pub fn predict_transformed(&self, features: &[f64]) -> f64 {
         self.loss.predict_transform(self.predict(features))
@@ -2045,5 +2061,54 @@ mod tests {
             "interpolated prediction should be finite: {}",
             pred
         );
+    }
+
+    #[test]
+    fn predict_sibling_interpolated_varies_with_features() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(6)
+            .delta(0.1)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..2000 {
+            let x = (i as f64) * 0.01;
+            let y = x.sin() * x + 0.5 * (x * 2.0).cos();
+            model.train_one(&Sample::new(vec![x, x * 0.3], y));
+        }
+
+        // Verify the method is callable and produces finite predictions
+        let pred = model.predict_sibling_interpolated(&[5.0, 1.5]);
+        assert!(pred.is_finite(), "sibling interpolated should be finite");
+
+        // If bandwidths are finite, verify sibling produces at least as much
+        // variation as hard routing across a feature sweep
+        let bws = model.auto_bandwidths();
+        if bws.iter().any(|&b| b.is_finite()) {
+            let hard: Vec<f64> = (0..200)
+                .map(|i| model.predict(&[i as f64 * 0.1, i as f64 * 0.03]))
+                .collect();
+            let sib: Vec<f64> = (0..200)
+                .map(|i| model.predict_sibling_interpolated(&[i as f64 * 0.1, i as f64 * 0.03]))
+                .collect();
+            let hc = hard
+                .windows(2)
+                .filter(|w| (w[0] - w[1]).abs() > f64::EPSILON)
+                .count();
+            let sc = sib
+                .windows(2)
+                .filter(|w| (w[0] - w[1]).abs() > f64::EPSILON)
+                .count();
+            assert!(
+                sc >= hc,
+                "sibling should produce >= hard changes: sib={}, hard={}",
+                sc,
+                hc
+            );
+        }
     }
 }

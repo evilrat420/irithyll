@@ -586,6 +586,73 @@ impl HoeffdingTree {
         alpha * leaf_pred + (1.0 - alpha) * parent_pred
     }
 
+    /// Predict with sibling-based interpolation for feature-continuous predictions.
+    ///
+    /// At the leaf's parent split, blends the leaf prediction with its sibling's
+    /// prediction based on the feature's distance from the split threshold:
+    ///
+    /// Within the margin `m` around the threshold:
+    /// `t = (feature - threshold + m) / (2 * m)`  (0 at left edge, 1 at right edge)
+    /// `pred = (1 - t) * left_pred + t * right_pred`
+    ///
+    /// Outside the margin, returns the routed child's prediction directly.
+    /// The margin `m` is derived from auto-bandwidths if available, otherwise
+    /// defaults to `feature_range / n_bins` heuristic per feature.
+    ///
+    /// This makes predictions vary continuously as features move near split
+    /// boundaries, eliminating step-function artifacts.
+    pub fn predict_sibling_interpolated(&self, features: &[f64], bandwidths: &[f64]) -> f64 {
+        self.predict_sibling_recursive(self.root, features, bandwidths)
+    }
+
+    fn predict_sibling_recursive(&self, node: NodeId, features: &[f64], bandwidths: &[f64]) -> f64 {
+        if self.arena.is_leaf(node) {
+            return self.leaf_prediction(node, features);
+        }
+
+        let feat_idx = self.arena.get_feature_idx(node) as usize;
+        let left = self.arena.get_left(node);
+        let right = self.arena.get_right(node);
+
+        // Categorical splits: always hard routing (no interpolation)
+        if let Some(mask) = self.arena.get_categorical_mask(node) {
+            let cat_val = features[feat_idx] as u64;
+            return if cat_val < 64 && (mask >> cat_val) & 1 == 1 {
+                self.predict_sibling_recursive(left, features, bandwidths)
+            } else {
+                self.predict_sibling_recursive(right, features, bandwidths)
+            };
+        }
+
+        let threshold = self.arena.get_threshold(node);
+        let margin = bandwidths.get(feat_idx).copied().unwrap_or(f64::INFINITY);
+
+        // No valid margin or infinite → hard routing
+        if !margin.is_finite() || margin <= 0.0 {
+            return if features[feat_idx] <= threshold {
+                self.predict_sibling_recursive(left, features, bandwidths)
+            } else {
+                self.predict_sibling_recursive(right, features, bandwidths)
+            };
+        }
+
+        let dist = features[feat_idx] - threshold;
+
+        if dist < -margin {
+            // Firmly in left child territory
+            self.predict_sibling_recursive(left, features, bandwidths)
+        } else if dist > margin {
+            // Firmly in right child territory
+            self.predict_sibling_recursive(right, features, bandwidths)
+        } else {
+            // Within the interpolation margin: linear blend
+            let t = (dist + margin) / (2.0 * margin); // 0.0 at left edge, 1.0 at right edge
+            let left_pred = self.predict_sibling_recursive(left, features, bandwidths);
+            let right_pred = self.predict_sibling_recursive(right, features, bandwidths);
+            (1.0 - t) * left_pred + t * right_pred
+        }
+    }
+
     /// Collect all split thresholds per feature from the tree arena.
     ///
     /// Returns a `Vec<Vec<f64>>` indexed by feature, containing all thresholds

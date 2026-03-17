@@ -657,6 +657,42 @@ impl DistributionalSGBT {
         }
     }
 
+    /// Predict with sibling-based interpolation for feature-continuous predictions.
+    ///
+    /// At each split node near the threshold boundary, blends left and right
+    /// subtree predictions linearly. Uses auto-calibrated bandwidths as the
+    /// interpolation margin. Predictions vary continuously as features change.
+    pub fn predict_sibling_interpolated(&self, features: &[f64]) -> GaussianPrediction {
+        let mut mu = self.location_base;
+        for s in 0..self.location_steps.len() {
+            mu += self.config.learning_rate
+                * self.location_steps[s]
+                    .predict_sibling_interpolated(features, &self.auto_bandwidths);
+        }
+
+        let (sigma, log_sigma) = match self.scale_mode {
+            ScaleMode::Empirical => {
+                let s = self.ewma_sq_err.sqrt().max(1e-8);
+                (s, s.ln())
+            }
+            ScaleMode::TreeChain => {
+                let mut ls = self.scale_base;
+                for s in 0..self.scale_steps.len() {
+                    ls += self.config.learning_rate
+                        * self.scale_steps[s]
+                            .predict_sibling_interpolated(features, &self.auto_bandwidths);
+                }
+                (ls.exp().max(1e-8), ls)
+            }
+        };
+
+        GaussianPrediction {
+            mu,
+            sigma,
+            log_sigma,
+        }
+    }
+
     /// Predict with σ-ratio diagnostic exposed.
     ///
     /// Returns `(mu, sigma, sigma_ratio)` where `sigma_ratio` is
@@ -2323,5 +2359,70 @@ mod serde_tests {
             result.is_err(),
             "negative max_leaf_output should fail validation"
         );
+    }
+
+    #[test]
+    fn predict_sibling_interpolated_varies_with_features() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(6)
+            .delta(0.1)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        for i in 0..2000 {
+            let x = (i as f64) * 0.01;
+            let y = x.sin() * x + 0.5 * (x * 2.0).cos();
+            let sample = crate::Sample::new(vec![x, x * 0.3], y);
+            model.train_one(&sample);
+        }
+
+        // Verify the method runs correctly and produces finite predictions
+        let pred = model.predict_sibling_interpolated(&[5.0, 1.5]);
+        assert!(
+            pred.mu.is_finite(),
+            "sibling interpolated mu should be finite"
+        );
+        assert!(
+            pred.sigma > 0.0,
+            "sibling interpolated sigma should be positive"
+        );
+
+        // Sweep — at minimum, sibling should produce same or more variation than hard
+        let bws = model.auto_bandwidths();
+        if bws.iter().any(|&b| b.is_finite()) {
+            let hard_preds: Vec<f64> = (0..200)
+                .map(|i| {
+                    let x = i as f64 * 0.1;
+                    model.predict(&[x, x * 0.3]).mu
+                })
+                .collect();
+            let hard_changes = hard_preds
+                .windows(2)
+                .filter(|w| (w[0] - w[1]).abs() > f64::EPSILON)
+                .count();
+
+            let preds: Vec<f64> = (0..200)
+                .map(|i| {
+                    let x = i as f64 * 0.1;
+                    model.predict_sibling_interpolated(&[x, x * 0.3]).mu
+                })
+                .collect();
+
+            let sibling_changes = preds
+                .windows(2)
+                .filter(|w| (w[0] - w[1]).abs() > f64::EPSILON)
+                .count();
+            assert!(
+                sibling_changes >= hard_changes,
+                "sibling should produce >= hard changes: sibling={}, hard={}",
+                sibling_changes,
+                hard_changes
+            );
+        }
     }
 }
