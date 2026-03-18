@@ -91,7 +91,7 @@ pub enum GatingMode {
 
 /// Numerically stable softmax: subtract max logit before exponentiating to
 /// prevent overflow, then normalize.
-fn softmax(logits: &[f64]) -> Vec<f64> {
+pub(crate) fn softmax(logits: &[f64]) -> Vec<f64> {
     let max = logits.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let exps: Vec<f64> = logits.iter().map(|&z| (z - max).exp()).collect();
     let sum: f64 = exps.iter().sum();

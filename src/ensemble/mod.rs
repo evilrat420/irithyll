@@ -23,6 +23,7 @@ pub mod config;
 pub mod distributional;
 pub mod lr_schedule;
 pub mod moe;
+pub mod moe_distributional;
 pub mod multi_target;
 pub mod multiclass;
 pub mod parallel;
