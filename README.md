@@ -14,7 +14,7 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.75-blue.svg)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
 [![GitHub stars](https://img.shields.io/github/stars/evilrat420/irithyll?style=social)](https://github.com/evilrat420/irithyll)
 
-**Streaming machine learning in Rust** -- gradient boosted trees, kernel methods, linear models, and composable pipelines, all learning one sample at a time. Train on a server, deploy to a microcontroller.
+**Streaming machine learning in Rust** -- gradient boosted trees, kernel methods, linear models, and composable pipelines, all learning one sample at a time.
 
 ```rust
 use irithyll::{pipe, normalizer, sgbt, StreamingLearner};
