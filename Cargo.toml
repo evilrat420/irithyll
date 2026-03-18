@@ -1,9 +1,9 @@
 [workspace]
-members = [".", "irithyll-python"]
+members = [".", "irithyll-python", "irithyll-core"]
 
 [package]
 name = "irithyll"
-version = "7.9.1"
+version = "8.0.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Streaming machine learning in Rust -- gradient boosted trees, kernel methods, linear models, and composable pipelines"
@@ -13,7 +13,7 @@ readme = "README.md"
 documentation = "https://docs.rs/irithyll"
 keywords = ["machine-learning", "gradient-boosting", "streaming", "online-learning", "decision-trees"]
 categories = ["algorithms", "science"]
-exclude = [".claude/", "irithyll-python/", "marketing/"]
+exclude = [".claude/", "irithyll-python/", "irithyll-core/", "irithyll-cli/", "marketing/"]
 
 [dependencies]
 parking_lot = "0.12"
@@ -24,6 +24,7 @@ serde_json = { version = "1.0", optional = true }
 bincode = { version = "2", features = ["serde"], optional = true }
 thiserror = "2.0"
 tracing = "0.1"
+irithyll-core = { path = "irithyll-core", version = "0.1.0" }
 
 # Optional acceleration dependencies (activated via feature flags)
 rayon = { version = "1.10", optional = true }
@@ -80,4 +81,8 @@ harness = false
 
 [[bench]]
 name = "scaling_bench"
+harness = false
+
+[[bench]]
+name = "packed_bench"
 harness = false

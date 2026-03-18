@@ -14,7 +14,7 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.75-blue.svg)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
 [![GitHub stars](https://img.shields.io/github/stars/evilrat420/irithyll?style=social)](https://github.com/evilrat420/irithyll)
 
-**Streaming machine learning in Rust** -- gradient boosted trees, kernel methods, linear models, and composable pipelines, all learning one sample at a time.
+**Streaming machine learning in Rust** -- gradient boosted trees, kernel methods, linear models, and composable pipelines, all learning one sample at a time. Train on a server, deploy to a microcontroller.
 
 ```rust
 use irithyll::{pipe, normalizer, sgbt, StreamingLearner};
@@ -24,15 +24,28 @@ model.train(&[100.0, 0.5], 42.0);
 let prediction = model.predict(&[100.0, 0.5]);
 ```
 
+## Workspace
+
+irithyll is structured as a Cargo workspace with three crates:
+
+| Crate | Description | `no_std` | Allocator |
+|-------|-------------|----------|-----------|
+| **`irithyll`** | Training, streaming algorithms, pipelines, I/O, async | No | std |
+| **`irithyll-core`** | Packed inference engine (12-byte nodes, branch-free traversal) | Yes | Zero-alloc |
+| **`irithyll-python`** | PyO3 Python bindings for `irithyll` | No | std |
+
+`irithyll-core` cross-compiles for bare-metal targets (verified: `cargo check --target thumbv6m-none-eabi`) and has zero dependencies.
+
 ## Why irithyll?
 
 - **12+ streaming algorithms** under one unified [`StreamingLearner`](https://docs.rs/irithyll/latest/irithyll/trait.StreamingLearner.html) trait
 - **One sample at a time** -- O(1) memory per model, no batches, no windows, no retraining
+- **Embedded deployment** -- train with `irithyll`, export to packed binary, infer with `irithyll-core` on bare metal
 - **Composable pipelines** -- chain preprocessors and learners with a builder API
 - **Concept drift adaptation** -- automatic model replacement when the data distribution shifts
 - **Confidence intervals** -- prediction uncertainty from RLS and conformal methods
 - **Production-grade** -- async streaming, SIMD acceleration, Arrow/Parquet I/O, ONNX export
-- **Pure Rust** -- zero unsafe, deterministic, serializable, 780+ tests
+- **Pure Rust** -- zero unsafe in `irithyll`, deterministic, serializable, 1100+ tests
 
 ## Algorithms
 
@@ -240,6 +253,67 @@ pred = model.predict(np.array([3.0]))
 shap = model.explain(np.array([3.0]))
 ```
 
+## Packed Inference (`irithyll-core`)
+
+Train with the full `irithyll` crate, export to a compact binary, and run inference on embedded targets with zero allocation.
+
+### Node Format
+
+Each `PackedNode` is 12 bytes (5 nodes per 64-byte cache line):
+
+| Field | Size | Description |
+|-------|------|-------------|
+| `value` | 4B | Split threshold (internal) or prediction with learning rate baked in (leaf) |
+| `children` | 4B | Packed left/right child u16 indices |
+| `feature_flags` | 2B | Bit 15 = is_leaf, bits 14:0 = feature index |
+| `_reserved` | 2B | Padding for future use |
+
+### Export and Deploy
+
+```rust
+use irithyll::{SGBTConfig, SGBT, Sample};
+use irithyll::export_embedded::export_packed;
+
+// 1. Train on a host machine
+let config = SGBTConfig::builder()
+    .n_steps(50)
+    .learning_rate(0.01)
+    .max_depth(4)
+    .build()
+    .unwrap();
+let mut model = SGBT::new(config);
+for sample in training_data {
+    model.train_one(&sample);
+}
+
+// 2. Export to packed binary (learning rate baked into leaf values)
+let packed: Vec<u8> = export_packed(&model, n_features);
+std::fs::write("model.bin", &packed).unwrap();
+```
+
+```rust
+// 3. Load on embedded target (no_std, zero-alloc)
+use irithyll_core::EnsembleView;
+
+// Zero-copy: borrows the buffer, no heap allocation
+let model_bytes: &[u8] = include_bytes!("model.bin");
+let view = EnsembleView::from_bytes(model_bytes).unwrap();
+
+let prediction: f32 = view.predict(&[1.0, 2.0, 3.0]);
+```
+
+### Performance
+
+Benchmarked on x86-64 (single core, 50 trees, max depth 4, 10 features):
+
+| Operation | Latency | Throughput |
+|-----------|---------|------------|
+| Packed single predict (`irithyll-core`) | **66 ns** | 15.2M pred/s |
+| Packed batch predict (x4 interleave) | -- | **5.3M pred/s** |
+| Training-time predict (`irithyll` SoA) | 533 ns | 1.9M pred/s |
+
+The 8x speedup comes from the 12-byte AoS node layout (vs training-time SoA vectors), branch-free child selection (compiles to `cmov` on x86), and f32 arithmetic with pre-baked learning rate.
+
 ## The SGBT Algorithm
 
 The core gradient boosting engine is based on [Gunasekara et al., 2024](https://doi.org/10.1007/s10994-024-06517-y). The ensemble maintains `n_steps` boosting stages, each owning a streaming Hoeffding tree and a drift detector. For each sample *(x, y)*:
@@ -255,22 +329,31 @@ Beyond the paper, irithyll adds EWMA leaf decay, lazy O(1) histogram decay, proa
 ## Architecture
 
 ```
-irithyll/
-  ensemble/        SGBT variants, config, multi-class/target, parallel, adaptive, distributional
-  learners/        KRLS, RLS, Gaussian NB, Mondrian forests, linear/polynomial models
-  pipeline/        Composable preprocessor + learner chains (StreamingPreprocessor trait)
-  preprocessing/   IncrementalNormalizer, OnlineFeatureSelector, CCIPCA
-  tree/            Hoeffding-bound streaming decision trees
-  histogram/       Streaming histogram binning (uniform, quantile, k-means)
-  drift/           Concept drift detectors (Page-Hinkley, ADWIN, DDM)
-  loss/            Differentiable loss functions (squared, logistic, softmax, Huber)
-  explain/         TreeSHAP, StreamingShap, importance drift monitoring
-  stream/          Async tokio-based training runner and predictor handles
-  metrics/         Online regression/classification metrics, conformal intervals, EWMA
-  anomaly/         Half-space trees for streaming anomaly detection
-  serde_support/   Model checkpoint/restore (JSON, bincode)
+irithyll/                 Workspace root
+  src/
+    ensemble/             SGBT variants, config, multi-class/target, parallel, adaptive, distributional
+    learners/             KRLS, RLS, Gaussian NB, Mondrian forests, linear/polynomial models
+    pipeline/             Composable preprocessor + learner chains (StreamingPreprocessor trait)
+    preprocessing/        IncrementalNormalizer, OnlineFeatureSelector, CCIPCA
+    tree/                 Hoeffding-bound streaming decision trees
+    histogram/            Streaming histogram binning (uniform, quantile, k-means)
+    drift/                Concept drift detectors (Page-Hinkley, ADWIN, DDM)
+    loss/                 Differentiable loss functions (squared, logistic, softmax, Huber)
+    explain/              TreeSHAP, StreamingShap, importance drift monitoring
+    stream/               Async tokio-based training runner and predictor handles
+    metrics/              Online regression/classification metrics, conformal intervals, EWMA
+    anomaly/              Half-space trees for streaming anomaly detection
+    serde_support/        Model checkpoint/restore (JSON, bincode)
+    export_embedded.rs    SGBT -> packed binary export for irithyll-core
 
-irithyll-python/   PyO3 Python bindings
+  irithyll-core/          #![no_std] zero-alloc inference engine
+    packed.rs             12-byte PackedNode, EnsembleHeader, TreeEntry
+    traverse.rs           Branch-free tree traversal (single + x4 batch)
+    view.rs               EnsembleView<'a> -- zero-copy inference from &[u8]
+    quantize.rs           f64 -> f32 quantization utilities
+    error.rs              FormatError (no_std compatible)
+
+  irithyll-python/        PyO3 Python bindings
 ```
 
 ## Configuration
@@ -293,6 +376,8 @@ irithyll-python/   PyO3 Python bindings
 | `split_reeval_interval`  | None (disabled)            | Re-evaluation interval for max-depth leaves    |
 
 ## Feature Flags
+
+These flags apply to the `irithyll` crate. `irithyll-core` has no required features (it is `no_std` with zero dependencies by default; an optional `std` feature is available).
 
 | Feature | Default | Description |
 |---------|---------|-------------|

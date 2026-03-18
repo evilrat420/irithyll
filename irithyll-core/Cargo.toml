@@ -1,0 +1,20 @@
+[package]
+name = "irithyll-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Zero-alloc inference engine for irithyll streaming ML models — no_std, 12-byte packed nodes, branch-free traversal"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/evilrat420/irithyll"
+keywords = ["machine-learning", "inference", "no-std", "embedded", "decision-trees"]
+categories = ["algorithms", "no-std", "embedded"]
+
+[features]
+default = []
+std = []
+
+[dependencies]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

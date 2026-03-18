@@ -762,13 +762,14 @@ checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
 
 [[package]]
 name = "irithyll"
-version = "7.9.1"
+version = "8.0.0"
 dependencies = [
  "approx",
  "arrow",
  "bincode",
  "criterion",
  "futures-core",
+ "irithyll-core",
  "parking_lot",
  "parquet",
  "proptest",
@@ -780,6 +781,10 @@ dependencies = [
  "tokio",
  "tracing",
 ]
+
+[[package]]
+name = "irithyll-core"
+version = "0.1.0"
 
 [[package]]
 name = "irithyll-python"
