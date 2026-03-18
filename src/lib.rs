@@ -124,6 +124,7 @@ pub use ensemble::config::{FeatureType, SGBTConfig, ScaleMode};
 pub use ensemble::distributional::{
     DecomposedPrediction, DistributionalSGBT, GaussianPrediction, ModelDiagnostics, TreeDiagnostic,
 };
+pub use ensemble::moe_distributional::MoEDistributionalSGBT;
 pub use ensemble::multi_target::MultiTargetSGBT;
 pub use ensemble::multiclass::MulticlassSGBT;
 pub use ensemble::quantile_regressor::QuantileRegressorSGBT;
