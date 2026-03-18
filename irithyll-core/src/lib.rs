@@ -29,12 +29,18 @@
 extern crate alloc;
 
 pub mod error;
+pub mod math;
 pub mod packed;
+pub mod packed_i16;
 pub mod quantize;
 pub mod traverse;
+pub mod traverse_i16;
 pub mod view;
+pub mod view_i16;
 
 // Convenience re-exports
 pub use error::FormatError;
 pub use packed::{EnsembleHeader, PackedNode, TreeEntry};
+pub use packed_i16::{PackedNodeI16, QuantizedEnsembleHeader};
 pub use view::EnsembleView;
+pub use view_i16::QuantizedEnsembleView;

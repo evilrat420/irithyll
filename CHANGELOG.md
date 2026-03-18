@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.1.0] - 2026-03-18
+
+### Added
+
+- **Int16 quantized inference (`irithyll-core`)** -- 8-byte `PackedNodeI16` with integer-only
+  tree traversal for FPU-less embedded targets.
+  - `QuantizedEnsembleHeader` with "IR16" magic, per-feature quantization scales, leaf scale.
+  - `QuantizedEnsembleView` -- zero-copy view with `predict()` (inline quantization, zero-alloc)
+    and `predict_prequantized()` (pure integer hot loop, zero float ops).
+  - `predict_tree_i16()` / `predict_tree_i16_x4()` -- branch-free integer traversal.
+  - `predict_tree_i16_inline()` -- hybrid path with on-the-fly f32-to-i16 quantization.
+  - 8 nodes per 64-byte cache line (vs 5 for f32). 48% more nodes in same flash.
+  - On Cortex-M0+ (no FPU): integer compare is ~25x faster than software f32 compare.
+- **`export_packed_i16()`** -- converts trained SGBT to int16 quantized packed binary.
+  - Per-feature scale: `32767 / max(|thresholds|)` for optimal i16 range utilization.
+  - Global leaf scale with i32 accumulation, single dequantization at prediction end.
+  - `validate_export_i16()` for accuracy comparison against original model.
+- **`math` module (`irithyll-core`)** -- libm-backed f64 math operations for no_std.
+  - 20 functions: abs, sqrt, exp, ln, log2, powf, powi, sin, cos, tanh, floor, ceil, round, etc.
+  - Foundation for Track B (migrating training algorithms to irithyll-core).
+
+### Changed
+
+- `irithyll-core` now depends on `libm` 0.2 (pure Rust, no_std, thumbv6m compatible).
+- `irithyll-core` version bumped to 0.2.0 (new public types + dependency).
+
 ## [8.0.1] - 2026-03-18
 
 ### Added
