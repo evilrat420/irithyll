@@ -7,6 +7,16 @@
 /// Maximum acceptable absolute difference between f64 and f32 representations.
 pub const DEFAULT_TOLERANCE: f64 = 1e-5;
 
+/// Absolute value for f64 without requiring std (compatible with MSRV 1.75 no_std).
+#[inline]
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        -x
+    } else {
+        x
+    }
+}
+
 /// Quantize an f64 threshold to f32, returning the f32 value.
 #[inline]
 pub fn quantize_threshold(value: f64) -> f32 {
@@ -28,7 +38,7 @@ pub fn quantize_leaf(leaf_value: f64, learning_rate: f64) -> f32 {
 pub fn within_tolerance(value: f64, tolerance: f64) -> bool {
     let quantized = value as f32;
     let roundtrip = quantized as f64;
-    let diff = (value - roundtrip).abs();
+    let diff = abs_f64(value - roundtrip);
     diff <= tolerance
 }
 
@@ -38,9 +48,9 @@ pub fn max_quantization_error(values: &[f64]) -> f64 {
         .iter()
         .map(|&v| {
             let q = v as f32;
-            (v - q as f64).abs()
+            abs_f64(v - q as f64)
         })
-        .fold(0.0f64, f64::max)
+        .fold(0.0f64, |a, b| if a > b { a } else { b })
 }
 
 #[cfg(test)]
