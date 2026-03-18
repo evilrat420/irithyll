@@ -3,20 +3,31 @@
 //! Converts the tree ensemble into a compact, zero-alloc-friendly binary
 //! that can be loaded by [`irithyll_core::EnsembleView`] on embedded targets.
 //!
+//! Two export paths are provided:
+//!
+//! - [`export_packed`] — f32 format (12-byte nodes), loaded by [`irithyll_core::EnsembleView`]
+//! - [`export_packed_i16`] — int16 quantized format (8-byte nodes), loaded by
+//!   [`irithyll_core::QuantizedEnsembleView`]. Per-feature threshold quantization
+//!   and global leaf quantization eliminate all float ops from the inference hot loop.
+//!
 //! # Usage
 //!
 //! ```no_run
 //! use irithyll::{SGBTConfig, SGBT, Sample};
-//! use irithyll::export_embedded::export_packed;
+//! use irithyll::export_embedded::{export_packed, export_packed_i16};
 //!
 //! let config = SGBTConfig::builder().n_steps(10).build().unwrap();
 //! let mut model = SGBT::new(config);
 //!
 //! // ... train the model ...
 //!
+//! // f32 export
 //! let packed = export_packed(&model, 3);
-//! // `packed` can be written to flash, sent over network, etc.
 //! // Load with `irithyll_core::EnsembleView::from_bytes(&packed)`
+//!
+//! // int16 quantized export (smaller, integer-only inference)
+//! let packed_i16 = export_packed_i16(&model, 3);
+//! // Load with `irithyll_core::QuantizedEnsembleView::from_bytes(&packed_i16)`
 //! ```
 
 use std::collections::VecDeque;
@@ -25,6 +36,7 @@ use crate::ensemble::SGBT;
 use crate::loss::Loss;
 use crate::tree::node::NodeId;
 use irithyll_core::packed::{EnsembleHeader, PackedNode, TreeEntry};
+use irithyll_core::packed_i16::{PackedNodeI16, QuantizedEnsembleHeader};
 
 /// Convert a trained SGBT model into the irithyll-core packed binary format.
 ///
@@ -196,6 +208,268 @@ pub fn validate_export<L: Loss>(model: &SGBT<L>, packed: &[u8], test_features: &
     max_diff
 }
 
+/// Convert a trained SGBT model into the irithyll-core int16 quantized packed binary.
+///
+/// The output binary can be loaded by [`irithyll_core::QuantizedEnsembleView::from_bytes`].
+/// All tree traversal uses integer-only comparisons (i16), eliminating float ops from
+/// the inference hot loop. This is ideal for FPU-less targets like Cortex-M0+.
+///
+/// # Arguments
+///
+/// * `model` - Trained SGBT model to export.
+/// * `n_features` - Number of input features (must be specified explicitly
+///   because the model doesn't track this -- Hoeffding trees accept any width).
+///
+/// # Quantization strategy
+///
+/// - Per-feature scale: `32767.0 / max(|thresholds for feature f|)`
+/// - Leaf scale: `32767.0 / max(|lr * leaf_values|)`
+/// - Thresholds: `(threshold * feature_scale[feat_idx]) as i16`
+/// - Leaves: `(lr * leaf_value * leaf_scale) as i16`
+///
+/// # Panics
+///
+/// Panics if any tree has more than 65535 nodes.
+pub fn export_packed_i16<L: Loss>(model: &SGBT<L>, n_features: usize) -> Vec<u8> {
+    let learning_rate = model.config().learning_rate;
+    let n_trees = model.steps().len();
+
+    // Phase 1: Collect all thresholds per feature and all leaf values across all trees.
+    let mut thresholds_per_feature: Vec<Vec<f64>> = vec![Vec::new(); n_features];
+    let mut all_leaf_values: Vec<f64> = Vec::new();
+
+    for step in model.steps() {
+        let arena = step.slot().active_tree().arena();
+        let root = step.slot().active_tree().root();
+        if root.is_none() || arena.n_nodes() == 0 {
+            // Empty tree contributes a single 0-leaf
+            all_leaf_values.push(0.0);
+            continue;
+        }
+
+        // BFS walk to collect thresholds and leaf values
+        let mut queue = VecDeque::new();
+        queue.push_back(root);
+        while let Some(node_id) = queue.pop_front() {
+            let idx = node_id.idx();
+            if arena.is_leaf[idx] {
+                all_leaf_values.push(learning_rate * arena.leaf_value[idx]);
+            } else {
+                let feat = arena.feature_idx[idx] as usize;
+                if feat < n_features {
+                    thresholds_per_feature[feat].push(arena.threshold[idx]);
+                }
+                queue.push_back(arena.left[idx]);
+                queue.push_back(arena.right[idx]);
+            }
+        }
+    }
+
+    // Phase 2: Compute per-feature scales and leaf scale.
+    let feature_scales: Vec<f32> = thresholds_per_feature
+        .iter()
+        .map(|thresholds| {
+            let max_abs = thresholds.iter().map(|t| t.abs()).fold(0.0f64, f64::max);
+            if max_abs == 0.0 {
+                1.0f32
+            } else {
+                (32767.0 / max_abs) as f32
+            }
+        })
+        .collect();
+
+    let max_abs_leaf = all_leaf_values
+        .iter()
+        .map(|v| v.abs())
+        .fold(0.0f64, f64::max);
+    let leaf_scale: f32 = if max_abs_leaf == 0.0 {
+        1.0
+    } else {
+        (32767.0 / max_abs_leaf) as f32
+    };
+
+    // Phase 3: BFS-reindex each tree into contiguous PackedNodeI16 arrays.
+    let mut all_tree_nodes: Vec<Vec<PackedNodeI16>> = Vec::with_capacity(n_trees);
+
+    for step in model.steps() {
+        let arena = step.slot().active_tree().arena();
+        let root = step.slot().active_tree().root();
+        let packed_nodes =
+            bfs_pack_tree_i16(arena, root, learning_rate, &feature_scales, leaf_scale);
+        all_tree_nodes.push(packed_nodes);
+    }
+
+    // Phase 4: Build the binary buffer.
+    let header = QuantizedEnsembleHeader {
+        magic: QuantizedEnsembleHeader::MAGIC,
+        version: QuantizedEnsembleHeader::VERSION,
+        n_trees: n_trees as u16,
+        n_features: n_features as u16,
+        _reserved: 0,
+        base_prediction: model.base_prediction() as f32,
+    };
+
+    // Build tree table with byte offsets
+    let mut tree_table: Vec<TreeEntry> = Vec::with_capacity(n_trees);
+    let mut byte_offset: u32 = 0;
+    let node_size = core::mem::size_of::<PackedNodeI16>() as u32;
+
+    for tree_nodes in &all_tree_nodes {
+        tree_table.push(TreeEntry {
+            n_nodes: tree_nodes.len() as u32,
+            offset: byte_offset,
+        });
+        byte_offset += tree_nodes.len() as u32 * node_size;
+    }
+
+    // Phase 5: Serialize to bytes.
+    let header_size = core::mem::size_of::<QuantizedEnsembleHeader>();
+    let leaf_scale_size = core::mem::size_of::<f32>();
+    let feature_scales_size = n_features * core::mem::size_of::<f32>();
+    let tree_table_size = n_trees * core::mem::size_of::<TreeEntry>();
+    let nodes_size = byte_offset as usize;
+    let total_size =
+        header_size + leaf_scale_size + feature_scales_size + tree_table_size + nodes_size;
+
+    let mut buf: Vec<u8> = Vec::with_capacity(total_size);
+
+    // Write header (16 bytes)
+    buf.extend_from_slice(as_bytes(&header));
+
+    // Write leaf_scale (4 bytes)
+    buf.extend_from_slice(as_bytes(&leaf_scale));
+
+    // Write feature_scales (n_features * 4 bytes)
+    for scale in &feature_scales {
+        buf.extend_from_slice(as_bytes(scale));
+    }
+
+    // Write tree table
+    for entry in &tree_table {
+        buf.extend_from_slice(as_bytes(entry));
+    }
+
+    // Write nodes
+    for tree_nodes in &all_tree_nodes {
+        for node in tree_nodes {
+            buf.extend_from_slice(as_bytes(node));
+        }
+    }
+
+    debug_assert_eq!(buf.len(), total_size);
+    buf
+}
+
+/// BFS-walk a TreeArena from `root` and pack into contiguous `PackedNodeI16` nodes.
+///
+/// Returns nodes in BFS order with root at index 0. All child indices
+/// are remapped to BFS positions. Thresholds and leaves are quantized to i16.
+fn bfs_pack_tree_i16(
+    arena: &crate::tree::node::TreeArena,
+    root: NodeId,
+    learning_rate: f64,
+    feature_scales: &[f32],
+    leaf_scale: f32,
+) -> Vec<PackedNodeI16> {
+    if root.is_none() || arena.n_nodes() == 0 {
+        // Empty tree -- single leaf with value 0
+        return vec![PackedNodeI16::leaf(0)];
+    }
+
+    // BFS to discover traversal order and assign contiguous indices.
+    let mut queue = VecDeque::new();
+    let mut bfs_order: Vec<NodeId> = Vec::new();
+
+    queue.push_back(root);
+    while let Some(node_id) = queue.pop_front() {
+        bfs_order.push(node_id);
+        let idx = node_id.idx();
+        if !arena.is_leaf[idx] {
+            queue.push_back(arena.left[idx]);
+            queue.push_back(arena.right[idx]);
+        }
+    }
+
+    let n_nodes = bfs_order.len();
+    assert!(
+        n_nodes <= u16::MAX as usize,
+        "tree has {} nodes, exceeds u16::MAX (65535)",
+        n_nodes
+    );
+
+    // Build old-NodeId -> new-BFS-index mapping.
+    let max_id = bfs_order.iter().map(|id| id.0).max().unwrap_or(0) as usize;
+    let mut id_to_bfs = vec![u16::MAX; max_id + 1];
+    for (bfs_idx, &node_id) in bfs_order.iter().enumerate() {
+        id_to_bfs[node_id.idx()] = bfs_idx as u16;
+    }
+
+    // Convert to PackedNodeI16
+    let mut packed = Vec::with_capacity(n_nodes);
+    for &node_id in &bfs_order {
+        let idx = node_id.idx();
+        if arena.is_leaf[idx] {
+            let leaf_f64 = learning_rate * arena.leaf_value[idx];
+            let leaf_i16 = (leaf_f64 * leaf_scale as f64) as i16;
+            packed.push(PackedNodeI16::leaf(leaf_i16));
+        } else {
+            let feat = arena.feature_idx[idx] as usize;
+            let scale = if feat < feature_scales.len() {
+                feature_scales[feat]
+            } else {
+                1.0
+            };
+            let threshold_i16 = (arena.threshold[idx] * scale as f64) as i16;
+            let feature = feat as u16;
+            let left_bfs = id_to_bfs[arena.left[idx].idx()];
+            let right_bfs = id_to_bfs[arena.right[idx].idx()];
+            packed.push(PackedNodeI16::split(
+                threshold_i16,
+                feature,
+                left_bfs,
+                right_bfs,
+            ));
+        }
+    }
+
+    packed
+}
+
+/// Compare predictions between original SGBT and quantized [`QuantizedEnsembleView`].
+///
+/// Returns the maximum absolute difference across all test samples.
+/// Due to int16 quantization, max error is typically < 0.5 (much larger than f32 export).
+///
+/// # Panics
+///
+/// Panics if `packed` is not a valid quantized binary.
+pub fn validate_export_i16<L: Loss>(
+    model: &SGBT<L>,
+    packed: &[u8],
+    test_features: &[Vec<f64>],
+) -> f64 {
+    let view = irithyll_core::QuantizedEnsembleView::from_bytes(packed)
+        .expect("validate_export_i16: invalid packed binary");
+
+    let mut max_diff: f64 = 0.0;
+
+    for features_f64 in test_features {
+        // Original model prediction (f64)
+        let original = model.predict(features_f64);
+
+        // Quantized prediction (f32 -> f64 for comparison)
+        let features_f32: Vec<f32> = features_f64.iter().map(|&v| v as f32).collect();
+        let quantized_pred = view.predict(&features_f32) as f64;
+
+        let diff = (original - quantized_pred).abs();
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+
+    max_diff
+}
+
 /// Cast a `repr(C)` struct to its byte representation.
 fn as_bytes<T: Sized>(val: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(val as *const T as *const u8, core::mem::size_of::<T>()) }
@@ -332,6 +606,98 @@ mod tests {
 
         let packed = export_packed(&model, 2);
         let view = irithyll_core::EnsembleView::from_bytes(&packed).unwrap();
+        assert_eq!(view.n_trees(), 1);
+
+        // Verify prediction is finite and in a reasonable range
+        let pred = view.predict(&[2.5, 5.0]);
+        assert!(pred.is_finite());
+    }
+
+    // -----------------------------------------------------------------------
+    // int16 quantized export tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn export_i16_produces_valid_binary() {
+        let model = trained_model();
+        let packed = export_packed_i16(&model, 3);
+
+        // Should be parseable by QuantizedEnsembleView
+        let view = irithyll_core::QuantizedEnsembleView::from_bytes(&packed);
+        assert!(view.is_ok(), "exported i16 binary should be valid");
+
+        let view = view.unwrap();
+        assert_eq!(view.n_trees(), 5);
+        assert_eq!(view.n_features(), 3);
+    }
+
+    #[test]
+    fn export_i16_preserves_base_prediction() {
+        let model = trained_model();
+        let packed = export_packed_i16(&model, 3);
+        let view = irithyll_core::QuantizedEnsembleView::from_bytes(&packed).unwrap();
+
+        let expected = model.base_prediction() as f32;
+        assert!(
+            (view.base_prediction() - expected).abs() < 1e-6,
+            "i16 base prediction mismatch: got {}, expected {}",
+            view.base_prediction(),
+            expected
+        );
+    }
+
+    #[test]
+    fn export_i16_predictions_within_tolerance() {
+        let model = trained_model();
+        let packed = export_packed_i16(&model, 3);
+
+        let test_data: Vec<Vec<f64>> = (0..50)
+            .map(|i| {
+                let x = (i as f64) * 0.2;
+                vec![x, x * 2.0, x * 0.5]
+            })
+            .collect();
+
+        let max_diff = validate_export_i16(&model, &packed, &test_data);
+        assert!(
+            max_diff < 0.5,
+            "i16 max prediction difference {} exceeds tolerance 0.5",
+            max_diff
+        );
+    }
+
+    #[test]
+    fn export_i16_untrained_model() {
+        let config = SGBTConfig::builder().n_steps(3).build().unwrap();
+        let model = SGBT::new(config);
+        let packed = export_packed_i16(&model, 5);
+
+        let view = irithyll_core::QuantizedEnsembleView::from_bytes(&packed).unwrap();
+        assert_eq!(view.n_trees(), 3);
+
+        // Untrained: all predictions should be ~base_prediction
+        let pred = view.predict(&[0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!(pred.is_finite());
+    }
+
+    #[test]
+    fn export_i16_single_tree_roundtrip() {
+        let config = SGBTConfig::builder()
+            .n_steps(1)
+            .learning_rate(0.05)
+            .grace_period(5)
+            .max_depth(2)
+            .n_bins(8)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+        for i in 0..50 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 2.0], x + 1.0));
+        }
+
+        let packed = export_packed_i16(&model, 2);
+        let view = irithyll_core::QuantizedEnsembleView::from_bytes(&packed).unwrap();
         assert_eq!(view.n_trees(), 1);
 
         // Verify prediction is finite and in a reasonable range

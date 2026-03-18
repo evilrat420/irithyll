@@ -115,6 +115,7 @@ pub mod export_embedded;
 // Re-exports -- irithyll-core packed inference
 pub use irithyll_core;
 pub use irithyll_core::{EnsembleView, FormatError, PackedNode};
+pub use irithyll_core::{PackedNodeI16, QuantizedEnsembleHeader, QuantizedEnsembleView};
 
 // Re-exports -- core types
 pub use drift::{DriftDetector, DriftSignal};
