@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.0.0] - 2026-03-18
+
+### Added
+
+- **`irithyll-core` crate** — new `#![no_std]` zero-alloc inference engine for
+  deploying trained models on embedded targets (Cortex-M0+, 32KB flash).
+  - 12-byte `PackedNode` AoS format (5 nodes per cache line).
+  - `EnsembleView<'a>` — zero-copy view over `&[u8]`, validated once at construction.
+  - Branch-free `predict_tree()` traversal (`cmov`/`csel`, no pipeline stalls).
+  - `predict_tree_x4()` interleaved batch prediction exploiting ILP.
+  - f64→f32 quantization with tolerance validation.
+- **`export_embedded` module** — converts trained `SGBT` to packed binary format.
+  - BFS tree reindexing with contiguous u16 node indices.
+  - Learning rate baked into leaf values (one less multiply per tree).
+  - `validate_export()` for comparing original vs packed predictions.
+- **Re-exports** — `EnsembleView`, `PackedNode`, `FormatError` available from
+  root `irithyll` crate via `pub use irithyll_core::*`.
+- **CI** — `thumbv6m-none-eabi` cross-compilation check for `irithyll-core`,
+  workspace-wide clippy and docs.
+- **Benchmark** — `packed_bench` comparing packed inference vs standard SGBT prediction.
+
+### Changed
+
+- Workspace restructured: `irithyll-core` added as workspace member.
+- `irithyll` now depends on `irithyll-core` (path dependency).
+
 ## [7.9.1] - 2026-03-17
 
 ### Fixed

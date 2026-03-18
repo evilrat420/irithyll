@@ -110,6 +110,12 @@ pub mod arrow_support;
 #[cfg(feature = "onnx")]
 pub mod onnx_export;
 
+pub mod export_embedded;
+
+// Re-exports -- irithyll-core packed inference
+pub use irithyll_core;
+pub use irithyll_core::{EnsembleView, FormatError, PackedNode};
+
 // Re-exports -- core types
 pub use drift::{DriftDetector, DriftSignal};
 pub use ensemble::adaptive::AdaptiveSGBT;
