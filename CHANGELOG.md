@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.0.1] - 2026-03-18
+
+### Added
+
+- **`MoEDistributionalSGBT`** -- Mixture of Experts over `DistributionalSGBT`
+  ensembles with shadow expert competition via Hoeffding bounds.
+  - K active experts + K shadow challengers, each a full `DistributionalSGBT`.
+  - Learned softmax gate: `W · x + b → softmax → routing probabilities`.
+  - Shadow competition uses Gaussian NLL difference with Hoeffding bound test.
+  - When shadow proves statistically superior, it replaces the active expert.
+  - Gate-weighted mixture prediction via law of total variance.
+  - Supports soft gating (all experts see all samples) and hard top-k routing.
+  - `predict()` returns `GaussianPrediction { mu, sigma }` with correct mixture
+    variance accounting for both within-expert and between-expert variance.
+
 ## [8.0.0] - 2026-03-18
 
 ### Added
