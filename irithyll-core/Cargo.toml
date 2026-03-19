@@ -1,9 +1,9 @@
 [package]
 name = "irithyll-core"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Zero-alloc inference engine for irithyll streaming ML — no_std, f32 + int16 packed formats, branch-free traversal"
+description = "Core types and inference engine for irithyll streaming ML — no_std, loss functions, observation trait, f32 + int16 packed formats, branch-free traversal"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/evilrat420/irithyll"
 keywords = ["machine-learning", "inference", "no-std", "embedded", "decision-trees"]
@@ -11,11 +11,26 @@ categories = ["algorithms", "no-std", "embedded"]
 
 [features]
 default = []
-std = []
+alloc = []
+std = ["alloc"]
+serde = ["dep:serde"]
+embedded-bench = ["dep:cortex-m-rt", "dep:cortex-m-semihosting", "dep:panic-halt"]
 
 [dependencies]
 libm = "0.2"
+serde = { version = "1.0", features = ["derive"], optional = true, default-features = false }
+cortex-m-rt = { version = "0.7", optional = true }
+cortex-m-semihosting = { version = "0.5", optional = true }
+panic-halt = { version = "1.0", optional = true }
+
+[[example]]
+name = "cortex_m_bench"
+required-features = ["embedded-bench"]
+
+[[example]]
+name = "cortex_m_hello"
+required-features = ["embedded-bench"]
 
 [package.metadata.docs.rs]
-all-features = true
+features = ["alloc", "std", "serde"]
 rustdoc-args = ["--cfg", "docsrs"]
