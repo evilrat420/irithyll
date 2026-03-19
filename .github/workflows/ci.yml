@@ -150,7 +150,7 @@ jobs:
             "https://github.com/xpack-dev-tools/qemu-arm-xpack/releases/download/v9.2.4-1/xpack-qemu-arm-9.2.4-1-linux-x64.tar.gz"
           mkdir -p $HOME/qemu-arm && tar -xzf /tmp/qemu-arm.tar.gz -C $HOME/qemu-arm --strip-components=1
       - name: Build embedded benchmark
-        run: cd irithyll-core && cargo build --features embedded-bench --target thumbv6m-none-eabi --release --example cortex_m_bench
+        run: cd irithyll-core && RUSTFLAGS="-C link-arg=-Tlink.x -Dwarnings" cargo build --features embedded-bench --target thumbv6m-none-eabi --release --example cortex_m_bench
       - name: Run on QEMU Cortex-M0+
         run: |
           timeout 120 $HOME/qemu-arm/bin/qemu-system-arm \
