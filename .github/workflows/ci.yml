@@ -30,12 +30,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests (default features)
         run: cargo test --lib --tests
-      - name: Run tests (all features)
-        run: cargo test --all-features
+      - name: Run tests (all features, excluding embedded-only deps)
+        run: cargo test -p irithyll --all-features && cargo test -p irithyll-core --features alloc,serde
       - name: Run doc tests
         run: cargo test --doc
-      - name: Test irithyll-core
+      - name: Test irithyll-core (default)
         run: cargo test -p irithyll-core
+      - name: Test irithyll-core (alloc)
+        run: cargo test -p irithyll-core --features alloc
+      - name: Test irithyll-core (no alloc)
+        run: cargo test -p irithyll-core --no-default-features
 
   msrv:
     name: MSRV (1.75)
@@ -60,8 +64,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run clippy (default features)
         run: cargo clippy --workspace --lib --tests -- -D warnings
-      - name: Run clippy (all features)
-        run: cargo clippy --workspace --all-features -- -D warnings
+      - name: Run clippy (all features, excluding embedded-bench)
+        run: cargo clippy -p irithyll --all-features -- -D warnings && cargo clippy -p irithyll-core --features alloc,serde -- -D warnings
 
   fmt:
     name: Formatting
@@ -84,7 +88,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build docs
-        run: cargo doc --workspace --no-deps --all-features --exclude irithyll-python
+        run: cargo doc --no-deps --exclude irithyll-python -p irithyll --all-features && cargo doc --no-deps -p irithyll-core --features alloc,serde
 
   examples:
     name: Examples
@@ -116,3 +120,63 @@ jobs:
           targets: thumbv6m-none-eabi
       - name: Check irithyll-core no_std
         run: cargo check -p irithyll-core --target thumbv6m-none-eabi
+      - name: Build embedded benchmark
+        run: cd irithyll-core && cargo build --features embedded-bench --target thumbv6m-none-eabi --release --example cortex_m_bench
+
+  docs-core:
+    name: Documentation (irithyll-core)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build irithyll-core docs
+        run: cargo doc -p irithyll-core --no-deps --features alloc,serde
+
+  qemu-m0:
+    name: QEMU Cortex-M0+ validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+      - uses: Swatinem/rust-cache@v2
+      - name: Install QEMU ARM
+        run: |
+          curl -sL -o /tmp/qemu-arm.zip \
+            "https://github.com/xpack-dev-tools/qemu-arm-xpack/releases/download/v9.2.4-1/xpack-qemu-arm-9.2.4-1-linux-x64.tar.gz"
+          mkdir -p /opt/qemu-arm && tar -xzf /tmp/qemu-arm.zip -C /opt/qemu-arm --strip-components=1
+      - name: Build embedded benchmark
+        run: cd irithyll-core && cargo build --features embedded-bench --target thumbv6m-none-eabi --release --example cortex_m_bench
+      - name: Run on QEMU Cortex-M0+
+        run: |
+          timeout 120 /opt/qemu-arm/bin/qemu-system-arm \
+            -cpu cortex-m0 \
+            -machine lm3s6965evb \
+            -nographic \
+            -semihosting-config enable=on,target=native \
+            -kernel target/thumbv6m-none-eabi/release/examples/cortex_m_bench \
+            | tee /dev/stderr | grep -q "BENCH_COMPLETE"
+
+  bench-regression:
+    name: Benchmark regression check
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run comparison benchmarks
+        run: cargo bench --bench comparison_bench -- --output-format bencher | tee bench_output.txt
+      - name: Store benchmark results
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          tool: cargo
+          output-file-path: bench_output.txt
+          auto-push: true
+          alert-threshold: "115%"
+          comment-on-alert: true
+          fail-on-alert: false

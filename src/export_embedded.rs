@@ -435,7 +435,7 @@ fn bfs_pack_tree_i16(
     packed
 }
 
-/// Compare predictions between original SGBT and quantized [`QuantizedEnsembleView`].
+/// Compare predictions between original SGBT and quantized [`QuantizedEnsembleView`](crate::QuantizedEnsembleView).
 ///
 /// Returns the maximum absolute difference across all test samples.
 /// Due to int16 quantization, max error is typically < 0.5 (much larger than f32 export).

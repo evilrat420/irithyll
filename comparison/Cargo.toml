@@ -1,0 +1,19 @@
+[package]
+name = "irithyll-comparison"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+irithyll = { path = ".." }
+irithyll-core = { path = "../irithyll-core", features = ["alloc"] }
+gbdt = "0.1"
+serde = "=1.0.227"
+serde_derive = "=1.0.227"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "comparison"
+harness = false

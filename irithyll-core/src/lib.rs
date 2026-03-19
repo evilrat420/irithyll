@@ -1,10 +1,13 @@
-//! Zero-alloc inference engine for irithyll streaming ML models.
+//! Core types and inference engine for irithyll streaming ML models.
 //!
-//! `irithyll-core` provides a compact binary format and branch-free traversal
-//! for deploying trained SGBT models on embedded targets (Cortex-M0+, 32KB flash).
+//! `irithyll-core` provides loss functions, observation traits, a compact binary
+//! format, and branch-free traversal for deploying trained SGBT models on
+//! embedded targets (Cortex-M0+, 32KB flash).
 //!
 //! # Features
 //!
+//! - **Loss functions** — squared, logistic, Huber, softmax, expectile, quantile
+//! - **Observation trait** — zero-copy training interface with `SampleRef`
 //! - **12-byte packed nodes** — 5 nodes per 64-byte cache line
 //! - **Zero-copy `EnsembleView`** — constructed from `&[u8]`, no allocation after validation
 //! - **Branch-free traversal** — `cmov`/`csel` child selection, no pipeline stalls
@@ -25,22 +28,31 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-#[cfg(test)]
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
+#[cfg(all(test, not(feature = "alloc")))]
 extern crate alloc;
 
 pub mod error;
+pub mod loss;
 pub mod math;
 pub mod packed;
 pub mod packed_i16;
 pub mod quantize;
+pub mod sample;
 pub mod traverse;
 pub mod traverse_i16;
 pub mod view;
 pub mod view_i16;
 
-// Convenience re-exports
+// Convenience re-exports -- inference
 pub use error::FormatError;
 pub use packed::{EnsembleHeader, PackedNode, TreeEntry};
 pub use packed_i16::{PackedNodeI16, QuantizedEnsembleHeader};
 pub use view::EnsembleView;
 pub use view_i16::QuantizedEnsembleView;
+
+// Convenience re-exports -- training core types
+pub use loss::{Loss, LossType};
+pub use sample::{Observation, SampleRef};

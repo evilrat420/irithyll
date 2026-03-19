@@ -1,2 +1,4 @@
 /target
 BENCHMARK_PLAN.md
+comparison/target/
+.claude/

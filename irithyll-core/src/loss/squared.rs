@@ -6,8 +6,55 @@
 //! and the hessian is a constant 1.0, making Newton steps equivalent to
 //! gradient steps.
 
-pub use super::{Loss, LossType};
-pub use irithyll_core::loss::squared::*;
+use super::Loss;
+
+/// Mean squared error loss (L2 loss, scaled by 0.5).
+///
+/// Optimal for regression when the noise is Gaussian.
+/// Sensitive to outliers -- consider [`HuberLoss`](super::huber::HuberLoss)
+/// for heavy-tailed distributions.
+#[derive(Debug, Clone, Copy)]
+pub struct SquaredLoss;
+
+impl Loss for SquaredLoss {
+    #[inline]
+    fn n_outputs(&self) -> usize {
+        1
+    }
+
+    #[inline]
+    fn gradient(&self, target: f64, prediction: f64) -> f64 {
+        prediction - target
+    }
+
+    #[inline]
+    fn hessian(&self, _target: f64, _prediction: f64) -> f64 {
+        1.0
+    }
+
+    #[inline]
+    fn loss(&self, target: f64, prediction: f64) -> f64 {
+        let r = prediction - target;
+        0.5 * r * r
+    }
+
+    #[inline]
+    fn predict_transform(&self, raw: f64) -> f64 {
+        raw
+    }
+
+    fn initial_prediction(&self, targets: &[f64]) -> f64 {
+        if targets.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = targets.iter().sum();
+        sum / targets.len() as f64
+    }
+
+    fn loss_type(&self) -> Option<super::LossType> {
+        Some(super::LossType::Squared)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -23,11 +70,8 @@ mod tests {
     #[test]
     fn test_gradient_at_known_points() {
         let loss = SquaredLoss;
-        // prediction == target => gradient is 0
         assert!((loss.gradient(3.0, 3.0)).abs() < EPS);
-        // prediction > target => positive gradient
         assert!((loss.gradient(1.0, 4.0) - 3.0).abs() < EPS);
-        // prediction < target => negative gradient
         assert!((loss.gradient(5.0, 2.0) - (-3.0)).abs() < EPS);
     }
 
@@ -42,7 +86,7 @@ mod tests {
     #[test]
     fn test_loss_value() {
         let loss = SquaredLoss;
-        assert!((loss.loss(1.0, 3.0) - 2.0).abs() < EPS); // 0.5 * 4 = 2
+        assert!((loss.loss(1.0, 3.0) - 2.0).abs() < EPS);
         assert!((loss.loss(5.0, 5.0)).abs() < EPS);
         assert!((loss.loss(0.0, 1.0) - 0.5).abs() < EPS);
     }
@@ -72,7 +116,6 @@ mod tests {
 
     #[test]
     fn test_gradient_is_derivative_of_loss() {
-        // Numerical gradient check: dL/df ~= (L(f+h) - L(f-h)) / (2h)
         let loss = SquaredLoss;
         let target = 2.5;
         let pred = 4.0;

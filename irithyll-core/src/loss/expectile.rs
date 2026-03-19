@@ -10,8 +10,80 @@
 //! positive Hessian everywhere, making it natively compatible with second-order
 //! gradient boosting (Newton leaf weights work directly).
 
-pub use super::{Loss, LossType};
-pub use irithyll_core::loss::expectile::*;
+use super::{Loss, LossType};
+
+/// Expectile loss with asymmetry parameter `tau`.
+///
+/// # Parameters
+///
+/// - `tau` in (0, 1): asymmetry parameter. `tau = 0.5` is equivalent to
+///   squared loss (up to scaling). `tau > 0.5` penalizes under-prediction
+///   more heavily; `tau < 0.5` penalizes over-prediction more heavily.
+#[derive(Debug, Clone, Copy)]
+pub struct ExpectileLoss {
+    /// Asymmetry parameter in (0, 1).
+    pub tau: f64,
+}
+
+impl ExpectileLoss {
+    /// Create a new expectile loss with the given asymmetry parameter.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `tau` is not in (0, 1).
+    pub fn new(tau: f64) -> Self {
+        assert!(tau > 0.0 && tau < 1.0, "tau must be in (0, 1), got {tau}");
+        Self { tau }
+    }
+}
+
+impl Loss for ExpectileLoss {
+    #[inline]
+    fn n_outputs(&self) -> usize {
+        1
+    }
+
+    #[inline]
+    fn gradient(&self, target: f64, prediction: f64) -> f64 {
+        let r = prediction - target;
+        let w = if r >= 0.0 { self.tau } else { 1.0 - self.tau };
+        2.0 * w * r
+    }
+
+    #[inline]
+    fn hessian(&self, target: f64, prediction: f64) -> f64 {
+        let w = if prediction >= target {
+            self.tau
+        } else {
+            1.0 - self.tau
+        };
+        2.0 * w
+    }
+
+    #[inline]
+    fn loss(&self, target: f64, prediction: f64) -> f64 {
+        let r = prediction - target;
+        let w = if r >= 0.0 { self.tau } else { 1.0 - self.tau };
+        w * r * r
+    }
+
+    #[inline]
+    fn predict_transform(&self, raw: f64) -> f64 {
+        raw
+    }
+
+    fn initial_prediction(&self, targets: &[f64]) -> f64 {
+        if targets.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = targets.iter().sum();
+        sum / targets.len() as f64
+    }
+
+    fn loss_type(&self) -> Option<LossType> {
+        Some(LossType::Expectile { tau: self.tau })
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -27,11 +99,8 @@ mod tests {
 
     #[test]
     fn test_gradient_symmetric_at_half() {
-        // tau=0.5 should match SquaredLoss gradient (within factor of 1)
         let exp = ExpectileLoss::new(0.5);
         let sq = SquaredLoss;
-        // SquaredLoss gradient = pred - target
-        // ExpectileLoss gradient at tau=0.5 = 2*0.5*(pred-target) = pred-target
         assert!((exp.gradient(3.0, 5.0) - sq.gradient(3.0, 5.0)).abs() < EPS);
         assert!((exp.gradient(5.0, 3.0) - sq.gradient(5.0, 3.0)).abs() < EPS);
         assert!((exp.gradient(4.0, 4.0) - sq.gradient(4.0, 4.0)).abs() < EPS);
@@ -40,26 +109,19 @@ mod tests {
     #[test]
     fn test_gradient_asymmetric() {
         let loss = ExpectileLoss::new(0.9);
-        // Over-prediction (pred > target): w = tau = 0.9
-        let g_over = loss.gradient(1.0, 3.0); // 2*0.9*(3-1) = 3.6
+        let g_over = loss.gradient(1.0, 3.0);
         assert!((g_over - 3.6).abs() < EPS);
-
-        // Under-prediction (pred < target): w = 1-tau = 0.1
-        let g_under = loss.gradient(3.0, 1.0); // 2*0.1*(1-3) = -0.4
+        let g_under = loss.gradient(3.0, 1.0);
         assert!((g_under - (-0.4)).abs() < EPS);
     }
 
     #[test]
     fn test_hessian_positive_definite() {
         let loss = ExpectileLoss::new(0.9);
-        // Over-prediction: h = 2*tau = 1.8
         assert!((loss.hessian(1.0, 3.0) - 1.8).abs() < EPS);
-        // Under-prediction: h = 2*(1-tau) = 0.2
         assert!((loss.hessian(3.0, 1.0) - 0.2).abs() < EPS);
-        // At prediction == target: h = 2*tau = 1.8 (>= convention)
         assert!((loss.hessian(2.0, 2.0) - 1.8).abs() < EPS);
 
-        // Always positive for any tau in (0,1)
         for &tau in &[0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99] {
             let l = ExpectileLoss::new(tau);
             assert!(l.hessian(0.0, 1.0) > 0.0);
@@ -71,11 +133,8 @@ mod tests {
     #[test]
     fn test_loss_value() {
         let loss = ExpectileLoss::new(0.9);
-        // Over-prediction: w=0.9, r=2, loss = 0.9*4 = 3.6
         assert!((loss.loss(1.0, 3.0) - 3.6).abs() < EPS);
-        // Under-prediction: w=0.1, r=-2, loss = 0.1*4 = 0.4
         assert!((loss.loss(3.0, 1.0) - 0.4).abs() < EPS);
-        // Exact: loss = 0
         assert!((loss.loss(5.0, 5.0)).abs() < EPS);
     }
 
@@ -112,7 +171,6 @@ mod tests {
             "numerical={numerical}, analytical={analytical}"
         );
 
-        // Also check under-prediction side
         let pred2 = 1.0;
         let numerical2 = (loss.loss(target, pred2 + h) - loss.loss(target, pred2 - h)) / (2.0 * h);
         let analytical2 = loss.gradient(target, pred2);

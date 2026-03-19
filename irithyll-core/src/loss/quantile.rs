@@ -10,8 +10,96 @@
 //! This converges to the empirical conditional quantile as more samples
 //! arrive at each leaf -- the same approach used by LightGBM and XGBoost.
 
-pub use super::{Loss, LossType};
-pub use irithyll_core::loss::quantile::*;
+use super::{Loss, LossType};
+
+/// Quantile (pinball) loss with target quantile `tau`.
+///
+/// # Parameters
+///
+/// - `tau` in (0, 1): target quantile. `tau = 0.5` targets the median,
+///   `tau = 0.9` targets the 90th percentile, etc.
+#[derive(Debug, Clone, Copy)]
+pub struct QuantileLoss {
+    /// Target quantile in (0, 1).
+    pub tau: f64,
+}
+
+impl QuantileLoss {
+    /// Create a new quantile loss with the given target quantile.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `tau` is not in (0, 1).
+    pub fn new(tau: f64) -> Self {
+        assert!(tau > 0.0 && tau < 1.0, "tau must be in (0, 1), got {tau}");
+        Self { tau }
+    }
+}
+
+impl Loss for QuantileLoss {
+    #[inline]
+    fn n_outputs(&self) -> usize {
+        1
+    }
+
+    #[inline]
+    fn gradient(&self, target: f64, prediction: f64) -> f64 {
+        // Subgradient of the pinball loss w.r.t. prediction (dL/df):
+        //   L = tau*(y-f) when y >= f  => dL/df = -tau
+        //   L = (1-tau)*(f-y) when y < f => dL/df = 1 - tau
+        if prediction >= target {
+            1.0 - self.tau
+        } else {
+            -self.tau
+        }
+    }
+
+    #[inline]
+    fn hessian(&self, _target: f64, _prediction: f64) -> f64 {
+        // Pseudo-Huber trick: constant hessian makes leaf weights
+        // behave as gradient descent, converging to the empirical quantile.
+        1.0
+    }
+
+    #[inline]
+    fn loss(&self, target: f64, prediction: f64) -> f64 {
+        let r = target - prediction;
+        if r >= 0.0 {
+            self.tau * r
+        } else {
+            (self.tau - 1.0) * r
+        }
+    }
+
+    #[inline]
+    fn predict_transform(&self, raw: f64) -> f64 {
+        raw
+    }
+
+    fn initial_prediction(&self, targets: &[f64]) -> f64 {
+        if targets.is_empty() {
+            return 0.0;
+        }
+        #[cfg(feature = "alloc")]
+        {
+            // Compute the empirical tau-quantile
+            let mut sorted: alloc::vec::Vec<f64> = alloc::vec::Vec::from(targets);
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+            let idx = ((self.tau * sorted.len() as f64) as usize).min(sorted.len() - 1);
+            sorted[idx]
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            // Mean fallback when we can't allocate for sorting
+            let sum: f64 = targets.iter().sum();
+            sum / targets.len() as f64
+        }
+    }
+
+    fn loss_type(&self) -> Option<LossType> {
+        Some(LossType::Quantile { tau: self.tau })
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -27,7 +115,6 @@ mod tests {
     #[test]
     fn test_gradient_over_predict() {
         let loss = QuantileLoss::new(0.9);
-        // pred > target: gradient = 1 - tau = 0.1
         assert!((loss.gradient(1.0, 3.0) - 0.1).abs() < EPS);
         assert!((loss.gradient(0.0, 100.0) - 0.1).abs() < EPS);
     }
@@ -35,7 +122,6 @@ mod tests {
     #[test]
     fn test_gradient_under_predict() {
         let loss = QuantileLoss::new(0.9);
-        // pred < target: gradient = -tau = -0.9
         assert!((loss.gradient(3.0, 1.0) - (-0.9)).abs() < EPS);
         assert!((loss.gradient(100.0, 0.0) - (-0.9)).abs() < EPS);
     }
@@ -43,7 +129,6 @@ mod tests {
     #[test]
     fn test_gradient_at_exact() {
         let loss = QuantileLoss::new(0.5);
-        // pred == target: gradient = 1 - tau = 0.5 (>= branch)
         assert!((loss.gradient(5.0, 5.0) - 0.5).abs() < EPS);
     }
 
@@ -58,20 +143,16 @@ mod tests {
     #[test]
     fn test_loss_pinball() {
         let loss = QuantileLoss::new(0.9);
-        // Under-prediction (target > pred): loss = tau * (target - pred)
         assert!((loss.loss(5.0, 3.0) - 0.9 * 2.0).abs() < EPS);
-        // Over-prediction (target < pred): loss = (1-tau) * (pred - target)
         assert!((loss.loss(3.0, 5.0) - 0.1 * 2.0).abs() < EPS);
-        // Exact: loss = 0
         assert!((loss.loss(4.0, 4.0)).abs() < EPS);
     }
 
     #[test]
     fn test_median_loss_is_half_mae() {
-        // At tau=0.5, pinball loss = 0.5 * |target - prediction| = MAE/2
         let loss = QuantileLoss::new(0.5);
-        assert!((loss.loss(5.0, 3.0) - 1.0).abs() < EPS); // 0.5 * 2
-        assert!((loss.loss(3.0, 5.0) - 1.0).abs() < EPS); // 0.5 * 2
+        assert!((loss.loss(5.0, 3.0) - 1.0).abs() < EPS);
+        assert!((loss.loss(3.0, 5.0) - 1.0).abs() < EPS);
     }
 
     #[test]
@@ -80,15 +161,14 @@ mod tests {
         assert!((loss.predict_transform(42.0) - 42.0).abs() < EPS);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn test_initial_prediction_is_quantile() {
         let loss = QuantileLoss::new(0.5);
         let targets = [1.0, 2.0, 3.0, 4.0, 5.0];
-        // Median of [1,2,3,4,5] at index floor(0.5*5)=2 => 3.0
         assert!((loss.initial_prediction(&targets) - 3.0).abs() < EPS);
 
         let loss90 = QuantileLoss::new(0.9);
-        // 90th percentile: index floor(0.9*5)=4 => 5.0
         assert!((loss90.initial_prediction(&targets) - 5.0).abs() < EPS);
     }
 
@@ -109,11 +189,9 @@ mod tests {
 
     #[test]
     fn test_gradient_is_subderivative_of_loss() {
-        // Numerical check away from the kink point (pred != target)
         let loss = QuantileLoss::new(0.75);
         let target = 2.5;
 
-        // Over-prediction side
         let pred = 4.0;
         let h = 1e-6;
         let numerical = (loss.loss(target, pred + h) - loss.loss(target, pred - h)) / (2.0 * h);
@@ -123,7 +201,6 @@ mod tests {
             "over: numerical={numerical}, analytical={analytical}"
         );
 
-        // Under-prediction side
         let pred2 = 1.0;
         let numerical2 = (loss.loss(target, pred2 + h) - loss.loss(target, pred2 - h)) / (2.0 * h);
         let analytical2 = loss.gradient(target, pred2);
