@@ -61,13 +61,13 @@ fn load_electricity() -> Vec<DatasetRow> {
 // Prequential evaluation
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 struct PrequentialResult {
     accuracy: f64,
     kappa: f64,
     total_time_ms: f64,
     throughput_sps: f64,
     n_samples: usize,
-    /// Accuracy at each checkpoint (every `checkpoint_interval` samples)
     checkpoints: Vec<(usize, f64)>,
 }
 
