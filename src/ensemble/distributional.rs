@@ -29,8 +29,29 @@
 
 use crate::ensemble::config::{SGBTConfig, ScaleMode};
 use crate::ensemble::step::BoostingStep;
+use crate::export_embedded::export_distributional_packed;
 use crate::sample::{Observation, SampleRef};
 use crate::tree::builder::TreeConfig;
+
+/// Cached packed f32 binary for fast location-only inference.
+///
+/// Re-exported periodically from the location ensemble. Predictions use
+/// contiguous BFS-packed memory for cache-optimal tree traversal.
+struct PackedInferenceCache {
+    bytes: Vec<u8>,
+    base: f64,
+    n_features: usize,
+}
+
+impl Clone for PackedInferenceCache {
+    fn clone(&self) -> Self {
+        Self {
+            bytes: self.bytes.clone(),
+            base: self.base,
+            n_features: self.n_features,
+        }
+    }
+}
 
 /// Prediction from a distributional model: full Gaussian N(μ, σ²).
 #[derive(Debug, Clone, Copy)]
@@ -226,6 +247,12 @@ pub struct DistributionalSGBT {
     ensemble_grad_m2: f64,
     /// Ensemble-level gradient sample count.
     ensemble_grad_count: u64,
+    /// Packed f32 cache for fast location-only inference (dual-path).
+    packed_cache: Option<PackedInferenceCache>,
+    /// Samples trained since last packed cache refresh.
+    samples_since_refresh: u64,
+    /// How often to refresh the packed cache (0 = disabled).
+    packed_refresh_interval: u64,
 }
 
 impl Clone for DistributionalSGBT {
@@ -253,6 +280,9 @@ impl Clone for DistributionalSGBT {
             ensemble_grad_mean: self.ensemble_grad_mean,
             ensemble_grad_m2: self.ensemble_grad_m2,
             ensemble_grad_count: self.ensemble_grad_count,
+            packed_cache: self.packed_cache.clone(),
+            samples_since_refresh: self.samples_since_refresh,
+            packed_refresh_interval: self.packed_refresh_interval,
         }
     }
 }
@@ -344,6 +374,7 @@ impl DistributionalSGBT {
         let uncertainty_modulated_lr = config.uncertainty_modulated_lr;
         let scale_mode = config.scale_mode;
         let empirical_sigma_alpha = config.empirical_sigma_alpha;
+        let packed_refresh_interval = config.packed_refresh_interval;
         Self {
             config,
             location_steps,
@@ -367,6 +398,9 @@ impl DistributionalSGBT {
             ensemble_grad_mean: 0.0,
             ensemble_grad_m2: 0.0,
             ensemble_grad_count: 0,
+            packed_cache: None,
+            samples_since_refresh: 0,
+            packed_refresh_interval,
         }
     }
 
@@ -476,6 +510,9 @@ impl DistributionalSGBT {
                 self.location_steps[s].train_and_predict(features, g_mu, h_mu, train_count);
             mu_accum += (base_lr * sigma_ratio) * loc_pred;
         }
+
+        // Refresh packed cache if interval reached
+        self.maybe_refresh_packed_cache();
     }
 
     /// Tree-chain training: full NGBoost dual-chain with location + scale trees.
@@ -548,24 +585,37 @@ impl DistributionalSGBT {
         let err = target - mu;
         let alpha = self.empirical_sigma_alpha;
         self.ewma_sq_err = (1.0 - alpha) * self.ewma_sq_err + alpha * err * err;
+
+        // Refresh packed cache if interval reached
+        self.maybe_refresh_packed_cache();
     }
 
     /// Predict the full Gaussian distribution for a feature vector.
     ///
-    /// Always uses sigmoid-blended soft routing with auto-calibrated per-feature
-    /// bandwidths derived from median split threshold gaps.
+    /// When a packed cache is available, uses it for the location (μ) prediction
+    /// via contiguous BFS-packed memory traversal. Falls back to full tree
+    /// traversal if the cache is absent or produces non-finite results.
+    ///
+    /// Sigma computation always uses the primary path (EWMA or scale chain)
+    /// and is unaffected by the packed cache.
     pub fn predict(&self, features: &[f64]) -> GaussianPrediction {
-        let mut mu = self.location_base;
-        if self.auto_bandwidths.is_empty() {
-            for s in 0..self.location_steps.len() {
-                mu += self.config.learning_rate * self.location_steps[s].predict(features);
+        // Try packed cache for mu if available
+        let mu = if let Some(ref cache) = self.packed_cache {
+            let features_f32: Vec<f32> = features.iter().map(|&v| v as f32).collect();
+            match irithyll_core::EnsembleView::from_bytes(&cache.bytes) {
+                Ok(view) => {
+                    let packed_mu = cache.base + view.predict(&features_f32) as f64;
+                    if packed_mu.is_finite() {
+                        packed_mu
+                    } else {
+                        self.predict_full_trees(features)
+                    }
+                }
+                Err(_) => self.predict_full_trees(features),
             }
         } else {
-            for s in 0..self.location_steps.len() {
-                mu += self.config.learning_rate
-                    * self.location_steps[s].predict_smooth_auto(features, &self.auto_bandwidths);
-            }
-        }
+            self.predict_full_trees(features)
+        };
 
         let (sigma, log_sigma) = match self.scale_mode {
             ScaleMode::Empirical => {
@@ -594,6 +644,22 @@ impl DistributionalSGBT {
             sigma,
             log_sigma,
         }
+    }
+
+    /// Full-tree location prediction (fallback when packed cache is unavailable).
+    fn predict_full_trees(&self, features: &[f64]) -> f64 {
+        let mut mu = self.location_base;
+        if self.auto_bandwidths.is_empty() {
+            for s in 0..self.location_steps.len() {
+                mu += self.config.learning_rate * self.location_steps[s].predict(features);
+            }
+        } else {
+            for s in 0..self.location_steps.len() {
+                mu += self.config.learning_rate
+                    * self.location_steps[s].predict_smooth_auto(features, &self.auto_bandwidths);
+            }
+        }
+        mu
     }
 
     /// Predict using sigmoid-blended soft routing for smooth interpolation.
@@ -909,6 +975,59 @@ impl DistributionalSGBT {
         self.ensemble_grad_mean
     }
 
+    /// Check if packed cache should be refreshed and do so if interval reached.
+    fn maybe_refresh_packed_cache(&mut self) {
+        if self.packed_refresh_interval > 0 {
+            self.samples_since_refresh += 1;
+            if self.samples_since_refresh >= self.packed_refresh_interval {
+                self.refresh_packed_cache();
+                self.samples_since_refresh = 0;
+            }
+        }
+    }
+
+    /// Re-export the location ensemble into the packed cache.
+    fn refresh_packed_cache(&mut self) {
+        // Determine n_features from the first tree that has been initialized
+        let n_features = self
+            .location_steps
+            .iter()
+            .filter_map(|s| s.slot().active_tree().n_features())
+            .max()
+            .unwrap_or(0);
+
+        if n_features == 0 {
+            return;
+        }
+
+        let (bytes, base) = export_distributional_packed(self, n_features);
+        self.packed_cache = Some(PackedInferenceCache {
+            bytes,
+            base,
+            n_features,
+        });
+    }
+
+    /// Enable or reconfigure the packed inference cache at runtime.
+    ///
+    /// Sets the refresh interval and immediately builds the initial cache
+    /// if the model has been initialized. Pass `0` to disable.
+    pub fn enable_packed_cache(&mut self, interval: u64) {
+        self.packed_refresh_interval = interval;
+        self.samples_since_refresh = 0;
+        if interval > 0 && self.base_initialized {
+            self.refresh_packed_cache();
+        } else if interval == 0 {
+            self.packed_cache = None;
+        }
+    }
+
+    /// Whether the packed inference cache is currently populated.
+    #[inline]
+    pub fn has_packed_cache(&self) -> bool {
+        self.packed_cache.is_some()
+    }
+
     /// Refresh auto-bandwidths if any tree has been replaced since last computation.
     fn refresh_bandwidths(&mut self) {
         let current_sum: u64 = self
@@ -1024,6 +1143,8 @@ impl DistributionalSGBT {
         self.ensemble_grad_mean = 0.0;
         self.ensemble_grad_m2 = 0.0;
         self.ensemble_grad_count = 0;
+        self.packed_cache = None;
+        self.samples_since_refresh = 0;
     }
 
     /// Total samples trained.
@@ -1072,6 +1193,23 @@ impl DistributionalSGBT {
     #[inline]
     pub fn config(&self) -> &SGBTConfig {
         &self.config
+    }
+
+    /// Access the location boosting steps (for export/inspection).
+    pub fn location_steps(&self) -> &[BoostingStep] {
+        &self.location_steps
+    }
+
+    /// Base prediction for the location (mean) ensemble.
+    #[inline]
+    pub fn location_base(&self) -> f64 {
+        self.location_base
+    }
+
+    /// Learning rate from the model configuration.
+    #[inline]
+    pub fn learning_rate(&self) -> f64 {
+        self.config.learning_rate
     }
 
     /// Current rolling σ mean (EWMA of predicted σ).
@@ -1412,6 +1550,7 @@ impl DistributionalSGBT {
 
         let scale_mode = state.config.scale_mode;
         let empirical_sigma_alpha = state.config.empirical_sigma_alpha;
+        let packed_refresh_interval = state.config.packed_refresh_interval;
         Self {
             config: state.config,
             location_steps,
@@ -1435,6 +1574,9 @@ impl DistributionalSGBT {
             ensemble_grad_mean: 0.0,
             ensemble_grad_m2: 0.0,
             ensemble_grad_count: 0,
+            packed_cache: None,
+            samples_since_refresh: 0,
+            packed_refresh_interval,
         }
     }
 }
@@ -2168,6 +2310,97 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Packed cache tests (dual-path inference)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn packed_cache_disabled_by_default() {
+        let model = DistributionalSGBT::new(test_config());
+        assert!(!model.has_packed_cache());
+        assert_eq!(model.config().packed_refresh_interval, 0);
+    }
+
+    #[test]
+    fn packed_cache_refreshes_after_interval() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(5)
+            .max_depth(3)
+            .n_bins(8)
+            .initial_target_count(10)
+            .packed_refresh_interval(20)
+            .build()
+            .unwrap();
+
+        let mut model = DistributionalSGBT::new(config);
+
+        // Train past initialization (10 samples) + refresh interval (20 samples)
+        for i in 0..40 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 2.0, x * 0.5], x * 3.0));
+        }
+
+        // Cache should exist after enough training
+        assert!(
+            model.has_packed_cache(),
+            "packed cache should exist after training past refresh interval"
+        );
+
+        // Predictions should be finite
+        let pred = model.predict(&[2.0, 4.0, 1.0]);
+        assert!(pred.mu.is_finite(), "mu should be finite: {}", pred.mu);
+    }
+
+    #[test]
+    fn packed_cache_matches_full_tree() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(5)
+            .max_depth(3)
+            .n_bins(8)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+
+        let mut model = DistributionalSGBT::new(config);
+
+        // Train
+        for i in 0..80 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 2.0, x * 0.5], x * 3.0));
+        }
+
+        // Get full-tree prediction (no cache)
+        assert!(!model.has_packed_cache());
+        let full_pred = model.predict(&[2.0, 4.0, 1.0]);
+
+        // Enable cache and get cached prediction
+        model.enable_packed_cache(10);
+        assert!(model.has_packed_cache());
+        let cached_pred = model.predict(&[2.0, 4.0, 1.0]);
+
+        // Should match within f32 precision (f64->f32 conversion loses some precision)
+        let mu_diff = (full_pred.mu - cached_pred.mu).abs();
+        assert!(
+            mu_diff < 0.1,
+            "packed cache mu ({}) should match full tree mu ({}) within f32 tolerance, diff={}",
+            cached_pred.mu,
+            full_pred.mu,
+            mu_diff
+        );
+
+        // Sigma should be identical (not affected by packed cache)
+        assert!(
+            (full_pred.sigma - cached_pred.sigma).abs() < 1e-12,
+            "sigma should be identical: full={}, cached={}",
+            full_pred.sigma,
+            cached_pred.sigma
+        );
     }
 }
 

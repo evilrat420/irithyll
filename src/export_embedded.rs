@@ -32,6 +32,7 @@
 
 use std::collections::VecDeque;
 
+use crate::ensemble::distributional::DistributionalSGBT;
 use crate::ensemble::SGBT;
 use crate::loss::Loss;
 use crate::tree::node::NodeId;
@@ -470,6 +471,92 @@ pub fn validate_export_i16<L: Loss>(
     max_diff
 }
 
+/// Convert a trained [`DistributionalSGBT`] model's location ensemble into
+/// the irithyll-core packed binary format (f32 nodes).
+///
+/// Only the location (μ) ensemble is exported -- scale estimation (σ) is not
+/// included because it uses either EWMA state or a separate tree chain that
+/// doesn't map to the single-output packed format.
+///
+/// Returns `(bytes, location_base)` where `bytes` is the packed binary
+/// (loadable by [`irithyll_core::EnsembleView`]) and `location_base` is the
+/// base prediction that must be added separately (stored as the header's
+/// `base_prediction` field set to `0.0` to allow the caller to manage it in f64).
+///
+/// # Arguments
+///
+/// * `model` - Trained DistributionalSGBT model to export.
+/// * `n_features` - Number of input features.
+///
+/// # Panics
+///
+/// Panics if any tree has more than 65535 nodes.
+pub fn export_distributional_packed(
+    model: &DistributionalSGBT,
+    n_features: usize,
+) -> (Vec<u8>, f64) {
+    let learning_rate = model.learning_rate();
+    let steps = model.location_steps();
+    let n_trees = steps.len();
+
+    // Phase 1: BFS-reindex each tree into contiguous PackedNode arrays.
+    let mut all_tree_nodes: Vec<Vec<PackedNode>> = Vec::with_capacity(n_trees);
+
+    for step in steps {
+        let arena = step.slot().active_tree().arena();
+        let root = step.slot().active_tree().root();
+        let packed_nodes = bfs_pack_tree(arena, root, learning_rate);
+        all_tree_nodes.push(packed_nodes);
+    }
+
+    // Phase 2: Build the binary buffer.
+    // base_prediction in header = 0.0; caller uses the returned location_base in f64.
+    let header = EnsembleHeader {
+        magic: EnsembleHeader::MAGIC,
+        version: EnsembleHeader::VERSION,
+        n_trees: n_trees as u16,
+        n_features: n_features as u16,
+        _reserved: 0,
+        base_prediction: 0.0,
+    };
+
+    // Build tree table with byte offsets
+    let mut tree_table: Vec<TreeEntry> = Vec::with_capacity(n_trees);
+    let mut byte_offset: u32 = 0;
+    let node_size = core::mem::size_of::<PackedNode>() as u32;
+
+    for tree_nodes in &all_tree_nodes {
+        tree_table.push(TreeEntry {
+            n_nodes: tree_nodes.len() as u32,
+            offset: byte_offset,
+        });
+        byte_offset += tree_nodes.len() as u32 * node_size;
+    }
+
+    // Phase 3: Serialize to bytes.
+    let header_size = core::mem::size_of::<EnsembleHeader>();
+    let tree_table_size = n_trees * core::mem::size_of::<TreeEntry>();
+    let nodes_size = byte_offset as usize;
+    let total_size = header_size + tree_table_size + nodes_size;
+
+    let mut buf: Vec<u8> = Vec::with_capacity(total_size);
+
+    buf.extend_from_slice(as_bytes(&header));
+
+    for entry in &tree_table {
+        buf.extend_from_slice(as_bytes(entry));
+    }
+
+    for tree_nodes in &all_tree_nodes {
+        for node in tree_nodes {
+            buf.extend_from_slice(as_bytes(node));
+        }
+    }
+
+    debug_assert_eq!(buf.len(), total_size);
+    (buf, model.location_base())
+}
+
 /// Cast a `repr(C)` struct to its byte representation.
 fn as_bytes<T: Sized>(val: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(val as *const T as *const u8, core::mem::size_of::<T>()) }
@@ -703,5 +790,78 @@ mod tests {
         // Verify prediction is finite and in a reasonable range
         let pred = view.predict(&[2.5, 5.0]);
         assert!(pred.is_finite());
+    }
+
+    // -----------------------------------------------------------------------
+    // Distributional packed export tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn export_distributional_packed_roundtrip() {
+        use crate::ensemble::distributional::DistributionalSGBT;
+
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(5)
+            .max_depth(3)
+            .n_bins(8)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+
+        let mut model = DistributionalSGBT::new(config);
+        let n_features = 3;
+
+        // Train the model
+        for i in 0..100 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&(vec![x, x * 2.0, x * 0.5], x * 3.0));
+        }
+
+        // Export
+        let (packed, location_base) = export_distributional_packed(&model, n_features);
+
+        // Load with EnsembleView
+        let view = irithyll_core::EnsembleView::from_bytes(&packed)
+            .expect("exported distributional binary should be valid");
+        assert_eq!(view.n_trees(), 5);
+        assert_eq!(view.n_features(), 3);
+
+        // Verify base_prediction in header is 0 (we use location_base separately)
+        assert!(
+            view.base_prediction().abs() < 1e-6,
+            "header base_prediction should be 0.0, got {}",
+            view.base_prediction()
+        );
+
+        // Compare predictions: packed(base + view.predict) vs full tree predict
+        let test_features: Vec<Vec<f64>> = (0..20)
+            .map(|i| {
+                let x = (i as f64) * 0.5;
+                vec![x, x * 2.0, x * 0.5]
+            })
+            .collect();
+
+        let mut max_diff: f64 = 0.0;
+        for features in &test_features {
+            // Full tree prediction (mu only)
+            let full_mu = model.predict(features).mu;
+
+            // Packed prediction
+            let features_f32: Vec<f32> = features.iter().map(|&v| v as f32).collect();
+            let packed_mu = location_base + view.predict(&features_f32) as f64;
+
+            let diff = (full_mu - packed_mu).abs();
+            if diff > max_diff {
+                max_diff = diff;
+            }
+        }
+
+        assert!(
+            max_diff < 0.1,
+            "max mu difference {} between full tree and packed export exceeds f32 tolerance",
+            max_diff
+        );
     }
 }
