@@ -1,0 +1,5 @@
+model,accuracy,kappa,time_ms,throughput,n_samples
+hoeffding_tree,0.795617,0.577942,2750.5,16474,45312
+hoeffding_adaptive_tree,0.830531,0.649958,9513.5,4763,45312
+arf_n10,0.886719,0.767405,85764.2,528,45312
+arf_n25,0.892744,0.779738,158184.1,286,45312

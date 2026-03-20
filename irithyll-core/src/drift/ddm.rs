@@ -16,13 +16,14 @@
 //! *Learning with drift detection.* In Advances in Artificial Intelligence --
 //! SBIA 2004, pp. 286--295.
 
-use crate::drift::{DriftDetector, DriftSignal};
+use super::{DriftDetector, DriftSignal};
 
 /// DDM (Drift Detection Method) for concept drift detection.
 ///
 /// Monitors running error rate and standard deviation.
 /// Signals warning when error exceeds minimum by 2 sigma, drift at 3 sigma.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Ddm {
     /// Warning threshold multiplier (default 2.0).
     warning_level: f64,
@@ -102,7 +103,7 @@ impl Ddm {
         if self.count == 0 {
             0.0
         } else {
-            (self.m2 / self.count as f64).sqrt()
+            crate::math::sqrt(self.m2 / self.count as f64)
         }
     }
 
@@ -127,6 +128,16 @@ impl Default for Ddm {
     }
 }
 
+impl core::fmt::Display for Ddm {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "Ddm(warn={}, drift={}, min_inst={}, count={})",
+            self.warning_level, self.drift_level, self.min_instances, self.count
+        )
+    }
+}
+
 impl DriftDetector for Ddm {
     fn update(&mut self, value: f64) -> DriftSignal {
         // 1. Increment count.
@@ -140,7 +151,7 @@ impl DriftDetector for Ddm {
         self.m2 += delta * delta2;
 
         // 3. Population standard deviation.
-        let std = (self.m2 / n).sqrt();
+        let std = crate::math::sqrt(self.m2 / n);
 
         // 4. Current metric.
         let p_plus_s = self.mean + std;
@@ -180,24 +191,27 @@ impl DriftDetector for Ddm {
         self.min_s = f64::MAX;
     }
 
-    fn clone_fresh(&self) -> Box<dyn DriftDetector> {
-        Box::new(Self::with_params(
+    #[cfg(feature = "alloc")]
+    fn clone_fresh(&self) -> alloc::boxed::Box<dyn DriftDetector> {
+        alloc::boxed::Box::new(Self::with_params(
             self.warning_level,
             self.drift_level,
             self.min_instances,
         ))
     }
 
-    fn clone_boxed(&self) -> Box<dyn DriftDetector> {
-        Box::new(self.clone())
+    #[cfg(feature = "alloc")]
+    fn clone_boxed(&self) -> alloc::boxed::Box<dyn DriftDetector> {
+        alloc::boxed::Box::new(self.clone())
     }
 
     fn estimated_mean(&self) -> f64 {
         self.mean
     }
 
-    fn serialize_state(&self) -> Option<crate::drift::state::DriftDetectorState> {
-        Some(crate::drift::state::DriftDetectorState::Ddm {
+    #[cfg(feature = "alloc")]
+    fn serialize_state(&self) -> Option<super::DriftDetectorState> {
+        Some(super::DriftDetectorState::Ddm {
             mean: self.mean,
             m2: self.m2,
             count: self.count,
@@ -206,8 +220,9 @@ impl DriftDetector for Ddm {
         })
     }
 
-    fn restore_state(&mut self, state: &crate::drift::state::DriftDetectorState) -> bool {
-        if let crate::drift::state::DriftDetectorState::Ddm {
+    #[cfg(feature = "alloc")]
+    fn restore_state(&mut self, state: &super::DriftDetectorState) -> bool {
+        if let super::DriftDetectorState::Ddm {
             mean,
             m2,
             count,
@@ -233,8 +248,11 @@ impl DriftDetector for Ddm {
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
+    use alloc::vec::Vec;
+
+    use super::super::DriftSignal;
     use super::*;
-    use crate::drift::DriftSignal;
 
     /// Helper: feed a slice of values, collect all signals.
     fn feed(ddm: &mut Ddm, values: &[f64]) -> Vec<DriftSignal> {
@@ -248,7 +266,7 @@ mod tests {
             .map(|i| {
                 // Deterministic oscillation: sin-based spread.
                 let t = i as f64;
-                centre + jitter * (t * 0.7).sin()
+                centre + jitter * crate::math::sin(t * 0.7)
             })
             .collect()
     }
@@ -411,6 +429,7 @@ mod tests {
     }
 
     // 7. clone_fresh produces a fresh instance with same params.
+    #[cfg(feature = "alloc")]
     #[test]
     fn clone_fresh_same_params() {
         let ddm = Ddm::with_params(1.5, 2.5, 50);
