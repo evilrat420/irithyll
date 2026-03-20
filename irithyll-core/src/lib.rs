@@ -31,9 +31,13 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(feature = "std")]
+extern crate std;
+
 #[cfg(all(test, not(feature = "alloc")))]
 extern crate alloc;
 
+pub mod drift;
 pub mod error;
 pub mod loss;
 pub mod math;
@@ -56,3 +60,12 @@ pub use view_i16::QuantizedEnsembleView;
 // Convenience re-exports -- training core types
 pub use loss::{Loss, LossType};
 pub use sample::{Observation, SampleRef};
+
+// Convenience re-exports -- drift detection
+pub use drift::DriftSignal;
+#[cfg(feature = "alloc")]
+pub use drift::{DriftDetector, DriftDetectorState};
+
+// Convenience re-exports -- config/error (requires alloc)
+#[cfg(feature = "alloc")]
+pub use error::{ConfigError, IrithyllError, Result};

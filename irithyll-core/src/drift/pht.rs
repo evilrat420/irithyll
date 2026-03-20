@@ -27,8 +27,8 @@
 //! # Example
 //!
 //! ```
-//! use irithyll::drift::pht::PageHinkleyTest;
-//! use irithyll::drift::{DriftDetector, DriftSignal};
+//! use irithyll_core::drift::pht::PageHinkleyTest;
+//! use irithyll_core::drift::{DriftDetector, DriftSignal};
 //!
 //! let mut pht = PageHinkleyTest::new();
 //!
@@ -48,7 +48,7 @@
 //! assert!(detected);
 //! ```
 
-use crate::drift::{DriftDetector, DriftSignal};
+use super::DriftSignal;
 
 /// Page-Hinkley Test for concept drift detection.
 ///
@@ -62,6 +62,7 @@ use crate::drift::{DriftDetector, DriftSignal};
 ///
 /// A warning is signaled at `lambda * 0.5` before full drift is confirmed.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PageHinkleyTest {
     /// Allowed deviation before accumulation (default 0.005).
     delta: f64,
@@ -151,16 +152,12 @@ impl PageHinkleyTest {
         self.sum_down = 0.0;
         self.min_sum_down = f64::MAX;
     }
-}
 
-impl Default for PageHinkleyTest {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DriftDetector for PageHinkleyTest {
-    fn update(&mut self, value: f64) -> DriftSignal {
+    /// Feed a new value and get the current drift signal.
+    ///
+    /// This is the core algorithm, usable without the `alloc` feature.
+    /// When `alloc` is enabled, the `DriftDetector::update` trait method delegates here.
+    pub fn update(&mut self, value: f64) -> DriftSignal {
         // Step 1: Increment observation count.
         self.count += 1;
 
@@ -170,11 +167,11 @@ impl DriftDetector for PageHinkleyTest {
         // Step 3: Update cumulative sums.
         // Upward shift accumulator: positive when values exceed mean + delta.
         self.sum_up += value - self.running_mean - self.delta;
-        self.min_sum_up = self.min_sum_up.min(self.sum_up);
+        self.min_sum_up = crate::math::fmin(self.min_sum_up, self.sum_up);
 
         // Downward shift accumulator: positive when values fall below mean - delta.
         self.sum_down += self.running_mean - self.delta - value;
-        self.min_sum_down = self.min_sum_down.min(self.sum_down);
+        self.min_sum_down = crate::math::fmin(self.min_sum_down, self.sum_down);
 
         // Step 4: Check for drift (either direction exceeds lambda).
         let ph_up = self.ph_up();
@@ -196,7 +193,8 @@ impl DriftDetector for PageHinkleyTest {
         DriftSignal::Stable
     }
 
-    fn reset(&mut self) {
+    /// Reset to initial state.
+    pub fn reset(&mut self) {
         self.running_mean = 0.0;
         self.sum_up = 0.0;
         self.min_sum_up = f64::MAX;
@@ -205,24 +203,51 @@ impl DriftDetector for PageHinkleyTest {
         self.count = 0;
     }
 
-    fn clone_fresh(&self) -> Box<dyn DriftDetector> {
-        Box::new(Self::with_params(self.delta, self.lambda))
-    }
-
-    fn clone_boxed(&self) -> Box<dyn DriftDetector> {
-        Box::new(self.clone())
-    }
-
-    fn estimated_mean(&self) -> f64 {
+    /// Current estimated mean of the monitored stream.
+    pub fn estimated_mean(&self) -> f64 {
         if self.count == 0 {
             0.0
         } else {
             self.running_mean
         }
     }
+}
 
-    fn serialize_state(&self) -> Option<crate::drift::state::DriftDetectorState> {
-        Some(crate::drift::state::DriftDetectorState::PageHinkley {
+impl Default for PageHinkleyTest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DriftDetector trait impl (requires alloc for Box)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "alloc")]
+impl super::DriftDetector for PageHinkleyTest {
+    fn update(&mut self, value: f64) -> DriftSignal {
+        // Delegate to the inherent method so the algorithm is usable without alloc.
+        PageHinkleyTest::update(self, value)
+    }
+
+    fn reset(&mut self) {
+        PageHinkleyTest::reset(self);
+    }
+
+    fn clone_fresh(&self) -> alloc::boxed::Box<dyn super::DriftDetector> {
+        alloc::boxed::Box::new(Self::with_params(self.delta, self.lambda))
+    }
+
+    fn clone_boxed(&self) -> alloc::boxed::Box<dyn super::DriftDetector> {
+        alloc::boxed::Box::new(self.clone())
+    }
+
+    fn estimated_mean(&self) -> f64 {
+        PageHinkleyTest::estimated_mean(self)
+    }
+
+    fn serialize_state(&self) -> Option<super::DriftDetectorState> {
+        Some(super::DriftDetectorState::PageHinkley {
             running_mean: self.running_mean,
             sum_up: self.sum_up,
             min_sum_up: self.min_sum_up,
@@ -232,8 +257,10 @@ impl DriftDetector for PageHinkleyTest {
         })
     }
 
-    fn restore_state(&mut self, state: &crate::drift::state::DriftDetectorState) -> bool {
-        if let crate::drift::state::DriftDetectorState::PageHinkley {
+    fn restore_state(&mut self, state: &super::DriftDetectorState) -> bool {
+        // Allow irrefutable pattern: more variants (Adwin, Ddm) will be added.
+        #[allow(irrefutable_let_patterns)]
+        if let super::DriftDetectorState::PageHinkley {
             running_mean,
             sum_up,
             min_sum_up,
@@ -255,6 +282,10 @@ impl DriftDetector for PageHinkleyTest {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,8 +293,8 @@ mod tests {
     /// Helper: produce a deterministic "noisy" value around a center.
     /// Uses a simple linear congruential generator seeded per call index
     /// to avoid pulling in rand as a dev-dependency.
-    fn noisy_stream(center: f64, amplitude: f64, count: usize, seed: u64) -> Vec<f64> {
-        let mut values = Vec::with_capacity(count);
+    fn noisy_stream(center: f64, amplitude: f64, count: usize, seed: u64) -> alloc::vec::Vec<f64> {
+        let mut values = alloc::vec::Vec::with_capacity(count);
         let mut state = seed;
         for _ in 0..count {
             // LCG: Numerical Recipes constants
@@ -355,7 +386,7 @@ mod tests {
         }
 
         let estimated = pht.estimated_mean();
-        let error = (estimated - center).abs();
+        let error = crate::math::abs(estimated - center);
         assert!(
             error < 0.1,
             "estimated mean {estimated} should be close to true mean {center}, error={error}"
@@ -396,8 +427,11 @@ mod tests {
         assert_eq!(pht.running_mean, 0.0);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn clone_fresh_returns_clean_detector_with_same_params() {
+        use super::super::DriftDetector;
+
         let mut pht = PageHinkleyTest::with_params(0.01, 100.0);
 
         // Pollute state.
@@ -405,14 +439,14 @@ mod tests {
             pht.update(v);
         }
 
-        let fresh = pht.clone_fresh();
+        let fresh = DriftDetector::clone_fresh(&pht);
 
         // Fresh detector should have zero state.
         assert_eq!(fresh.estimated_mean(), 0.0);
 
         // But same sensitivity: feed same data, should produce same signals.
         // We just verify it compiles and returns a functional detector.
-        let mut fresh = pht.clone_fresh();
+        let mut fresh = DriftDetector::clone_fresh(&pht);
         let signal = fresh.update(1.0);
         assert_eq!(
             signal,
@@ -555,5 +589,31 @@ mod tests {
             !drifted,
             "high lambda (5000) should not trigger on small shift within 500 samples"
         );
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn serialize_restore_roundtrip() {
+        use super::super::DriftDetector;
+
+        let mut pht = PageHinkleyTest::new();
+
+        // Feed data to build up state.
+        for v in noisy_stream(5.0, 0.1, 200, 1400) {
+            pht.update(v);
+        }
+
+        // Serialize.
+        let state = DriftDetector::serialize_state(&pht);
+        assert!(state.is_some(), "PHT should support state serialization");
+
+        // Restore into a fresh detector.
+        let mut pht2 = PageHinkleyTest::new();
+        let restored = DriftDetector::restore_state(&mut pht2, state.as_ref().unwrap());
+        assert!(restored, "restore should succeed for PageHinkley state");
+
+        // Verify state matches.
+        assert_eq!(pht.count(), pht2.count());
+        assert_eq!(pht.estimated_mean(), pht2.estimated_mean());
     }
 }

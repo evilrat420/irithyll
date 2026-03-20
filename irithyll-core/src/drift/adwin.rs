@@ -21,7 +21,11 @@
 //! Bifet, A. & Gavalda, R. (2007). "Learning from Time-Changing Data with Adaptive
 //! Windowing." In *Proceedings of the 2007 SIAM International Conference on Data Mining*.
 
-use crate::drift::{DriftDetector, DriftSignal};
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use super::{DriftDetector, DriftSignal};
 
 // ---------------------------------------------------------------------------
 // Bucket
@@ -31,6 +35,7 @@ use crate::drift::{DriftDetector, DriftSignal};
 ///
 /// Buckets at row `i` summarise `2^i` original observations.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 struct Bucket {
     /// Sum of values stored in this bucket.
     total: f64,
@@ -87,8 +92,8 @@ impl Bucket {
 /// # Examples
 ///
 /// ```
-/// use irithyll::drift::{DriftDetector, DriftSignal};
-/// use irithyll::drift::adwin::Adwin;
+/// use irithyll_core::drift::{DriftDetector, DriftSignal};
+/// use irithyll_core::drift::adwin::Adwin;
 ///
 /// let mut det = Adwin::new();
 /// // Feed stable values
@@ -98,6 +103,7 @@ impl Bucket {
 /// }
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Adwin {
     /// Confidence parameter. Smaller values require stronger evidence to declare
     /// drift. Default: 0.002.
@@ -234,7 +240,7 @@ impl Adwin {
             return (false, false);
         }
 
-        let ln_width = (self.width as f64).ln();
+        let ln_width = crate::math::ln(self.width as f64);
         // Guard: if width is so small that ln(width) <= 0 we skip.
         if ln_width <= 0.0 {
             return (false, false);
@@ -274,7 +280,8 @@ impl Adwin {
                 let m = 1.0 / (1.0 / n0 + 1.0 / n1);
 
                 // Drift threshold.
-                let epsilon_drift = ((1.0 / (2.0 * m)) * (4.0 / delta_prime).ln()).sqrt();
+                let epsilon_drift =
+                    crate::math::sqrt((1.0 / (2.0 * m)) * crate::math::ln(4.0 / delta_prime));
 
                 if abs_diff >= epsilon_drift {
                     // No need to keep scanning -- we found the outermost drift point.
@@ -282,7 +289,8 @@ impl Adwin {
                 }
 
                 // Warning threshold (looser).
-                let epsilon_warn = ((1.0 / (2.0 * m)) * (4.0 / delta_warn).ln()).sqrt();
+                let epsilon_warn =
+                    crate::math::sqrt((1.0 / (2.0 * m)) * crate::math::ln(4.0 / delta_warn));
                 if abs_diff >= epsilon_warn {
                     warning_found = true;
                 }
@@ -296,7 +304,7 @@ impl Adwin {
     /// point where drift was detected. We find the split point again and remove
     /// everything on the left side.
     fn shrink_window(&mut self) {
-        let ln_width = (self.width as f64).ln();
+        let ln_width = crate::math::ln(self.width as f64);
         if ln_width <= 0.0 {
             return;
         }
@@ -350,7 +358,7 @@ impl Adwin {
             let n0 = left_count as f64;
             let n1 = right_count as f64;
             let m = 1.0 / (1.0 / n0 + 1.0 / n1);
-            let epsilon = ((1.0 / (2.0 * m)) * (4.0 / delta_prime).ln()).sqrt();
+            let epsilon = crate::math::sqrt((1.0 / (2.0 * m)) * crate::math::ln(4.0 / delta_prime));
 
             if abs_diff >= epsilon {
                 // The right sub-window (positions 0..=pos) is the part we keep.
@@ -459,6 +467,22 @@ impl Default for Adwin {
 }
 
 // ---------------------------------------------------------------------------
+// Display
+// ---------------------------------------------------------------------------
+
+impl core::fmt::Display for Adwin {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "Adwin(delta={}, width={}, mean={:.6})",
+            self.delta,
+            self.width,
+            self.estimated_mean()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // DriftDetector trait
 // ---------------------------------------------------------------------------
 
@@ -508,8 +532,8 @@ impl DriftDetector for Adwin {
         }
     }
 
-    fn serialize_state(&self) -> Option<crate::drift::state::DriftDetectorState> {
-        use crate::drift::state::{AdwinBucketState, DriftDetectorState};
+    fn serialize_state(&self) -> Option<super::DriftDetectorState> {
+        use super::{AdwinBucketState, DriftDetectorState};
         let rows = self
             .rows
             .iter()
@@ -532,8 +556,8 @@ impl DriftDetector for Adwin {
         })
     }
 
-    fn restore_state(&mut self, state: &crate::drift::state::DriftDetectorState) -> bool {
-        if let crate::drift::state::DriftDetectorState::Adwin {
+    fn restore_state(&mut self, state: &super::DriftDetectorState) -> bool {
+        if let super::DriftDetectorState::Adwin {
             rows,
             total,
             variance,
@@ -570,8 +594,9 @@ impl DriftDetector for Adwin {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{DriftDetector, DriftSignal};
     use super::*;
-    use crate::drift::{DriftDetector, DriftSignal};
+    use alloc::vec::Vec;
 
     /// Helper: simple deterministic PRNG for reproducible tests without pulling
     /// in `rand` in the test module. Uses xorshift64.
@@ -600,7 +625,8 @@ mod tests {
         fn next_normal(&mut self, mean: f64, std: f64) -> f64 {
             let u1 = self.next_f64().max(1e-15); // avoid ln(0)
             let u2 = self.next_f64();
-            let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+            let z = crate::math::sqrt(-2.0 * crate::math::ln(u1))
+                * crate::math::cos(2.0 * core::f64::consts::PI * u2);
             mean + std * z
         }
     }
@@ -891,7 +917,9 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn deterministic_for_same_input() {
-        let values: Vec<f64> = (0..500).map(|i| (i as f64 * 0.01).sin()).collect();
+        let values: Vec<f64> = (0..500)
+            .map(|i| crate::math::sin(i as f64 * 0.01))
+            .collect();
 
         let mut det1 = Adwin::with_delta(0.01);
         let mut det2 = Adwin::with_delta(0.01);

@@ -3,7 +3,7 @@ members = [".", "irithyll-python", "irithyll-core"]
 
 [package]
 name = "irithyll"
-version = "8.1.2"
+version = "8.2.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Streaming machine learning in Rust -- gradient boosted trees, kernel methods, linear models, and composable pipelines"
@@ -24,7 +24,7 @@ serde_json = { version = "1.0", optional = true }
 bincode = { version = "2", features = ["serde"], optional = true }
 thiserror = "2.0"
 tracing = "0.1"
-irithyll-core = { path = "irithyll-core", version = "0.3.0", features = ["alloc"] }
+irithyll-core = { path = "irithyll-core", version = "0.4.0", features = ["std"] }
 
 # Optional acceleration dependencies (activated via feature flags)
 rayon = { version = "1.10", optional = true }
@@ -101,4 +101,8 @@ harness = false
 
 [[bench]]
 name = "comparison_bench"
+harness = false
+
+[[bench]]
+name = "real_dataset_bench"
 harness = false

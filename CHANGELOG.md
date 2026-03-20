@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.0] - 2026-03-21
+
+### Added
+
+- **Real dataset benchmarks** -- prequential evaluation on the Electricity dataset (45K samples,
+  binary classification with concept drift). Best config achieves 88.5% accuracy, Kappa 0.762.
+  Includes comparison harness for River, XGBoost, and LightGBM.
+- **`irithyll-core` v0.4.0: drift detection migration** -- all three drift detectors
+  (Page-Hinkley, DDM, ADWIN) are now `no_std + alloc` compatible in `irithyll-core`.
+  Trait, signal enum, and state types all available in the core crate.
+  - `DriftSignal` enum available without `alloc` (pure `core`).
+  - `DriftDetector` trait, `DriftDetectorState`, implementations behind `alloc` feature.
+  - ADWIN exponential histogram fully ported (907 lines).
+- **`irithyll-core` v0.4.0: error type migration** -- `ConfigError` and `IrithyllError`
+  now defined in `irithyll-core` with hand-written `core::fmt::Display` impls.
+  `std::error::Error` impl available behind `std` feature.
+- Benchmark harness: `benches/real_dataset_bench.rs` with CSV dataset loading,
+  prequential evaluation, and detailed results reporting.
+- Comparison scripts: `comparison/river/bench_river.py`, `comparison/xgboost/bench_xgb.py`,
+  `comparison/collect_results.py`.
+
+### Changed
+
+- `irithyll` now depends on `irithyll-core` with `std` feature (was `alloc` only).
+- `irithyll/src/drift/` is now a thin re-export layer over `irithyll-core::drift`.
+- `irithyll/src/error.rs` re-exports `ConfigError` from `irithyll-core`.
+
 ## [8.1.2] - 2026-03-20
 
 ### Added

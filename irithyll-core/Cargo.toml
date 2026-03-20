@@ -1,6 +1,6 @@
 [package]
 name = "irithyll-core"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Core types and inference engine for irithyll streaming ML — no_std, loss functions, observation trait, f32 + int16 packed formats, branch-free traversal"
@@ -13,7 +13,7 @@ categories = ["algorithms", "no-std", "embedded"]
 default = []
 alloc = []
 std = ["alloc"]
-serde = ["dep:serde"]
+serde = ["dep:serde", "serde/alloc"]
 embedded-bench = ["dep:cortex-m-rt", "dep:cortex-m-semihosting", "dep:panic-halt"]
 
 [dependencies]
