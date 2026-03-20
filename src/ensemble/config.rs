@@ -422,6 +422,18 @@ pub struct SGBTConfig {
     /// Default: [`ClosedForm`](LeafModelType::ClosedForm).
     #[serde(default)]
     pub leaf_model_type: LeafModelType,
+
+    /// Packed cache refresh interval for [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
+    ///
+    /// When non-zero, the distributional model maintains a packed f32 cache of
+    /// its location ensemble that is re-exported every `packed_refresh_interval`
+    /// training samples. Predictions use the cache for O(1)-per-tree inference
+    /// via contiguous memory traversal, falling back to full tree traversal when
+    /// the cache is absent or produces non-finite results.
+    ///
+    /// `0` (default) disables the packed cache.
+    #[serde(default)]
+    pub packed_refresh_interval: u64,
 }
 
 fn default_empirical_sigma_alpha() -> f64 {
@@ -471,6 +483,7 @@ impl Default for SGBTConfig {
             huber_k: None,
             shadow_warmup: None,
             leaf_model_type: LeafModelType::default(),
+            packed_refresh_interval: 0,
         }
     }
 }
@@ -769,6 +782,16 @@ impl SGBTConfigBuilder {
     /// a trainable model per leaf, using the Hoeffding bound for promotion.
     pub fn leaf_model_type(mut self, lmt: LeafModelType) -> Self {
         self.config.leaf_model_type = lmt;
+        self
+    }
+
+    /// Set the packed cache refresh interval for distributional models.
+    ///
+    /// When non-zero, [`DistributionalSGBT`](super::distributional::DistributionalSGBT)
+    /// maintains a packed f32 cache refreshed every `interval` training samples.
+    /// `0` (default) disables the cache.
+    pub fn packed_refresh_interval(mut self, interval: u64) -> Self {
+        self.config.packed_refresh_interval = interval;
         self
     }
 

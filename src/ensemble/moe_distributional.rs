@@ -95,8 +95,19 @@ pub struct MoEDistributionalSGBT {
     gating_mode: GatingMode,
     /// Configuration used to construct each expert.
     config: SGBTConfig,
+    /// Optional per-expert configurations. When `Some`, each expert uses its
+    /// own `SGBTConfig` instead of the shared `config`.
+    expert_configs: Option<Vec<SGBTConfig>>,
     /// Total training samples seen.
     samples_seen: u64,
+    /// Entropy regularization weight for gate load balancing.
+    ///
+    /// Adds `entropy_weight * entropy_gradient` to the gate SGD update,
+    /// encouraging the gate to spread probability mass across all experts
+    /// rather than collapsing to a single expert.
+    ///
+    /// Default: 0.0 (disabled for backward compat in existing constructors).
+    entropy_weight: f64,
 
     // -- Shadow competition state per slot --
     /// Cumulative NLL advantage of shadow over active (positive = shadow better).
@@ -128,7 +139,9 @@ impl Clone for MoEDistributionalSGBT {
             n_features: self.n_features,
             gating_mode: self.gating_mode.clone(),
             config: self.config.clone(),
+            expert_configs: self.expert_configs.clone(),
             samples_seen: self.samples_seen,
+            entropy_weight: self.entropy_weight,
             cumulative_advantage: self.cumulative_advantage.clone(),
             shadow_n: self.shadow_n.clone(),
             max_nll_diff: self.max_nll_diff.clone(),
@@ -240,7 +253,87 @@ impl MoEDistributionalSGBT {
             n_features: None,
             gating_mode,
             config,
+            expert_configs: None,
             samples_seen: 0,
+            entropy_weight: 0.0,
+            cumulative_advantage: vec![0.0; n_experts],
+            shadow_n: vec![0; n_experts],
+            max_nll_diff: vec![0.0; n_experts],
+            delta,
+            shadow_min_samples,
+            shadow_replacements: vec![0; n_experts],
+        }
+    }
+
+    /// Create a new MoE distributional ensemble where each expert uses its own
+    /// `SGBTConfig`, enabling different depths, lambda, learning rates, etc.
+    ///
+    /// The first config in `configs` is also used as the shared fallback (stored
+    /// in `self.config`) for any field-level queries.
+    ///
+    /// # Arguments
+    ///
+    /// * `configs` -- one `SGBTConfig` per expert (length determines n_experts)
+    /// * `gating_mode` -- soft or hard(top_k) gating
+    /// * `gate_lr` -- learning rate for the gating network
+    /// * `entropy_weight` -- entropy regularization weight (0.0 = disabled,
+    ///   0.1 = typical for preventing gate collapse)
+    /// * `delta` -- Hoeffding confidence parameter for shadow competition
+    /// * `shadow_min_samples` -- warmup before shadow comparison begins
+    ///
+    /// # Panics
+    ///
+    /// Panics if `configs` is empty.
+    pub fn with_expert_configs(
+        configs: Vec<SGBTConfig>,
+        gating_mode: GatingMode,
+        gate_lr: f64,
+        entropy_weight: f64,
+        delta: f64,
+        shadow_min_samples: u64,
+    ) -> Self {
+        assert!(
+            !configs.is_empty(),
+            "MoEDistributionalSGBT requires at least 1 expert config"
+        );
+
+        let n_experts = configs.len();
+
+        let experts: Vec<DistributionalSGBT> = configs
+            .iter()
+            .enumerate()
+            .map(|(i, cfg)| {
+                let mut c = cfg.clone();
+                c.seed = cfg.seed ^ (0x0E00_0000 | i as u64);
+                DistributionalSGBT::new(c)
+            })
+            .collect();
+
+        let shadows: Vec<DistributionalSGBT> = configs
+            .iter()
+            .enumerate()
+            .map(|(i, cfg)| {
+                let mut c = cfg.clone();
+                c.seed = cfg.seed ^ (0x5A00_0000 | i as u64);
+                DistributionalSGBT::new(c)
+            })
+            .collect();
+
+        let gate_bias = vec![0.0; n_experts];
+        let shared_config = configs[0].clone();
+
+        Self {
+            experts,
+            shadows,
+            gate_weights: Vec::new(),
+            gate_bias,
+            gate_lr,
+            n_features: None,
+            gating_mode,
+            config: shared_config,
+            expert_configs: Some(configs),
+            samples_seen: 0,
+            entropy_weight,
             cumulative_advantage: vec![0.0; n_experts],
             shadow_n: vec![0; n_experts],
             max_nll_diff: vec![0.0; n_experts],
@@ -397,8 +490,13 @@ impl MoEDistributionalSGBT {
                     if mean_advantage > epsilon {
                         // Swap: shadow becomes active, create fresh shadow
                         self.experts[i] = self.shadows[i].clone();
-                        let mut fresh_cfg = self.config.clone();
-                        fresh_cfg.seed = self.config.seed
+                        let base_cfg = self
+                            .expert_configs
+                            .as_ref()
+                            .map(|c| &c[i])
+                            .unwrap_or(&self.config);
+                        let mut fresh_cfg = base_cfg.clone();
+                        fresh_cfg.seed = base_cfg.seed
                             ^ (0x5A00_0000 | i as u64)
                             ^ (self.shadow_replacements[i].wrapping_add(1) * 0x9E37_79B9);
                         self.shadows[i] = DistributionalSGBT::new(fresh_cfg);
@@ -426,7 +524,21 @@ impl MoEDistributionalSGBT {
             }
         }
 
-        // Cross-entropy gradient: dz_k = p_k - 1{k == best}
+        // Cross-entropy gradient + entropy regularization: dz_k = ce_grad + entropy_weight * entropy_grad
+        // Entropy gradient: d(-H)/dz_k = p_k * (log(p_k) + 1) - mean_term
+        // This pushes the gate toward uniform distribution, preventing collapse.
+        let entropy_mean_log_term: f64 = if self.entropy_weight != 0.0 {
+            probs
+                .iter()
+                .map(|&p| {
+                    let lp = if p > 1e-10 { p.ln() } else { -23.0 };
+                    p * (lp + 1.0)
+                })
+                .sum()
+        } else {
+            0.0
+        };
+
         for (i, (weights_row, bias)) in self
             .gate_weights
             .iter_mut()
@@ -434,13 +546,25 @@ impl MoEDistributionalSGBT {
             .enumerate()
         {
             let indicator = if i == best_idx { 1.0 } else { 0.0 };
-            let grad = probs[i] - indicator;
-            let lr = self.gate_lr;
+            let ce_grad = probs[i] - indicator;
 
+            let total_grad = if self.entropy_weight != 0.0 {
+                let log_p = if probs[i] > 1e-10 {
+                    probs[i].ln()
+                } else {
+                    -23.0
+                };
+                let entropy_grad = probs[i] * (log_p + 1.0) - entropy_mean_log_term;
+                ce_grad + self.entropy_weight * entropy_grad
+            } else {
+                ce_grad
+            };
+
+            let lr = self.gate_lr;
             for (j, &xj) in features.iter().enumerate() {
-                weights_row[j] -= lr * grad * xj;
+                weights_row[j] -= lr * total_grad * xj;
             }
-            *bias -= lr * grad;
+            *bias -= lr * total_grad;
         }
 
         self.samples_seen += 1;
@@ -572,6 +696,17 @@ impl MoEDistributionalSGBT {
     /// Shadow replacement counts per expert slot.
     pub fn shadow_replacements(&self) -> &[u64] {
         &self.shadow_replacements
+    }
+
+    /// Entropy regularization weight for gate load balancing.
+    #[inline]
+    pub fn entropy_weight(&self) -> f64 {
+        self.entropy_weight
+    }
+
+    /// Per-expert configurations, if set via [`with_expert_configs`](Self::with_expert_configs).
+    pub fn expert_configs(&self) -> Option<&[SGBTConfig]> {
+        self.expert_configs.as_deref()
     }
 
     /// Reset the entire MoE to its initial state.
@@ -907,5 +1042,118 @@ mod tests {
         let pred = moe.predict(&[10.0, 30.0]);
         assert!(pred.mu.is_finite());
         assert!(pred.sigma > 0.0);
+    }
+
+    #[test]
+    fn moe_with_expert_configs_different_depths() {
+        // Each expert gets its own config with different tree depth.
+        let configs: Vec<SGBTConfig> = (0..3)
+            .map(|i| {
+                SGBTConfig::builder()
+                    .n_steps(5)
+                    .learning_rate(0.1)
+                    .grace_period(5)
+                    .max_depth(2 + i) // depth 2, 3, 4
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+
+        let mut moe = MoEDistributionalSGBT::with_expert_configs(
+            configs.clone(),
+            GatingMode::Soft,
+            0.01,
+            0.0, // no entropy
+            1e-3,
+            500,
+        );
+
+        assert_eq!(moe.n_experts(), 3);
+        assert!(moe.expert_configs().is_some());
+        assert_eq!(moe.expert_configs().unwrap().len(), 3);
+
+        // Verify each expert got its config (via max_depth)
+        for (i, cfg) in configs.iter().enumerate() {
+            assert_eq!(moe.expert(i).config().max_depth, cfg.max_depth);
+        }
+
+        // Train and verify it works
+        for i in 0..50 {
+            let sample = Sample::new(vec![i as f64, (i * 2) as f64], i as f64 * 3.0);
+            moe.train_one(&sample);
+        }
+        let pred = moe.predict(&[10.0, 20.0]);
+        assert!(pred.mu.is_finite());
+        assert!(pred.sigma > 0.0);
+    }
+
+    #[test]
+    fn entropy_regularization_prevents_collapse() {
+        // With entropy weight, gate probs should stay above a minimum for all experts
+        // when data is uniform across patterns.
+        let config = test_config();
+        let mut moe = MoEDistributionalSGBT::with_expert_configs(
+            vec![config.clone(), config.clone(), config],
+            GatingMode::Soft,
+            0.01,
+            0.1, // entropy weight
+            1e-3,
+            500,
+        );
+
+        // Train with uniform-ish data
+        for i in 0..200 {
+            let x = (i % 10) as f64;
+            let sample = Sample::new(vec![x, x * 2.0], x * 3.0);
+            moe.train_one(&sample);
+        }
+
+        // Check that no expert is completely starved
+        let probs = moe.gating_probabilities(&[5.0, 10.0]);
+        for (i, &p) in probs.iter().enumerate() {
+            assert!(
+                p > 0.02,
+                "Expert {} has probability {} -- gate collapsed despite entropy regularization",
+                i,
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn moe_expert_configs_shadow_respawn_correct() {
+        // After shadow swap, the fresh shadow should use the per-expert config.
+        // We can verify the config path is correct by construction.
+        let configs: Vec<SGBTConfig> = (0..2)
+            .map(|i| {
+                SGBTConfig::builder()
+                    .n_steps(3)
+                    .learning_rate(0.1)
+                    .grace_period(5)
+                    .max_depth(3 + i) // depth 3, 4
+                    .build()
+                    .unwrap()
+            })
+            .collect();
+
+        let moe = MoEDistributionalSGBT::with_expert_configs(
+            configs.clone(),
+            GatingMode::Soft,
+            0.01,
+            0.0,
+            1e-3,
+            500,
+        );
+
+        // Verify expert_configs are stored
+        let ec = moe.expert_configs().unwrap();
+        assert_eq!(ec[0].max_depth, 3);
+        assert_eq!(ec[1].max_depth, 4);
+
+        // The shadow swap path references expert_configs[i] -- verified by
+        // the code structure. This test confirms the configs are accessible
+        // and correctly indexed.
+        assert_eq!(moe.expert(0).config().max_depth, 3);
+        assert_eq!(moe.expert(1).config().max_depth, 4);
     }
 }

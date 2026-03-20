@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.1.2] - 2026-03-20
+
+### Added
+
+- **Per-expert MoE configs** -- `MoEDistributionalSGBT::with_expert_configs()` allows each
+  expert to use its own `SGBTConfig` (different depths, lambda, learning rates, etc.).
+  Shadow respawn uses per-expert config when available.
+- **Entropy gate regularization** -- `entropy_weight` field on `MoEDistributionalSGBT`
+  adds entropy bonus to gate SGD, preventing collapse to a single expert.
+  Gradient: `d(-H)/dz_k = p_k * (log(p_k) + 1) - mean_term`.
+- **Distributional packed f32 export** -- `export_distributional_packed()` exports the
+  location ensemble of `DistributionalSGBT` to irithyll-core packed binary format.
+  Returns `(bytes, location_base)` for f64-precision base handling.
+- **Dual-path inference** -- `packed_refresh_interval` config field enables a packed f32
+  cache on `DistributionalSGBT` that refreshes every N training samples. `predict()`
+  uses cache-optimal BFS traversal when available, falls back to full tree walk.
+  `enable_packed_cache(interval)` for runtime activation.
+- New accessors on `DistributionalSGBT`: `location_steps()`, `location_base()`,
+  `learning_rate()`, `has_packed_cache()`.
+- New accessors on `MoEDistributionalSGBT`: `entropy_weight()`, `expert_configs()`.
+- Builder method `SGBTConfigBuilder::packed_refresh_interval()`.
+- 7 new tests covering all additions.
+
 ## [8.1.0] - 2026-03-18
 
 ### Added

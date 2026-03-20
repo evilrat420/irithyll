@@ -3,7 +3,7 @@ members = [".", "irithyll-python", "irithyll-core"]
 
 [package]
 name = "irithyll"
-version = "8.1.1"
+version = "8.1.2"
 edition = "2021"
 rust-version = "1.75"
 description = "Streaming machine learning in Rust -- gradient boosted trees, kernel methods, linear models, and composable pipelines"
