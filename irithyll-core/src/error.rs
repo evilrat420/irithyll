@@ -194,7 +194,6 @@ pub type Result<T> = core::result::Result<T, IrithyllError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "alloc")]
     use alloc::string::ToString;
 
     #[test]

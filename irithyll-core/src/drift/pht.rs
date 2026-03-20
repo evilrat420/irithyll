@@ -28,7 +28,7 @@
 //!
 //! ```
 //! use irithyll_core::drift::pht::PageHinkleyTest;
-//! use irithyll_core::drift::{DriftDetector, DriftSignal};
+//! use irithyll_core::drift::DriftSignal;
 //!
 //! let mut pht = PageHinkleyTest::new();
 //!

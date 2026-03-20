@@ -16,7 +16,7 @@
 //! *Learning with drift detection.* In Advances in Artificial Intelligence --
 //! SBIA 2004, pp. 286--295.
 
-use super::{DriftDetector, DriftSignal};
+use super::DriftSignal;
 
 /// DDM (Drift Detection Method) for concept drift detection.
 ///
@@ -138,52 +138,48 @@ impl core::fmt::Display for Ddm {
     }
 }
 
-impl DriftDetector for Ddm {
-    fn update(&mut self, value: f64) -> DriftSignal {
-        // 1. Increment count.
+// -- Inherent methods (always available, no alloc needed) --
+
+impl Ddm {
+    /// Feed a new value and get the current drift signal.
+    ///
+    /// This is the core algorithm, usable without the `alloc` feature.
+    /// When `alloc` is enabled, the `DriftDetector::update` trait method delegates here.
+    pub fn update(&mut self, value: f64) -> DriftSignal {
         self.count += 1;
         let n = self.count as f64;
 
-        // 2. Welford online update.
         let delta = value - self.mean;
         self.mean += delta / n;
         let delta2 = value - self.mean;
         self.m2 += delta * delta2;
 
-        // 3. Population standard deviation.
         let std = crate::math::sqrt(self.m2 / n);
-
-        // 4. Current metric.
         let p_plus_s = self.mean + std;
 
-        // 5. Warmup guard -- return Stable and skip minimum / threshold
-        //    updates until running statistics have stabilised.
         if self.count <= self.min_instances {
             return DriftSignal::Stable;
         }
 
-        // 6. Update minimums (only after warmup so the baseline is stable).
         if p_plus_s < self.min_p_plus_s {
             self.min_p_plus_s = p_plus_s;
             self.min_s = std;
         }
 
-        // 7. Drift check (must come before warning -- drift is more severe).
         if p_plus_s >= self.min_p_plus_s + self.drift_level * self.min_s {
             self.reset_running_stats();
             return DriftSignal::Drift;
         }
 
-        // 8. Warning check.
         if p_plus_s >= self.min_p_plus_s + self.warning_level * self.min_s {
             return DriftSignal::Warning;
         }
 
-        // 9. No change.
         DriftSignal::Stable
     }
 
-    fn reset(&mut self) {
+    /// Reset to initial state.
+    pub fn reset(&mut self) {
         self.mean = 0.0;
         self.m2 = 0.0;
         self.count = 0;
@@ -191,8 +187,25 @@ impl DriftDetector for Ddm {
         self.min_s = f64::MAX;
     }
 
-    #[cfg(feature = "alloc")]
-    fn clone_fresh(&self) -> alloc::boxed::Box<dyn DriftDetector> {
+    /// Current estimated mean of the monitored stream.
+    pub fn estimated_mean(&self) -> f64 {
+        self.mean
+    }
+}
+
+// -- DriftDetector trait impl (requires alloc for Box) --
+
+#[cfg(feature = "alloc")]
+impl super::DriftDetector for Ddm {
+    fn update(&mut self, value: f64) -> DriftSignal {
+        Ddm::update(self, value)
+    }
+
+    fn reset(&mut self) {
+        Ddm::reset(self);
+    }
+
+    fn clone_fresh(&self) -> alloc::boxed::Box<dyn super::DriftDetector> {
         alloc::boxed::Box::new(Self::with_params(
             self.warning_level,
             self.drift_level,
@@ -200,16 +213,14 @@ impl DriftDetector for Ddm {
         ))
     }
 
-    #[cfg(feature = "alloc")]
-    fn clone_boxed(&self) -> alloc::boxed::Box<dyn DriftDetector> {
+    fn clone_boxed(&self) -> alloc::boxed::Box<dyn super::DriftDetector> {
         alloc::boxed::Box::new(self.clone())
     }
 
     fn estimated_mean(&self) -> f64 {
-        self.mean
+        Ddm::estimated_mean(self)
     }
 
-    #[cfg(feature = "alloc")]
     fn serialize_state(&self) -> Option<super::DriftDetectorState> {
         Some(super::DriftDetectorState::Ddm {
             mean: self.mean,
@@ -220,7 +231,6 @@ impl DriftDetector for Ddm {
         })
     }
 
-    #[cfg(feature = "alloc")]
     fn restore_state(&mut self, state: &super::DriftDetectorState) -> bool {
         if let super::DriftDetectorState::Ddm {
             mean,
@@ -251,6 +261,8 @@ mod tests {
     extern crate alloc;
     use alloc::vec::Vec;
 
+    #[cfg(feature = "alloc")]
+    use super::super::DriftDetector;
     use super::super::DriftSignal;
     use super::*;
 
