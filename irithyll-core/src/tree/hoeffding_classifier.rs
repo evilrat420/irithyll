@@ -28,7 +28,7 @@
 //!
 //! # Examples
 //!
-//! ```
+//! ```ignore
 //! use irithyll::tree::hoeffding_classifier::HoeffdingClassifierConfig;
 //! use irithyll::tree::hoeffding_classifier::HoeffdingTreeClassifier;
 //!
@@ -54,7 +54,12 @@
 //! assert!(pred == 0 || pred == 1);
 //! ```
 
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::learner::StreamingLearner;
+use crate::math;
 
 /// Tie-breaking threshold (tau). When `epsilon < tau`, we accept the best split
 /// even if the gap between best and second-best gain is small, because the
@@ -536,7 +541,7 @@ impl HoeffdingTreeClassifier {
             if stats.bin_boundaries[f_idx].is_empty() && stats.n_samples >= half_grace {
                 let lo_val = stats.feature_ranges[f_idx].0;
                 let hi_val = stats.feature_ranges[f_idx].1;
-                if (hi_val - lo_val).abs() > 1e-15 {
+                if math::abs(hi_val - lo_val) > 1e-15 {
                     let boundaries: Vec<f64> = (1..n_bins)
                         .map(|i| lo_val + (hi_val - lo_val) * (i as f64) / (n_bins as f64))
                         .collect();
@@ -631,11 +636,11 @@ impl HoeffdingTreeClassifier {
 
         // Compute Hoeffding bound.
         let r = if n_classes > 1 {
-            (n_classes as f64).log2()
+            math::log2(n_classes as f64)
         } else {
             1.0
         };
-        let epsilon = (r * r * (1.0 / self.config.delta).ln() / (2.0 * n_total)).sqrt();
+        let epsilon = math::sqrt(r * r * math::ln(1.0 / self.config.delta) / (2.0 * n_total));
 
         // Check if the best split is statistically significantly better.
         let delta_g = best_gain - second_best_gain.max(0.0);
@@ -745,7 +750,7 @@ impl StreamingLearner for HoeffdingTreeClassifier {
 /// boundary into the last bin.
 #[inline]
 fn find_bin(boundaries: &[f64], x: f64) -> usize {
-    match boundaries.binary_search_by(|b| b.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal)) {
+    match boundaries.binary_search_by(|b| b.partial_cmp(&x).unwrap_or(core::cmp::Ordering::Equal)) {
         Ok(i) => i,
         Err(i) => i,
     }
@@ -764,7 +769,7 @@ fn entropy(counts: &[u64]) -> f64 {
     for &c in counts {
         if c > 0 {
             let p = c as f64 / total_f;
-            h -= p * p.log2();
+            h -= p * math::log2(p);
         }
     }
     h

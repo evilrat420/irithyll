@@ -828,7 +828,7 @@ checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
 
 [[package]]
 name = "irithyll"
-version = "8.2.2"
+version = "8.2.3"
 dependencies = [
  "approx",
  "arrow",
@@ -850,12 +850,13 @@ dependencies = [
 
 [[package]]
 name = "irithyll-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cortex-m-rt",
  "cortex-m-semihosting",
  "libm",
  "panic-halt",
+ "rayon",
  "serde",
 ]
 

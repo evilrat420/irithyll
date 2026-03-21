@@ -10,6 +10,8 @@
 //! `feature_idx`, `threshold`, `left`, and `right`. Leaf nodes use `leaf_value`.
 //! The `is_leaf` flag discriminates between the two.
 
+use alloc::vec::Vec;
+
 /// Index into the [`TreeArena`].
 ///
 /// A thin wrapper around `u32`. The sentinel value [`NodeId::NONE`] (backed by

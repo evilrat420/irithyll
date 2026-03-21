@@ -50,6 +50,26 @@ pub mod traverse_i16;
 pub mod view;
 pub mod view_i16;
 
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub mod histogram;
+
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub mod feature;
+
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub mod learner;
+
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub mod tree;
+
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub mod ensemble;
+
 // Convenience re-exports -- inference
 pub use error::FormatError;
 pub use packed::{EnsembleHeader, PackedNode, TreeEntry};
@@ -59,6 +79,8 @@ pub use view_i16::QuantizedEnsembleView;
 
 // Convenience re-exports -- training core types
 pub use loss::{Loss, LossType};
+#[cfg(feature = "alloc")]
+pub use sample::Sample;
 pub use sample::{Observation, SampleRef};
 
 // Convenience re-exports -- drift detection

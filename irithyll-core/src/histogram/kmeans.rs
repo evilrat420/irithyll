@@ -6,7 +6,9 @@
 //! over a reservoir sample to find bin centers that minimize within-bin
 //! variance; bin edges are midpoints between adjacent sorted cluster centers.
 
-#![cfg(feature = "kmeans-binning")]
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
 
 use crate::histogram::{BinEdges, BinningStrategy};
 
@@ -196,7 +198,7 @@ impl BinningStrategy for KMeansBinning {
             .map(|i| {
                 let q = (i as f64 + 0.5) / k as f64;
                 let idx_f = q * (n - 1) as f64;
-                let lo = idx_f.floor() as usize;
+                let lo = libm::floor(idx_f) as usize;
                 let hi = (lo + 1).min(n - 1);
                 let frac = idx_f - lo as f64;
                 sorted_full[lo] * (1.0 - frac) + sorted_full[hi] * frac
@@ -389,7 +391,7 @@ mod tests {
         }
 
         // Also check that spacing is roughly even: max gap / min gap < 2.0.
-        let gaps: Vec<f64> = std::iter::once(edges.edges[0])
+        let gaps: Vec<f64> = core::iter::once(edges.edges[0])
             .chain(edges.edges.windows(2).map(|w| w[1] - w[0]))
             .collect();
         let min_gap = gaps.iter().cloned().fold(f64::MAX, f64::min);

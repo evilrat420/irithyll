@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.3] - 2026-03-21
+
+### Changed
+
+- **Track B complete: full training pipeline migrated to irithyll-core** (v0.5.0).
+  Histogram binning, Hoeffding trees, SGBT ensembles, and all 10 ensemble variants
+  now live in `irithyll-core` behind `#[cfg(feature = "alloc")]`. The `irithyll`
+  crate becomes a thin re-export layer plus std-specific extensions (async streaming,
+  Arrow/Parquet, ONNX export, preprocessing, metrics, evaluation, pipeline).
+  - **Phase 3:** Histogram module (7 files, 3,236 lines) → irithyll-core
+  - **Phase 4:** Tree module (8 files, 6,589 lines) → irithyll-core
+  - **Phase 5:** Ensemble core (6 files, 5,164 lines) → irithyll-core
+  - **Phase 6:** Ensemble variants (11 files, 8,571 lines) → irithyll-core
+  - New core modules: `feature` (FeatureType), `learner` (StreamingLearner trait)
+  - All float ops converted to `libm`/`crate::math` for no_std compatibility
+  - serde derives gated behind `#[cfg_attr(feature = "serde", ...)]`
+  - HashMap-dependent methods gated behind `#[cfg(feature = "std")]`
+  - irithyll-core: 686 tests. irithyll: 879 tests. Total: 1,565.
+
 ## [8.2.2] - 2026-03-21
 
 ### Added

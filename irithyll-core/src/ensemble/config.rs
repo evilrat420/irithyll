@@ -4,6 +4,11 @@
 //! Trees ensemble. Use [`SGBTConfig::builder`] for ergonomic construction with
 //! validation on [`build()`](SGBTConfigBuilder::build).
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use crate::drift::adwin::Adwin;
 use crate::drift::ddm::Ddm;
 use crate::drift::pht::PageHinkleyTest;
@@ -16,7 +21,7 @@ use crate::tree::leaf_model::LeafModelType;
 // FeatureType -- re-exported from irithyll-core
 // ---------------------------------------------------------------------------
 
-pub use irithyll_core::feature::FeatureType;
+pub use crate::feature::FeatureType;
 
 // ---------------------------------------------------------------------------
 // ScaleMode
@@ -32,7 +37,8 @@ pub use irithyll_core::feature::FeatureType;
 /// - **`TreeChain`**: trains a full second ensemble of Hoeffding trees to predict
 ///   log(σ) from features (NGBoost-style dual chain).  Gives *feature-conditional*
 ///   uncertainty but requires strong signal in the scale gradients.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ScaleMode {
     /// EWMA of squared prediction errors — always calibrated, O(1).
     #[default]
@@ -49,7 +55,8 @@ pub enum ScaleMode {
 ///
 /// Each variant stores the detector's configuration parameters so that fresh
 /// instances can be created on demand (e.g. when replacing a drifted tree).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DriftDetectorType {
     /// Page-Hinkley Test with custom delta (magnitude tolerance) and lambda
     /// (detection threshold).
@@ -135,7 +142,8 @@ impl DriftDetectorType {
 /// | `leaf_half_life`         | None (disabled)      |
 /// | `max_tree_samples`       | None (disabled)      |
 /// | `split_reeval_interval`  | None (disabled)      |
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SGBTConfig {
     /// Number of boosting steps (trees in the ensemble). Default 100.
     pub n_steps: usize,
@@ -176,7 +184,7 @@ pub struct SGBTConfig {
     /// than freezing on early observations.
     ///
     /// `None` (default) disables decay -- traditional monotonic accumulation.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub leaf_half_life: Option<usize>,
 
     /// Maximum samples a single tree processes before proactive replacement.
@@ -186,7 +194,7 @@ pub struct SGBTConfig {
     /// when the drift detector is not sensitive enough.
     ///
     /// `None` (default) disables time-based replacement.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub max_tree_samples: Option<u64>,
 
     /// Interval (in samples per leaf) at which max-depth leaves re-evaluate
@@ -197,7 +205,7 @@ pub struct SGBTConfig {
     /// max depth, it re-evaluates whether a split should be performed.
     ///
     /// `None` (default) disables re-evaluation -- max-depth leaves are permanent.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub split_reeval_interval: Option<usize>,
 
     /// Optional human-readable feature names.
@@ -205,7 +213,7 @@ pub struct SGBTConfig {
     /// When set, enables [`named_feature_importances`](super::SGBT::named_feature_importances) and
     /// [`train_one_named`](super::SGBT::train_one_named) for production-friendly named access.
     /// Length must match the number of features in training data.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub feature_names: Option<Vec<String>>,
 
     /// Optional per-feature type declarations.
@@ -216,7 +224,7 @@ pub struct SGBTConfig {
     /// Length must match the number of features in training data.
     ///
     /// `None` (default) treats all features as continuous.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub feature_types: Option<Vec<FeatureType>>,
 
     /// Gradient clipping threshold in standard deviations per leaf.
@@ -229,7 +237,7 @@ pub struct SGBTConfig {
     ///
     /// Typical value: 3.0 (3-sigma clipping).
     /// `None` (default) disables gradient clipping.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub gradient_clip_sigma: Option<f64>,
 
     /// Per-feature monotonic constraints.
@@ -246,7 +254,7 @@ pub struct SGBTConfig {
     ///
     /// Length must match the number of features in training data.
     /// `None` (default) means no monotonic constraints.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub monotone_constraints: Option<Vec<i8>>,
 
     /// EWMA smoothing factor for quality-based tree pruning.
@@ -262,7 +270,7 @@ pub struct SGBTConfig {
     ///
     /// `None` (default) disables quality-based pruning.
     /// Suggested value: 0.01.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub quality_prune_alpha: Option<f64>,
 
     /// Minimum contribution threshold for quality-based pruning.
@@ -271,7 +279,7 @@ pub struct SGBTConfig {
     /// flagged as dead wood. Only used when `quality_prune_alpha` is `Some`.
     ///
     /// Default: 1e-6.
-    #[serde(default = "default_quality_prune_threshold")]
+    #[cfg_attr(feature = "serde", serde(default = "default_quality_prune_threshold"))]
     pub quality_prune_threshold: f64,
 
     /// Consecutive low-contribution samples before a tree is replaced.
@@ -281,7 +289,7 @@ pub struct SGBTConfig {
     /// `quality_prune_alpha` is `Some`.
     ///
     /// Default: 500.
-    #[serde(default = "default_quality_prune_patience")]
+    #[cfg_attr(feature = "serde", serde(default = "default_quality_prune_patience"))]
     pub quality_prune_patience: u64,
 
     /// EWMA smoothing factor for error-weighted sample importance.
@@ -296,7 +304,7 @@ pub struct SGBTConfig {
     ///
     /// `None` (default) disables error weighting.
     /// Suggested value: 0.01.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub error_weight_alpha: Option<f64>,
 
     /// Enable σ-modulated learning rate for [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
@@ -310,7 +318,7 @@ pub struct SGBTConfig {
     /// trains at the unmodulated base rate to prevent positive feedback loops.
     ///
     /// Default: `false`.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub uncertainty_modulated_lr: bool,
 
     /// How the scale (σ) is estimated in [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
@@ -323,7 +331,7 @@ pub struct SGBTConfig {
     /// For σ-modulated learning (`uncertainty_modulated_lr = true`), `Empirical`
     /// is strongly recommended — scale tree gradients are inherently weak and
     /// the trees often fail to split.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub scale_mode: ScaleMode,
 
     /// EWMA smoothing factor for empirical σ estimation.
@@ -333,7 +341,7 @@ pub struct SGBTConfig {
     /// Higher values react faster to regime changes but are noisier.
     ///
     /// Default: `0.01` (~100-sample effective window).
-    #[serde(default = "default_empirical_sigma_alpha")]
+    #[cfg_attr(feature = "serde", serde(default = "default_empirical_sigma_alpha"))]
     pub empirical_sigma_alpha: f64,
 
     /// Maximum absolute leaf output value.
@@ -341,7 +349,7 @@ pub struct SGBTConfig {
     /// When `Some(max)`, leaf predictions are clamped to `[-max, max]`.
     /// Prevents runaway leaf weights from causing prediction explosions
     /// in feedback loops. `None` (default) means no clamping.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub max_leaf_output: Option<f64>,
 
     /// Per-leaf adaptive output bound (sigma multiplier).
@@ -356,7 +364,7 @@ pub struct SGBTConfig {
     ///
     /// Typical value: 3.0 (3-sigma bound).
     /// `None` (default) disables adaptive bounds (falls back to `max_leaf_output`).
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub adaptive_leaf_bound: Option<f64>,
 
     /// Minimum hessian sum before a leaf produces non-zero output.
@@ -364,7 +372,7 @@ pub struct SGBTConfig {
     /// When `Some(min_h)`, leaves with `hess_sum < min_h` return 0.0.
     /// Prevents post-replacement spikes from fresh leaves with insufficient
     /// samples. `None` (default) means all leaves contribute immediately.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub min_hessian_sum: Option<f64>,
 
     /// Huber loss delta multiplier for [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
@@ -373,7 +381,7 @@ pub struct SGBTConfig {
     /// with adaptive `delta = k * empirical_sigma`. This bounds gradients by
     /// construction. Standard value: `1.345` (95% efficiency at Gaussian).
     /// `None` (default) uses squared loss.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub huber_k: Option<f64>,
 
     /// Shadow warmup for graduated tree handoff.
@@ -391,7 +399,7 @@ pub struct SGBTConfig {
     /// Drift-based replacement still uses hard swap (shadow is already warm).
     ///
     /// `None` (default) disables graduated handoff — uses traditional hard swap.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub shadow_warmup: Option<usize>,
 
     /// Leaf prediction model type.
@@ -407,7 +415,7 @@ pub struct SGBTConfig {
     ///   when the Hoeffding bound confirms a more complex model is better.
     ///
     /// Default: [`ClosedForm`](LeafModelType::ClosedForm).
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub leaf_model_type: LeafModelType,
 
     /// Packed cache refresh interval for [`DistributionalSGBT`](super::distributional::DistributionalSGBT).
@@ -419,7 +427,7 @@ pub struct SGBTConfig {
     /// the cache is absent or produces non-finite results.
     ///
     /// `0` (default) disables the packed cache.
-    #[serde(default)]
+    #[cfg_attr(feature = "serde", serde(default))]
     pub packed_refresh_interval: u64,
 }
 
@@ -491,7 +499,7 @@ impl SGBTConfig {
 ///
 /// # Example
 ///
-/// ```
+/// ```ignore
 /// use irithyll::ensemble::config::{SGBTConfig, DriftDetectorType};
 /// use irithyll::ensemble::variants::SGBTVariant;
 ///
@@ -882,14 +890,16 @@ impl SGBTConfigBuilder {
 
         // -- Feature names --
         if let Some(ref names) = c.feature_names {
-            let mut seen = std::collections::HashSet::new();
-            for name in names {
-                if !seen.insert(name.as_str()) {
-                    return Err(ConfigError::invalid(
-                        "feature_names",
-                        format!("duplicate feature name: '{}'", name),
-                    )
-                    .into());
+            // O(n^2) duplicate check — names list is small so no HashSet needed
+            for (i, name) in names.iter().enumerate() {
+                for prev in &names[..i] {
+                    if name == prev {
+                        return Err(ConfigError::invalid(
+                            "feature_names",
+                            format!("duplicate feature name: '{}'", name),
+                        )
+                        .into());
+                    }
                 }
             }
         }
@@ -1121,8 +1131,8 @@ impl SGBTConfigBuilder {
 // Display impls
 // ---------------------------------------------------------------------------
 
-impl std::fmt::Display for DriftDetectorType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for DriftDetectorType {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::PageHinkley { delta, lambda } => {
                 write!(f, "PageHinkley(delta={}, lambda={})", delta, lambda)
@@ -1141,8 +1151,8 @@ impl std::fmt::Display for DriftDetectorType {
     }
 }
 
-impl std::fmt::Display for SGBTConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for SGBTConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
             "SGBTConfig {{ steps={}, lr={}, depth={}, bins={}, variant={}, drift={} }}",
@@ -1163,6 +1173,8 @@ impl std::fmt::Display for SGBTConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
+    use alloc::vec;
 
     // ------------------------------------------------------------------
     // 1. Default config values are correct
@@ -1628,15 +1640,8 @@ mod tests {
 
     // ------------------------------------------------------------------
     // 14. Feature names -- serde backward compat (missing field)
+    //     Requires serde_json which is only in the full irithyll crate.
     // ------------------------------------------------------------------
-    #[test]
-    fn feature_names_serde_backward_compat() {
-        // JSON without feature_names should deserialize fine (defaults to None).
-        let cfg = SGBTConfig::default();
-        let json = serde_json::to_string(&cfg).unwrap();
-        let restored: SGBTConfig = serde_json::from_str(&json).unwrap();
-        assert!(restored.feature_names.is_none());
-    }
 
     // ------------------------------------------------------------------
     // 15. Feature names -- empty vec is valid
@@ -1676,13 +1681,6 @@ mod tests {
 
     // ------------------------------------------------------------------
     // 18. Adaptive leaf bound -- serde backward compat
+    //     Requires serde_json which is only in the full irithyll crate.
     // ------------------------------------------------------------------
-    #[test]
-    fn adaptive_leaf_bound_serde_backward_compat() {
-        let cfg = SGBTConfig::default();
-        assert!(cfg.adaptive_leaf_bound.is_none());
-        let json = serde_json::to_string(&cfg).unwrap();
-        let restored: SGBTConfig = serde_json::from_str(&json).unwrap();
-        assert!(restored.adaptive_leaf_bound.is_none());
-    }
 }

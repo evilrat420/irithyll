@@ -4,6 +4,9 @@
 //! and structural queries. These are decoupled from [`crate::tree::StreamingTree`]
 //! so they can be reused by the ensemble layer and tested independently.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::tree::node::{NodeId, TreeArena};
 
 /// Traverse the tree from the given root to a leaf, returning the leaf's [`NodeId`].

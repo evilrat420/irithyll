@@ -4,7 +4,9 @@
 //! depth limits, regularization, binning granularity, and the Hoeffding bound
 //! confidence parameter that controls when splits are committed.
 
-use crate::ensemble::config::FeatureType;
+use alloc::vec::Vec;
+
+use crate::feature::FeatureType;
 use crate::tree::leaf_model::LeafModelType;
 
 /// Configuration for a single streaming decision tree.

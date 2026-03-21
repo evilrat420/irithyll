@@ -1,0 +1,2171 @@
+//! SGBT ensemble orchestrator -- the core boosting loop.
+//!
+//! Implements Streaming Gradient Boosted Trees (Gunasekara et al., 2024):
+//! a sequence of boosting steps, each owning a streaming tree and drift detector,
+//! with automatic tree replacement when concept drift is detected.
+//!
+//! # Algorithm
+//!
+//! For each incoming sample `(x, y)`:
+//! 1. Compute the current ensemble prediction: `F(x) = base + lr * Σ tree_s(x)`
+//! 2. For each boosting step `s = 1..N`:
+//!    - Compute gradient `g = loss.gradient(y, current_pred)`
+//!    - Compute hessian `h = loss.hessian(y, current_pred)`
+//!    - Feed `(x, g, h)` to tree `s` (which internally uses weighted squared loss)
+//!    - Update `current_pred += lr * tree_s.predict(x)`
+//! 3. The ensemble adapts incrementally, with each tree targeting the residual
+//!    of all preceding trees.
+
+pub mod adaptive;
+pub mod adaptive_forest;
+pub mod bagged;
+pub mod config;
+pub mod distributional;
+pub mod lr_schedule;
+pub mod moe;
+pub mod moe_distributional;
+pub mod multi_target;
+pub mod multiclass;
+#[cfg(feature = "parallel")]
+pub mod parallel;
+pub mod quantile_regressor;
+pub mod replacement;
+pub mod stacked;
+pub mod step;
+pub mod variants;
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use core::fmt;
+
+use crate::ensemble::config::SGBTConfig;
+use crate::ensemble::step::BoostingStep;
+use crate::loss::squared::SquaredLoss;
+use crate::loss::Loss;
+use crate::sample::Observation;
+#[allow(unused_imports)] // Used in doc links + tests
+use crate::sample::Sample;
+use crate::tree::builder::TreeConfig;
+
+/// Type alias for an SGBT model using dynamic (boxed) loss dispatch.
+///
+/// Use this when the loss function is determined at runtime (e.g., when
+/// deserializing a model from JSON where the loss type is stored as a tag).
+///
+/// For compile-time loss dispatch (preferred for performance), use
+/// `SGBT<LogisticLoss>`, `SGBT<HuberLoss>`, etc.
+pub type DynSGBT = SGBT<Box<dyn Loss>>;
+
+/// Streaming Gradient Boosted Trees ensemble.
+///
+/// The primary entry point for training and prediction. Generic over `L: Loss`
+/// so the loss function's gradient/hessian calls are monomorphized (inlined)
+/// into the boosting hot loop -- no virtual dispatch overhead.
+///
+/// The default type parameter `L = SquaredLoss` means `SGBT::new(config)`
+/// creates a regression model without specifying the loss type explicitly.
+///
+/// # Examples
+///
+/// ```ignore
+/// use irithyll::{SGBTConfig, SGBT};
+///
+/// // Regression with squared loss (default):
+/// let config = SGBTConfig::builder().n_steps(10).build().unwrap();
+/// let model = SGBT::new(config);
+/// ```ignore
+///
+/// ```ignore
+/// use irithyll::{SGBTConfig, SGBT};
+/// use irithyll::loss::logistic::LogisticLoss;
+///
+/// // Classification with logistic loss -- no Box::new()!
+/// let config = SGBTConfig::builder().n_steps(10).build().unwrap();
+/// let model = SGBT::with_loss(config, LogisticLoss);
+/// ```
+pub struct SGBT<L: Loss = SquaredLoss> {
+    /// Configuration.
+    config: SGBTConfig,
+    /// Boosting steps (one tree + drift detector each).
+    steps: Vec<BoostingStep>,
+    /// Loss function (monomorphized -- no vtable).
+    loss: L,
+    /// Base prediction (initial constant, computed from first batch of targets).
+    base_prediction: f64,
+    /// Whether base_prediction has been initialized.
+    base_initialized: bool,
+    /// Running collection of initial targets for computing base_prediction.
+    initial_targets: Vec<f64>,
+    /// Number of initial targets to collect before setting base_prediction.
+    initial_target_count: usize,
+    /// Total samples trained.
+    samples_seen: u64,
+    /// RNG state for variant skip logic.
+    rng_state: u64,
+    /// Per-step EWMA of |marginal contribution| for quality-based pruning.
+    /// Empty when `quality_prune_alpha` is `None`.
+    contribution_ewma: Vec<f64>,
+    /// Per-step consecutive low-contribution sample counter.
+    /// Empty when `quality_prune_alpha` is `None`.
+    low_contrib_count: Vec<u64>,
+    /// Rolling mean absolute error for error-weighted sample importance.
+    /// Only used when `error_weight_alpha` is `Some`.
+    rolling_mean_error: f64,
+    /// Per-feature auto-calibrated bandwidths for smooth prediction.
+    /// Computed from median split threshold gaps across all trees.
+    auto_bandwidths: Vec<f64>,
+    /// Sum of replacement counts across all steps at last bandwidth computation.
+    /// Used to detect when trees have been replaced and bandwidths need refresh.
+    last_replacement_sum: u64,
+}
+
+impl<L: Loss + Clone> Clone for SGBT<L> {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            steps: self.steps.clone(),
+            loss: self.loss.clone(),
+            base_prediction: self.base_prediction,
+            base_initialized: self.base_initialized,
+            initial_targets: self.initial_targets.clone(),
+            initial_target_count: self.initial_target_count,
+            samples_seen: self.samples_seen,
+            rng_state: self.rng_state,
+            contribution_ewma: self.contribution_ewma.clone(),
+            low_contrib_count: self.low_contrib_count.clone(),
+            rolling_mean_error: self.rolling_mean_error,
+            auto_bandwidths: self.auto_bandwidths.clone(),
+            last_replacement_sum: self.last_replacement_sum,
+        }
+    }
+}
+
+impl<L: Loss> fmt::Debug for SGBT<L> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SGBT")
+            .field("n_steps", &self.steps.len())
+            .field("samples_seen", &self.samples_seen)
+            .field("base_prediction", &self.base_prediction)
+            .field("base_initialized", &self.base_initialized)
+            .finish()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Convenience constructor for the default loss (SquaredLoss)
+// ---------------------------------------------------------------------------
+
+impl SGBT<SquaredLoss> {
+    /// Create a new SGBT ensemble with squared loss (regression).
+    ///
+    /// This is the most common constructor. For classification or custom
+    /// losses, use [`with_loss`](SGBT::with_loss).
+    pub fn new(config: SGBTConfig) -> Self {
+        Self::with_loss(config, SquaredLoss)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// General impl for all Loss types
+// ---------------------------------------------------------------------------
+
+impl<L: Loss> SGBT<L> {
+    /// Create a new SGBT ensemble with a specific loss function.
+    ///
+    /// The loss is stored by value (monomorphized), giving zero-cost
+    /// gradient/hessian dispatch.
+    ///
+    /// ```ignore
+    /// use irithyll::{SGBTConfig, SGBT};
+    /// use irithyll::loss::logistic::LogisticLoss;
+    ///
+    /// let config = SGBTConfig::builder().n_steps(10).build().unwrap();
+    /// let model = SGBT::with_loss(config, LogisticLoss);
+    /// ```
+    pub fn with_loss(config: SGBTConfig, loss: L) -> Self {
+        let leaf_decay_alpha = config
+            .leaf_half_life
+            .map(|hl| crate::math::exp(-crate::math::ln(2.0) / hl as f64));
+
+        let tree_config = TreeConfig::new()
+            .max_depth(config.max_depth)
+            .n_bins(config.n_bins)
+            .lambda(config.lambda)
+            .gamma(config.gamma)
+            .grace_period(config.grace_period)
+            .delta(config.delta)
+            .feature_subsample_rate(config.feature_subsample_rate)
+            .leaf_decay_alpha_opt(leaf_decay_alpha)
+            .split_reeval_interval_opt(config.split_reeval_interval)
+            .feature_types_opt(config.feature_types.clone())
+            .gradient_clip_sigma_opt(config.gradient_clip_sigma)
+            .monotone_constraints_opt(config.monotone_constraints.clone())
+            .max_leaf_output_opt(config.max_leaf_output)
+            .adaptive_leaf_bound_opt(config.adaptive_leaf_bound)
+            .min_hessian_sum_opt(config.min_hessian_sum)
+            .leaf_model_type(config.leaf_model_type.clone());
+
+        let max_tree_samples = config.max_tree_samples;
+
+        let shadow_warmup = config.shadow_warmup.unwrap_or(0);
+        let steps: Vec<BoostingStep> = (0..config.n_steps)
+            .map(|i| {
+                let mut tc = tree_config.clone();
+                tc.seed = config.seed ^ (i as u64);
+                let detector = config.drift_detector.create();
+                if shadow_warmup > 0 {
+                    BoostingStep::new_with_graduated(tc, detector, max_tree_samples, shadow_warmup)
+                } else {
+                    BoostingStep::new_with_max_samples(tc, detector, max_tree_samples)
+                }
+            })
+            .collect();
+
+        let seed = config.seed;
+        let initial_target_count = config.initial_target_count;
+        let n = config.n_steps;
+        let has_pruning = config.quality_prune_alpha.is_some();
+        Self {
+            config,
+            steps,
+            loss,
+            base_prediction: 0.0,
+            base_initialized: false,
+            initial_targets: Vec::new(),
+            initial_target_count,
+            samples_seen: 0,
+            rng_state: seed,
+            contribution_ewma: if has_pruning {
+                vec![0.0; n]
+            } else {
+                Vec::new()
+            },
+            low_contrib_count: if has_pruning { vec![0; n] } else { Vec::new() },
+            rolling_mean_error: 0.0,
+            auto_bandwidths: Vec::new(),
+            last_replacement_sum: 0,
+        }
+    }
+
+    /// Train on a single observation.
+    ///
+    /// Accepts any type implementing [`Observation`], including [`Sample`],
+    /// [`SampleRef`](crate::SampleRef), or tuples like `(&[f64], f64)` for
+    /// zero-copy training.
+    pub fn train_one(&mut self, sample: &impl Observation) {
+        self.samples_seen += 1;
+        let target = sample.target();
+        let features = sample.features();
+
+        // Initialize base prediction from first few targets
+        if !self.base_initialized {
+            self.initial_targets.push(target);
+            if self.initial_targets.len() >= self.initial_target_count {
+                self.base_prediction = self.loss.initial_prediction(&self.initial_targets);
+                self.base_initialized = true;
+                self.initial_targets.clear();
+                self.initial_targets.shrink_to_fit();
+            }
+        }
+
+        // Current prediction starts from base
+        let mut current_pred = self.base_prediction;
+
+        let prune_alpha = self.config.quality_prune_alpha;
+        let prune_threshold = self.config.quality_prune_threshold;
+        let prune_patience = self.config.quality_prune_patience;
+
+        // Error-weighted sample importance: compute weight from prediction error
+        let error_weight = if let Some(ew_alpha) = self.config.error_weight_alpha {
+            let abs_error = crate::math::abs(target - current_pred);
+            if self.rolling_mean_error > 1e-15 {
+                let w = (1.0 + abs_error / (self.rolling_mean_error + 1e-15)).min(10.0);
+                self.rolling_mean_error =
+                    ew_alpha * abs_error + (1.0 - ew_alpha) * self.rolling_mean_error;
+                w
+            } else {
+                self.rolling_mean_error = abs_error.max(1e-15);
+                1.0 // first sample, no reweighting
+            }
+        } else {
+            1.0
+        };
+
+        // Sequential boosting: each step targets the residual of all prior steps
+        for s in 0..self.steps.len() {
+            let gradient = self.loss.gradient(target, current_pred) * error_weight;
+            let hessian = self.loss.hessian(target, current_pred) * error_weight;
+            let train_count = self
+                .config
+                .variant
+                .train_count(hessian, &mut self.rng_state);
+
+            let step_pred =
+                self.steps[s].train_and_predict(features, gradient, hessian, train_count);
+
+            current_pred += self.config.learning_rate * step_pred;
+
+            // Quality-based tree pruning: track contribution and replace dead wood
+            if let Some(alpha) = prune_alpha {
+                let contribution = crate::math::abs(self.config.learning_rate * step_pred);
+                self.contribution_ewma[s] =
+                    alpha * contribution + (1.0 - alpha) * self.contribution_ewma[s];
+
+                if self.contribution_ewma[s] < prune_threshold {
+                    self.low_contrib_count[s] += 1;
+                    if self.low_contrib_count[s] >= prune_patience {
+                        self.steps[s].reset();
+                        self.contribution_ewma[s] = 0.0;
+                        self.low_contrib_count[s] = 0;
+                    }
+                } else {
+                    self.low_contrib_count[s] = 0;
+                }
+            }
+        }
+
+        // Refresh auto-bandwidths when trees have been replaced or not yet computed.
+        self.refresh_bandwidths();
+    }
+
+    /// Train on a batch of observations.
+    pub fn train_batch<O: Observation>(&mut self, samples: &[O]) {
+        for sample in samples {
+            self.train_one(sample);
+        }
+    }
+
+    /// Train on a batch with periodic callback for cooperative yielding.
+    ///
+    /// The callback is invoked every `interval` samples with the number of
+    /// samples processed so far. This allows long-running training to yield
+    /// to other tasks in an async runtime, update progress bars, or perform
+    /// periodic checkpointing.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use irithyll::{SGBTConfig, SGBT};
+    ///
+    /// let config = SGBTConfig::builder().n_steps(10).build().unwrap();
+    /// let mut model = SGBT::new(config);
+    /// let data: Vec<(Vec<f64>, f64)> = Vec::new(); // your data
+    ///
+    /// model.train_batch_with_callback(&data, 1000, |processed| {
+    ///     println!("Trained {} samples", processed);
+    /// });
+    /// ```
+    pub fn train_batch_with_callback<O: Observation, F: FnMut(usize)>(
+        &mut self,
+        samples: &[O],
+        interval: usize,
+        mut callback: F,
+    ) {
+        let interval = interval.max(1); // Prevent zero interval
+        for (i, sample) in samples.iter().enumerate() {
+            self.train_one(sample);
+            if (i + 1) % interval == 0 {
+                callback(i + 1);
+            }
+        }
+        // Final callback if the total isn't a multiple of interval
+        let total = samples.len();
+        if total % interval != 0 {
+            callback(total);
+        }
+    }
+
+    /// Train on a random subsample of a batch using reservoir sampling.
+    ///
+    /// When `max_samples < samples.len()`, selects a representative subset
+    /// using Algorithm R (Vitter, 1985) -- a uniform random sample without
+    /// replacement. The selected samples are then trained in their original
+    /// order to preserve sequential dependencies.
+    ///
+    /// This is ideal for large replay buffers where training on the full
+    /// dataset is prohibitively slow but a representative subset gives
+    /// equivalent model quality (e.g., 1M of 4.3M samples with R²=0.997).
+    ///
+    /// When `max_samples >= samples.len()`, all samples are trained.
+    pub fn train_batch_subsampled<O: Observation>(&mut self, samples: &[O], max_samples: usize) {
+        if max_samples >= samples.len() {
+            self.train_batch(samples);
+            return;
+        }
+
+        // Reservoir sampling (Algorithm R) to select indices
+        let mut reservoir: Vec<usize> = (0..max_samples).collect();
+        let mut rng = self.rng_state;
+
+        for i in max_samples..samples.len() {
+            // Generate random index in [0, i]
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let j = (rng % (i as u64 + 1)) as usize;
+            if j < max_samples {
+                reservoir[j] = i;
+            }
+        }
+
+        self.rng_state = rng;
+
+        // Sort to preserve original order (important for EWMA/drift state)
+        reservoir.sort_unstable();
+
+        // Train on the selected subset
+        for &idx in &reservoir {
+            self.train_one(&samples[idx]);
+        }
+    }
+
+    /// Train on a batch with both subsampling and periodic callbacks.
+    ///
+    /// Combines reservoir subsampling with cooperative yield points.
+    /// Ideal for long-running daemon training where you need both
+    /// efficiency (subsampling) and cooperation (yielding).
+    pub fn train_batch_subsampled_with_callback<O: Observation, F: FnMut(usize)>(
+        &mut self,
+        samples: &[O],
+        max_samples: usize,
+        interval: usize,
+        mut callback: F,
+    ) {
+        if max_samples >= samples.len() {
+            self.train_batch_with_callback(samples, interval, callback);
+            return;
+        }
+
+        // Reservoir sampling
+        let mut reservoir: Vec<usize> = (0..max_samples).collect();
+        let mut rng = self.rng_state;
+
+        for i in max_samples..samples.len() {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let j = (rng % (i as u64 + 1)) as usize;
+            if j < max_samples {
+                reservoir[j] = i;
+            }
+        }
+
+        self.rng_state = rng;
+        reservoir.sort_unstable();
+
+        let interval = interval.max(1);
+        for (i, &idx) in reservoir.iter().enumerate() {
+            self.train_one(&samples[idx]);
+            if (i + 1) % interval == 0 {
+                callback(i + 1);
+            }
+        }
+        let total = reservoir.len();
+        if total % interval != 0 {
+            callback(total);
+        }
+    }
+
+    /// Predict the raw output for a feature vector.
+    ///
+    /// Always uses sigmoid-blended soft routing with auto-calibrated per-feature
+    /// bandwidths derived from median split threshold gaps. Features that have
+    /// never been split on use hard routing (bandwidth = infinity).
+    pub fn predict(&self, features: &[f64]) -> f64 {
+        let mut pred = self.base_prediction;
+        if self.auto_bandwidths.is_empty() {
+            // No bandwidths computed yet (no training) — hard routing fallback
+            for step in &self.steps {
+                pred += self.config.learning_rate * step.predict(features);
+            }
+        } else {
+            for step in &self.steps {
+                pred += self.config.learning_rate
+                    * step.predict_smooth_auto(features, &self.auto_bandwidths);
+            }
+        }
+        pred
+    }
+
+    /// Predict using sigmoid-blended soft routing with an explicit bandwidth.
+    ///
+    /// Uses a single bandwidth for all features. For auto-calibrated per-feature
+    /// bandwidths, use [`predict()`](SGBT::predict) which always uses smooth routing.
+    pub fn predict_smooth(&self, features: &[f64], bandwidth: f64) -> f64 {
+        let mut pred = self.base_prediction;
+        for step in &self.steps {
+            pred += self.config.learning_rate * step.predict_smooth(features, bandwidth);
+        }
+        pred
+    }
+
+    /// Per-feature auto-calibrated bandwidths used by `predict()`.
+    ///
+    /// Empty before the first training sample. Each entry corresponds to a
+    /// feature index; `f64::INFINITY` means that feature has no splits and
+    /// uses hard routing.
+    pub fn auto_bandwidths(&self) -> &[f64] {
+        &self.auto_bandwidths
+    }
+
+    /// Predict with parent-leaf linear interpolation.
+    ///
+    /// Blends each leaf prediction with its parent's preserved prediction
+    /// based on sample count, preventing stale predictions from fresh leaves.
+    pub fn predict_interpolated(&self, features: &[f64]) -> f64 {
+        let mut pred = self.base_prediction;
+        for step in &self.steps {
+            pred += self.config.learning_rate * step.predict_interpolated(features);
+        }
+        pred
+    }
+
+    /// Predict with sibling-based interpolation for feature-continuous predictions.
+    ///
+    /// At each split node near the threshold boundary, blends left and right
+    /// subtree predictions linearly based on distance from the threshold.
+    /// Uses auto-calibrated bandwidths as the interpolation margin.
+    /// Predictions vary continuously as features change, eliminating
+    /// step-function artifacts.
+    pub fn predict_sibling_interpolated(&self, features: &[f64]) -> f64 {
+        let mut pred = self.base_prediction;
+        for step in &self.steps {
+            pred += self.config.learning_rate
+                * step.predict_sibling_interpolated(features, &self.auto_bandwidths);
+        }
+        pred
+    }
+
+    /// Predict with graduated active-shadow blending.
+    ///
+    /// Smoothly transitions between active and shadow trees during replacement,
+    /// eliminating prediction dips. Requires `shadow_warmup` to be configured.
+    /// When disabled, equivalent to `predict()`.
+    pub fn predict_graduated(&self, features: &[f64]) -> f64 {
+        let mut pred = self.base_prediction;
+        for step in &self.steps {
+            pred += self.config.learning_rate * step.predict_graduated(features);
+        }
+        pred
+    }
+
+    /// Predict with graduated blending + sibling interpolation (premium path).
+    ///
+    /// Combines graduated active-shadow handoff (no prediction dips during
+    /// tree replacement) with feature-continuous sibling interpolation
+    /// (no step-function artifacts near split boundaries).
+    pub fn predict_graduated_sibling_interpolated(&self, features: &[f64]) -> f64 {
+        let mut pred = self.base_prediction;
+        for step in &self.steps {
+            pred += self.config.learning_rate
+                * step.predict_graduated_sibling_interpolated(features, &self.auto_bandwidths);
+        }
+        pred
+    }
+
+    /// Predict with loss transform applied (e.g., sigmoid for logistic loss).
+    pub fn predict_transformed(&self, features: &[f64]) -> f64 {
+        self.loss.predict_transform(self.predict(features))
+    }
+
+    /// Predict probability (alias for `predict_transformed`).
+    pub fn predict_proba(&self, features: &[f64]) -> f64 {
+        self.predict_transformed(features)
+    }
+
+    /// Predict with confidence estimation.
+    ///
+    /// Returns `(prediction, confidence)` where confidence = 1 / sqrt(sum_variance).
+    /// Higher confidence indicates more certain predictions (leaves have seen
+    /// more hessian mass). Confidence of 0.0 means the model has no information.
+    ///
+    /// This enables execution engines to modulate aggressiveness:
+    /// - High confidence + favorable prediction → act immediately
+    /// - Low confidence → fall back to simpler models or wait for more data
+    ///
+    /// The variance per tree is estimated as `1 / (H_sum + lambda)` at the
+    /// leaf where the sample lands. The ensemble variance is the sum of
+    /// per-tree variances (scaled by learning_rate²), and confidence is
+    /// the reciprocal of the standard deviation.
+    pub fn predict_with_confidence(&self, features: &[f64]) -> (f64, f64) {
+        let mut pred = self.base_prediction;
+        let mut total_variance = 0.0;
+        let lr2 = self.config.learning_rate * self.config.learning_rate;
+
+        for step in &self.steps {
+            let (value, variance) = step.predict_with_variance(features);
+            pred += self.config.learning_rate * value;
+            total_variance += lr2 * variance;
+        }
+
+        let confidence = if total_variance > 0.0 && total_variance.is_finite() {
+            1.0 / crate::math::sqrt(total_variance)
+        } else {
+            0.0
+        };
+
+        (pred, confidence)
+    }
+
+    /// Batch prediction.
+    pub fn predict_batch(&self, feature_matrix: &[Vec<f64>]) -> Vec<f64> {
+        feature_matrix.iter().map(|f| self.predict(f)).collect()
+    }
+
+    /// Number of boosting steps.
+    pub fn n_steps(&self) -> usize {
+        self.steps.len()
+    }
+
+    /// Total trees (active + alternates).
+    pub fn n_trees(&self) -> usize {
+        self.steps.len() + self.steps.iter().filter(|s| s.has_alternate()).count()
+    }
+
+    /// Total leaves across all active trees.
+    pub fn total_leaves(&self) -> usize {
+        self.steps.iter().map(|s| s.n_leaves()).sum()
+    }
+
+    /// Total samples trained.
+    pub fn n_samples_seen(&self) -> u64 {
+        self.samples_seen
+    }
+
+    /// The current base prediction.
+    pub fn base_prediction(&self) -> f64 {
+        self.base_prediction
+    }
+
+    /// Whether the base prediction has been initialized.
+    pub fn is_initialized(&self) -> bool {
+        self.base_initialized
+    }
+
+    /// Access the configuration.
+    pub fn config(&self) -> &SGBTConfig {
+        &self.config
+    }
+
+    /// Set the learning rate for future boosting rounds.
+    ///
+    /// This allows external schedulers (e.g., [`lr_schedule::LRScheduler`]) to
+    /// adapt the rate over time without rebuilding the model.
+    ///
+    /// # Arguments
+    ///
+    /// * `lr` -- New learning rate (should be positive and finite)
+    #[inline]
+    pub fn set_learning_rate(&mut self, lr: f64) {
+        self.config.learning_rate = lr;
+    }
+
+    /// Immutable access to the boosting steps.
+    ///
+    /// Useful for model inspection and export (e.g., ONNX serialization).
+    pub fn steps(&self) -> &[BoostingStep] {
+        &self.steps
+    }
+
+    /// Immutable access to the loss function.
+    pub fn loss(&self) -> &L {
+        &self.loss
+    }
+
+    /// Feature importances based on accumulated split gains across all trees.
+    ///
+    /// Returns normalized importances (sum to 1.0) indexed by feature.
+    /// Returns an empty Vec if no splits have occurred yet.
+    pub fn feature_importances(&self) -> Vec<f64> {
+        // Aggregate split gains across all boosting steps.
+        let mut totals: Vec<f64> = Vec::new();
+        for step in &self.steps {
+            let gains = step.slot().split_gains();
+            if totals.is_empty() && !gains.is_empty() {
+                totals.resize(gains.len(), 0.0);
+            }
+            for (i, &g) in gains.iter().enumerate() {
+                if i < totals.len() {
+                    totals[i] += g;
+                }
+            }
+        }
+
+        // Normalize to sum to 1.0.
+        let sum: f64 = totals.iter().sum();
+        if sum > 0.0 {
+            totals.iter_mut().for_each(|v| *v /= sum);
+        }
+        totals
+    }
+
+    /// Feature names, if configured.
+    pub fn feature_names(&self) -> Option<&[String]> {
+        self.config.feature_names.as_deref()
+    }
+
+    /// Feature importances paired with their names.
+    ///
+    /// Returns `None` if feature names are not configured. Otherwise returns
+    /// `(name, importance)` pairs sorted by importance descending.
+    pub fn named_feature_importances(&self) -> Option<Vec<(String, f64)>> {
+        let names = self.config.feature_names.as_ref()?;
+        let importances = self.feature_importances();
+        let mut pairs: Vec<(String, f64)> = names
+            .iter()
+            .zip(importances.iter().chain(core::iter::repeat(&0.0)))
+            .map(|(n, &v)| (n.clone(), v))
+            .collect();
+        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal));
+        Some(pairs)
+    }
+
+    /// Train on a single sample with named features.
+    ///
+    /// Converts a `HashMap<String, f64>` of named features into a positional
+    /// vector using the configured feature names. Missing features default to 0.0.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `feature_names` is not configured.
+    #[cfg(feature = "std")]
+    pub fn train_one_named(
+        &mut self,
+        features: &std::collections::HashMap<alloc::string::String, f64>,
+        target: f64,
+    ) {
+        let names = self
+            .config
+            .feature_names
+            .as_ref()
+            .expect("train_one_named requires feature_names to be configured");
+        let vec: Vec<f64> = names
+            .iter()
+            .map(|name| features.get(name).copied().unwrap_or(0.0))
+            .collect();
+        self.train_one(&(&vec[..], target));
+    }
+
+    /// Predict with named features.
+    ///
+    /// Converts named features into a positional vector, same as `train_one_named`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `feature_names` is not configured.
+    #[cfg(feature = "std")]
+    pub fn predict_named(
+        &self,
+        features: &std::collections::HashMap<alloc::string::String, f64>,
+    ) -> f64 {
+        let names = self
+            .config
+            .feature_names
+            .as_ref()
+            .expect("predict_named requires feature_names to be configured");
+        let vec: Vec<f64> = names
+            .iter()
+            .map(|name| features.get(name).copied().unwrap_or(0.0))
+            .collect();
+        self.predict(&vec)
+    }
+
+    // NOTE: explain() and explain_named() require the `explain` module which
+    // lives in the full `irithyll` crate, not in `irithyll-core`. Those methods
+    // are provided via the re-export layer in `irithyll::ensemble`.
+
+    /// Refresh auto-bandwidths if any tree has been replaced since last computation.
+    fn refresh_bandwidths(&mut self) {
+        let current_sum: u64 = self.steps.iter().map(|s| s.slot().replacements()).sum();
+        if current_sum != self.last_replacement_sum || self.auto_bandwidths.is_empty() {
+            self.auto_bandwidths = self.compute_auto_bandwidths();
+            self.last_replacement_sum = current_sum;
+        }
+    }
+
+    /// Compute per-feature auto-calibrated bandwidths from all trees.
+    ///
+    /// For each feature, collects all split thresholds across all trees,
+    /// computes the median gap between consecutive unique thresholds, and
+    /// returns `median_gap * K` (K = 2.0).
+    ///
+    /// Edge cases:
+    /// - Feature with < 3 unique thresholds: `range / n_bins * K`
+    /// - Feature never split on (< 2 unique thresholds): `f64::INFINITY` (hard routing)
+    fn compute_auto_bandwidths(&self) -> Vec<f64> {
+        const K: f64 = 2.0;
+
+        // Determine n_features from the trees
+        let n_features = self
+            .steps
+            .iter()
+            .filter_map(|s| s.slot().active_tree().n_features())
+            .max()
+            .unwrap_or(0);
+
+        if n_features == 0 {
+            return Vec::new();
+        }
+
+        // Collect all thresholds from all trees per feature
+        let mut all_thresholds: Vec<Vec<f64>> = vec![Vec::new(); n_features];
+
+        for step in &self.steps {
+            let tree_thresholds = step
+                .slot()
+                .active_tree()
+                .collect_split_thresholds_per_feature();
+            for (i, ts) in tree_thresholds.into_iter().enumerate() {
+                if i < n_features {
+                    all_thresholds[i].extend(ts);
+                }
+            }
+        }
+
+        let n_bins = self.config.n_bins as f64;
+
+        // Compute per-feature bandwidth
+        all_thresholds
+            .iter()
+            .map(|ts| {
+                if ts.is_empty() {
+                    return f64::INFINITY; // Never split on → hard routing
+                }
+
+                let mut sorted = ts.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+                sorted.dedup_by(|a, b| crate::math::abs(*a - *b) < 1e-15);
+
+                if sorted.len() < 2 {
+                    return f64::INFINITY; // Single threshold → hard routing
+                }
+
+                // Compute gaps between consecutive unique thresholds
+                let mut gaps: Vec<f64> = sorted.windows(2).map(|w| w[1] - w[0]).collect();
+
+                if sorted.len() < 3 {
+                    // Fallback: feature_range / n_bins * K
+                    let range = sorted.last().unwrap() - sorted.first().unwrap();
+                    if range < 1e-15 {
+                        return f64::INFINITY;
+                    }
+                    return (range / n_bins) * K;
+                }
+
+                // Median gap
+                gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+                let median_gap = if gaps.len() % 2 == 0 {
+                    (gaps[gaps.len() / 2 - 1] + gaps[gaps.len() / 2]) / 2.0
+                } else {
+                    gaps[gaps.len() / 2]
+                };
+
+                if median_gap < 1e-15 {
+                    f64::INFINITY
+                } else {
+                    median_gap * K
+                }
+            })
+            .collect()
+    }
+
+    /// Reset the ensemble to initial state.
+    pub fn reset(&mut self) {
+        for step in &mut self.steps {
+            step.reset();
+        }
+        self.base_prediction = 0.0;
+        self.base_initialized = false;
+        self.initial_targets.clear();
+        self.samples_seen = 0;
+        self.rng_state = self.config.seed;
+        self.auto_bandwidths.clear();
+        self.last_replacement_sum = 0;
+    }
+
+    /// Serialize the model into a [`ModelState`](crate::serde_support::ModelState).
+    ///
+    /// Auto-detects the [`LossType`](crate::loss::LossType) from the loss
+    /// function's [`Loss::loss_type()`] implementation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`IrithyllError::Serialization`](crate::IrithyllError::Serialization)
+    /// if the loss does not implement `loss_type()` (returns `None`). For custom
+    /// losses, use [`to_model_state_with`](Self::to_model_state_with) instead.
+    #[cfg(feature = "_serde_support")]
+    pub fn to_model_state(&self) -> crate::error::Result<crate::serde_support::ModelState> {
+        let loss_type = self.loss.loss_type().ok_or_else(|| {
+            crate::error::IrithyllError::Serialization(
+                "cannot auto-detect loss type for serialization: \
+                 implement Loss::loss_type() or use to_model_state_with()"
+                    .into(),
+            )
+        })?;
+        Ok(self.to_model_state_with(loss_type))
+    }
+
+    /// Serialize the model with an explicit [`LossType`](crate::loss::LossType) tag.
+    ///
+    /// Use this for custom loss functions that don't implement `loss_type()`.
+    #[cfg(feature = "_serde_support")]
+    pub fn to_model_state_with(
+        &self,
+        loss_type: crate::loss::LossType,
+    ) -> crate::serde_support::ModelState {
+        use crate::serde_support::{ModelState, StepSnapshot};
+
+        let steps = self
+            .steps
+            .iter()
+            .map(|step| {
+                let slot = step.slot();
+                let tree_snap = snapshot_tree(slot.active_tree());
+                let alt_snap = slot.alternate_tree().map(snapshot_tree);
+                let drift_state = slot.detector().serialize_state();
+                let alt_drift_state = slot.alt_detector().and_then(|d| d.serialize_state());
+                StepSnapshot {
+                    tree: tree_snap,
+                    alternate_tree: alt_snap,
+                    drift_state,
+                    alt_drift_state,
+                }
+            })
+            .collect();
+
+        ModelState {
+            config: self.config.clone(),
+            loss_type,
+            base_prediction: self.base_prediction,
+            base_initialized: self.base_initialized,
+            initial_targets: self.initial_targets.clone(),
+            initial_target_count: self.initial_target_count,
+            samples_seen: self.samples_seen,
+            rng_state: self.rng_state,
+            steps,
+            rolling_mean_error: self.rolling_mean_error,
+            contribution_ewma: self.contribution_ewma.clone(),
+            low_contrib_count: self.low_contrib_count.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DynSGBT: deserialization returns a dynamically-dispatched model
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "_serde_support")]
+impl SGBT<Box<dyn Loss>> {
+    /// Reconstruct an SGBT model from a [`ModelState`](crate::serde_support::ModelState).
+    ///
+    /// Returns a [`DynSGBT`] (`SGBT<Box<dyn Loss>>`) because the concrete
+    /// loss type is determined at runtime from the serialized tag.
+    ///
+    /// Rebuilds the full ensemble including tree topology and leaf values.
+    /// Histogram accumulators are left empty and will rebuild from continued
+    /// training. If drift detector state was serialized, it is restored;
+    /// otherwise a fresh detector is created from the config.
+    pub fn from_model_state(state: crate::serde_support::ModelState) -> Self {
+        use crate::ensemble::replacement::TreeSlot;
+
+        let loss = state.loss_type.into_loss();
+
+        let leaf_decay_alpha = state
+            .config
+            .leaf_half_life
+            .map(|hl| crate::math::exp(-crate::math::ln(2.0) / hl as f64));
+        let max_tree_samples = state.config.max_tree_samples;
+
+        let steps: Vec<BoostingStep> = state
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, step_snap)| {
+                let tree_config = TreeConfig::new()
+                    .max_depth(state.config.max_depth)
+                    .n_bins(state.config.n_bins)
+                    .lambda(state.config.lambda)
+                    .gamma(state.config.gamma)
+                    .grace_period(state.config.grace_period)
+                    .delta(state.config.delta)
+                    .feature_subsample_rate(state.config.feature_subsample_rate)
+                    .leaf_decay_alpha_opt(leaf_decay_alpha)
+                    .split_reeval_interval_opt(state.config.split_reeval_interval)
+                    .feature_types_opt(state.config.feature_types.clone())
+                    .gradient_clip_sigma_opt(state.config.gradient_clip_sigma)
+                    .monotone_constraints_opt(state.config.monotone_constraints.clone())
+                    .leaf_model_type(state.config.leaf_model_type.clone())
+                    .seed(state.config.seed ^ (i as u64));
+
+                let active = rebuild_tree(&step_snap.tree, tree_config.clone());
+                let alternate = step_snap
+                    .alternate_tree
+                    .as_ref()
+                    .map(|snap| rebuild_tree(snap, tree_config.clone()));
+
+                let mut detector = state.config.drift_detector.create();
+                if let Some(ref ds) = step_snap.drift_state {
+                    detector.restore_state(ds);
+                }
+                let mut slot = TreeSlot::from_trees(
+                    active,
+                    alternate,
+                    tree_config,
+                    detector,
+                    max_tree_samples,
+                );
+                if let Some(ref ads) = step_snap.alt_drift_state {
+                    if let Some(alt_det) = slot.alt_detector_mut() {
+                        alt_det.restore_state(ads);
+                    }
+                }
+                BoostingStep::from_slot(slot)
+            })
+            .collect();
+
+        let n = steps.len();
+        let has_pruning = state.config.quality_prune_alpha.is_some();
+
+        // Restore pruning state if available, otherwise initialize
+        let contribution_ewma = if !state.contribution_ewma.is_empty() {
+            state.contribution_ewma
+        } else if has_pruning {
+            vec![0.0; n]
+        } else {
+            Vec::new()
+        };
+        let low_contrib_count = if !state.low_contrib_count.is_empty() {
+            state.low_contrib_count
+        } else if has_pruning {
+            vec![0; n]
+        } else {
+            Vec::new()
+        };
+
+        Self {
+            config: state.config,
+            steps,
+            loss,
+            base_prediction: state.base_prediction,
+            base_initialized: state.base_initialized,
+            initial_targets: state.initial_targets,
+            initial_target_count: state.initial_target_count,
+            samples_seen: state.samples_seen,
+            rng_state: state.rng_state,
+            contribution_ewma,
+            low_contrib_count,
+            rolling_mean_error: state.rolling_mean_error,
+            auto_bandwidths: Vec::new(),
+            last_replacement_sum: 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared snapshot/rebuild helpers for serde (used by SGBT + DistributionalSGBT)
+// ---------------------------------------------------------------------------
+
+/// Snapshot a [`HoeffdingTree`] into a serializable [`TreeSnapshot`].
+#[cfg(feature = "_serde_support")]
+pub(crate) fn snapshot_tree(
+    tree: &crate::tree::hoeffding::HoeffdingTree,
+) -> crate::serde_support::TreeSnapshot {
+    use crate::serde_support::TreeSnapshot;
+    use crate::tree::StreamingTree;
+    let arena = tree.arena();
+    TreeSnapshot {
+        feature_idx: arena.feature_idx.clone(),
+        threshold: arena.threshold.clone(),
+        left: arena.left.iter().map(|id| id.0).collect(),
+        right: arena.right.iter().map(|id| id.0).collect(),
+        leaf_value: arena.leaf_value.clone(),
+        is_leaf: arena.is_leaf.clone(),
+        depth: arena.depth.clone(),
+        sample_count: arena.sample_count.clone(),
+        n_features: tree.n_features(),
+        samples_seen: tree.n_samples_seen(),
+        rng_state: tree.rng_state(),
+        categorical_mask: arena.categorical_mask.clone(),
+    }
+}
+
+/// Rebuild a [`HoeffdingTree`] from a [`TreeSnapshot`] and a [`TreeConfig`].
+#[cfg(feature = "_serde_support")]
+pub(crate) fn rebuild_tree(
+    snapshot: &crate::serde_support::TreeSnapshot,
+    tree_config: TreeConfig,
+) -> crate::tree::hoeffding::HoeffdingTree {
+    use crate::tree::hoeffding::HoeffdingTree;
+    use crate::tree::node::{NodeId, TreeArena};
+
+    let mut arena = TreeArena::new();
+    let n = snapshot.feature_idx.len();
+
+    for i in 0..n {
+        arena.feature_idx.push(snapshot.feature_idx[i]);
+        arena.threshold.push(snapshot.threshold[i]);
+        arena.left.push(NodeId(snapshot.left[i]));
+        arena.right.push(NodeId(snapshot.right[i]));
+        arena.leaf_value.push(snapshot.leaf_value[i]);
+        arena.is_leaf.push(snapshot.is_leaf[i]);
+        arena.depth.push(snapshot.depth[i]);
+        arena.sample_count.push(snapshot.sample_count[i]);
+        let mask = snapshot.categorical_mask.get(i).copied().flatten();
+        arena.categorical_mask.push(mask);
+    }
+
+    HoeffdingTree::from_arena(
+        tree_config,
+        arena,
+        snapshot.n_features,
+        snapshot.samples_seen,
+        snapshot.rng_state,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::boxed::Box;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    fn default_config() -> SGBTConfig {
+        SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(16)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn new_model_predicts_zero() {
+        let model = SGBT::new(default_config());
+        let pred = model.predict(&[1.0, 2.0, 3.0]);
+        assert!(pred.abs() < 1e-12);
+    }
+
+    #[test]
+    fn train_one_does_not_panic() {
+        let mut model = SGBT::new(default_config());
+        model.train_one(&Sample::new(vec![1.0, 2.0, 3.0], 5.0));
+        assert_eq!(model.n_samples_seen(), 1);
+    }
+
+    #[test]
+    fn prediction_changes_after_training() {
+        let mut model = SGBT::new(default_config());
+        let features = vec![1.0, 2.0, 3.0];
+        for i in 0..100 {
+            model.train_one(&Sample::new(features.clone(), (i as f64) * 0.1));
+        }
+        let pred = model.predict(&features);
+        assert!(pred.is_finite());
+    }
+
+    #[test]
+    fn linear_signal_rmse_improves() {
+        let config = SGBTConfig::builder()
+            .n_steps(20)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(3)
+            .n_bins(16)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        let mut rng: u64 = 12345;
+        let mut early_errors = Vec::new();
+        let mut late_errors = Vec::new();
+
+        for i in 0..500 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let x1 = (rng as f64 / u64::MAX as f64) * 10.0 - 5.0;
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let x2 = (rng as f64 / u64::MAX as f64) * 10.0 - 5.0;
+            let target = 2.0 * x1 + 3.0 * x2;
+
+            let pred = model.predict(&[x1, x2]);
+            let error = (pred - target).powi(2);
+
+            if (50..150).contains(&i) {
+                early_errors.push(error);
+            }
+            if i >= 400 {
+                late_errors.push(error);
+            }
+
+            model.train_one(&Sample::new(vec![x1, x2], target));
+        }
+
+        let early_rmse = (early_errors.iter().sum::<f64>() / early_errors.len() as f64).sqrt();
+        let late_rmse = (late_errors.iter().sum::<f64>() / late_errors.len() as f64).sqrt();
+
+        assert!(
+            late_rmse < early_rmse,
+            "RMSE should decrease: early={:.4}, late={:.4}",
+            early_rmse,
+            late_rmse
+        );
+    }
+
+    #[test]
+    fn train_batch_equivalent_to_sequential() {
+        let config = default_config();
+        let mut model_seq = SGBT::new(config.clone());
+        let mut model_batch = SGBT::new(config);
+
+        let samples: Vec<Sample> = (0..20)
+            .map(|i| {
+                let x = i as f64 * 0.5;
+                Sample::new(vec![x, x * 2.0], x * 3.0)
+            })
+            .collect();
+
+        for s in &samples {
+            model_seq.train_one(s);
+        }
+        model_batch.train_batch(&samples);
+
+        let pred_seq = model_seq.predict(&[1.0, 2.0]);
+        let pred_batch = model_batch.predict(&[1.0, 2.0]);
+
+        assert!(
+            (pred_seq - pred_batch).abs() < 1e-10,
+            "seq={}, batch={}",
+            pred_seq,
+            pred_batch
+        );
+    }
+
+    #[test]
+    fn reset_returns_to_initial() {
+        let mut model = SGBT::new(default_config());
+        for i in 0..100 {
+            model.train_one(&Sample::new(vec![1.0, 2.0], i as f64));
+        }
+        model.reset();
+        assert_eq!(model.n_samples_seen(), 0);
+        assert!(!model.is_initialized());
+        assert!(model.predict(&[1.0, 2.0]).abs() < 1e-12);
+    }
+
+    #[test]
+    fn base_prediction_initializes() {
+        let mut model = SGBT::new(default_config());
+        for i in 0..50 {
+            model.train_one(&Sample::new(vec![1.0], i as f64 + 100.0));
+        }
+        assert!(model.is_initialized());
+        let expected = (100.0 + 149.0) / 2.0;
+        assert!((model.base_prediction() - expected).abs() < 1.0);
+    }
+
+    #[test]
+    fn with_loss_uses_custom_loss() {
+        use crate::loss::logistic::LogisticLoss;
+        let model = SGBT::with_loss(default_config(), LogisticLoss);
+        let pred = model.predict_transformed(&[1.0, 2.0]);
+        assert!(
+            (pred - 0.5).abs() < 1e-6,
+            "sigmoid(0) should be 0.5, got {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn ewma_config_propagates_and_trains() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(3)
+            .n_bins(16)
+            .leaf_half_life(50)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 2.0], x * 3.0));
+        }
+
+        let pred = model.predict(&[1.0, 2.0]);
+        assert!(
+            pred.is_finite(),
+            "EWMA-enabled model should produce finite predictions, got {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn max_tree_samples_config_propagates() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(3)
+            .n_bins(16)
+            .max_tree_samples(200)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..500 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 2.0], x * 3.0));
+        }
+
+        let pred = model.predict(&[1.0, 2.0]);
+        assert!(
+            pred.is_finite(),
+            "max_tree_samples model should produce finite predictions, got {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn split_reeval_config_propagates() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(2)
+            .n_bins(16)
+            .split_reeval_interval(50)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        let mut rng: u64 = 12345;
+        for _ in 0..1000 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let x1 = (rng as f64 / u64::MAX as f64) * 10.0 - 5.0;
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let x2 = (rng as f64 / u64::MAX as f64) * 10.0 - 5.0;
+            let target = 2.0 * x1 + 3.0 * x2;
+            model.train_one(&Sample::new(vec![x1, x2], target));
+        }
+
+        let pred = model.predict(&[1.0, 2.0]);
+        assert!(
+            pred.is_finite(),
+            "split re-eval model should produce finite predictions, got {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn loss_accessor_works() {
+        use crate::loss::logistic::LogisticLoss;
+        let model = SGBT::with_loss(default_config(), LogisticLoss);
+        // Verify we can access the concrete loss type
+        let _loss: &LogisticLoss = model.loss();
+        assert_eq!(_loss.n_outputs(), 1);
+    }
+
+    #[test]
+    fn clone_produces_independent_copy() {
+        let config = default_config();
+        let mut model = SGBT::new(config);
+
+        // Train the original on some data
+        let mut rng: u64 = 99999;
+        for _ in 0..200 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let x = (rng as f64 / u64::MAX as f64) * 10.0 - 5.0;
+            let target = 2.0 * x + 1.0;
+            model.train_one(&Sample::new(vec![x], target));
+        }
+
+        // Clone the model
+        let mut cloned = model.clone();
+
+        // Both should produce identical predictions
+        let test_features = [3.0];
+        let pred_original = model.predict(&test_features);
+        let pred_cloned = cloned.predict(&test_features);
+        assert!(
+            (pred_original - pred_cloned).abs() < 1e-12,
+            "clone should predict identically: original={pred_original}, cloned={pred_cloned}"
+        );
+
+        // Train only the clone further -- models should diverge
+        for _ in 0..200 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let x = (rng as f64 / u64::MAX as f64) * 10.0 - 5.0;
+            let target = -3.0 * x + 5.0; // Different relationship
+            cloned.train_one(&Sample::new(vec![x], target));
+        }
+
+        let pred_original_after = model.predict(&test_features);
+        let pred_cloned_after = cloned.predict(&test_features);
+
+        // Original should be unchanged
+        assert!(
+            (pred_original - pred_original_after).abs() < 1e-12,
+            "original should be unchanged after training clone"
+        );
+
+        // Clone should have diverged
+        assert!(
+            (pred_original_after - pred_cloned_after).abs() > 1e-6,
+            "clone should diverge after independent training"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // predict_with_confidence returns finite values
+    // -------------------------------------------------------------------
+    #[test]
+    fn predict_with_confidence_finite() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        // Train enough to initialize
+        for i in 0..100 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(&[x, x * 2.0][..], x + 1.0));
+        }
+
+        let (pred, confidence) = model.predict_with_confidence(&[1.0, 2.0]);
+        assert!(pred.is_finite(), "prediction should be finite");
+        assert!(confidence.is_finite(), "confidence should be finite");
+        assert!(
+            confidence > 0.0,
+            "confidence should be positive after training"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // predict_with_confidence positive after training
+    // -------------------------------------------------------------------
+    #[test]
+    fn predict_with_confidence_positive_after_training() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        // Train enough to initialize and build structure
+        for i in 0..200 {
+            let x = i as f64 * 0.05;
+            model.train_one(&(&[x][..], x * 2.0));
+        }
+
+        let (pred, confidence) = model.predict_with_confidence(&[1.0]);
+
+        assert!(pred.is_finite(), "prediction should be finite");
+        assert!(
+            confidence > 0.0 && confidence.is_finite(),
+            "confidence should be finite and positive, got {}",
+            confidence,
+        );
+
+        // Multiple queries should give consistent confidence
+        let (pred2, conf2) = model.predict_with_confidence(&[1.0]);
+        assert!(
+            (pred - pred2).abs() < 1e-12,
+            "same input should give same prediction"
+        );
+        assert!(
+            (confidence - conf2).abs() < 1e-12,
+            "same input should give same confidence"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // predict_with_confidence agrees with predict on point estimate
+    // -------------------------------------------------------------------
+    #[test]
+    fn predict_with_confidence_matches_predict() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64 - 100.0) * 0.01;
+            model.train_one(&(&[x, x * x][..], x * 3.0 + 1.0));
+        }
+
+        let pred = model.predict(&[0.5, 0.25]);
+        let (conf_pred, _) = model.predict_with_confidence(&[0.5, 0.25]);
+
+        assert!(
+            (pred - conf_pred).abs() < 1e-10,
+            "prediction mismatch: predict()={} vs predict_with_confidence()={}",
+            pred,
+            conf_pred,
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // gradient clipping config round-trips through builder
+    // -------------------------------------------------------------------
+    #[test]
+    fn gradient_clip_config_builder() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .gradient_clip_sigma(3.0)
+            .build()
+            .unwrap();
+
+        assert_eq!(config.gradient_clip_sigma, Some(3.0));
+    }
+
+    // -------------------------------------------------------------------
+    // monotonic constraints config round-trips through builder
+    // -------------------------------------------------------------------
+    #[test]
+    fn monotone_constraints_config_builder() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .monotone_constraints(vec![1, -1, 0])
+            .build()
+            .unwrap();
+
+        assert_eq!(config.monotone_constraints, Some(vec![1, -1, 0]));
+    }
+
+    // -------------------------------------------------------------------
+    // monotonic constraints validation rejects invalid values
+    // -------------------------------------------------------------------
+    #[test]
+    fn monotone_constraints_invalid_value_rejected() {
+        let result = SGBTConfig::builder()
+            .n_steps(10)
+            .monotone_constraints(vec![1, 2, 0])
+            .build();
+
+        assert!(result.is_err(), "constraint value 2 should be rejected");
+    }
+
+    // -------------------------------------------------------------------
+    // gradient clipping validation rejects non-positive sigma
+    // -------------------------------------------------------------------
+    #[test]
+    fn gradient_clip_sigma_negative_rejected() {
+        let result = SGBTConfig::builder()
+            .n_steps(10)
+            .gradient_clip_sigma(-1.0)
+            .build();
+
+        assert!(result.is_err(), "negative sigma should be rejected");
+    }
+
+    // -------------------------------------------------------------------
+    // gradient clipping ensemble-level reduces outlier impact
+    // -------------------------------------------------------------------
+    #[test]
+    fn gradient_clipping_reduces_outlier_impact() {
+        // Without clipping
+        let config_no_clip = SGBTConfig::builder()
+            .n_steps(5)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model_no_clip = SGBT::new(config_no_clip);
+
+        // With clipping
+        let config_clip = SGBTConfig::builder()
+            .n_steps(5)
+            .grace_period(10)
+            .gradient_clip_sigma(3.0)
+            .build()
+            .unwrap();
+        let mut model_clip = SGBT::new(config_clip);
+
+        // Train both on identical normal data
+        for i in 0..100 {
+            let x = (i as f64) * 0.01;
+            let sample = (&[x][..], x * 2.0);
+            model_no_clip.train_one(&sample);
+            model_clip.train_one(&sample);
+        }
+
+        let pred_no_clip_before = model_no_clip.predict(&[0.5]);
+        let pred_clip_before = model_clip.predict(&[0.5]);
+
+        // Inject outlier
+        let outlier = (&[0.5_f64][..], 10000.0);
+        model_no_clip.train_one(&outlier);
+        model_clip.train_one(&outlier);
+
+        let pred_no_clip_after = model_no_clip.predict(&[0.5]);
+        let pred_clip_after = model_clip.predict(&[0.5]);
+
+        let delta_no_clip = (pred_no_clip_after - pred_no_clip_before).abs();
+        let delta_clip = (pred_clip_after - pred_clip_before).abs();
+
+        // Clipped model should be less affected by the outlier
+        assert!(
+            delta_clip <= delta_no_clip + 1e-10,
+            "clipped model should be less affected: delta_clip={}, delta_no_clip={}",
+            delta_clip,
+            delta_no_clip,
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // train_batch_with_callback fires at correct intervals
+    // -------------------------------------------------------------------
+    #[test]
+    fn train_batch_with_callback_fires() {
+        let config = SGBTConfig::builder()
+            .n_steps(3)
+            .grace_period(5)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        let data: Vec<(Vec<f64>, f64)> = (0..25)
+            .map(|i| (vec![i as f64 * 0.1], i as f64 * 0.5))
+            .collect();
+
+        let mut callbacks = Vec::new();
+        model.train_batch_with_callback(&data, 10, |n| {
+            callbacks.push(n);
+        });
+
+        // Should fire at 10, 20, and 25 (final)
+        assert_eq!(callbacks, vec![10, 20, 25]);
+    }
+
+    // -------------------------------------------------------------------
+    // train_batch_subsampled produces deterministic subset
+    // -------------------------------------------------------------------
+    #[test]
+    fn train_batch_subsampled_trains_subset() {
+        let config = SGBTConfig::builder()
+            .n_steps(3)
+            .grace_period(5)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        let data: Vec<(Vec<f64>, f64)> = (0..100)
+            .map(|i| (vec![i as f64 * 0.01], i as f64 * 0.1))
+            .collect();
+
+        // Train on only 20 of 100 samples
+        model.train_batch_subsampled(&data, 20);
+
+        // Model should have seen some samples
+        assert!(
+            model.n_samples_seen() > 0,
+            "model should have trained on subset"
+        );
+        assert!(
+            model.n_samples_seen() <= 20,
+            "model should have trained at most 20 samples, got {}",
+            model.n_samples_seen(),
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // train_batch_subsampled full dataset = train_batch
+    // -------------------------------------------------------------------
+    #[test]
+    fn train_batch_subsampled_full_equals_batch() {
+        let config1 = SGBTConfig::builder()
+            .n_steps(3)
+            .grace_period(5)
+            .build()
+            .unwrap();
+        let config2 = config1.clone();
+
+        let mut model1 = SGBT::new(config1);
+        let mut model2 = SGBT::new(config2);
+
+        let data: Vec<(Vec<f64>, f64)> = (0..50)
+            .map(|i| (vec![i as f64 * 0.1], i as f64 * 0.5))
+            .collect();
+
+        model1.train_batch(&data);
+        model2.train_batch_subsampled(&data, 1000); // max_samples > data.len()
+
+        // Both should have identical state
+        assert_eq!(model1.n_samples_seen(), model2.n_samples_seen());
+        let pred1 = model1.predict(&[2.5]);
+        let pred2 = model2.predict(&[2.5]);
+        assert!(
+            (pred1 - pred2).abs() < 1e-12,
+            "full subsample should equal batch: {} vs {}",
+            pred1,
+            pred2,
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // train_batch_subsampled_with_callback combines both
+    // -------------------------------------------------------------------
+    #[test]
+    fn train_batch_subsampled_with_callback_works() {
+        let config = SGBTConfig::builder()
+            .n_steps(3)
+            .grace_period(5)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        let data: Vec<(Vec<f64>, f64)> = (0..200)
+            .map(|i| (vec![i as f64 * 0.01], i as f64 * 0.1))
+            .collect();
+
+        let mut callbacks = Vec::new();
+        model.train_batch_subsampled_with_callback(&data, 50, 10, |n| {
+            callbacks.push(n);
+        });
+
+        // Should have trained ~50 samples with callbacks at 10, 20, 30, 40, 50
+        assert!(!callbacks.is_empty(), "should have received callbacks");
+        assert_eq!(
+            *callbacks.last().unwrap(),
+            50,
+            "final callback should be total samples"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Linear leaf model integration tests
+    // ---------------------------------------------------------------
+
+    /// xorshift64 PRNG for deterministic test data.
+    fn xorshift64(state: &mut u64) -> u64 {
+        let mut s = *state;
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        *state = s;
+        s
+    }
+
+    fn rand_f64(state: &mut u64) -> f64 {
+        xorshift64(state) as f64 / u64::MAX as f64
+    }
+
+    fn linear_leaves_config() -> SGBTConfig {
+        SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(2) // low depth -- linear leaves should shine
+            .n_bins(16)
+            .leaf_model_type(crate::tree::leaf_model::LeafModelType::Linear {
+                learning_rate: 0.1,
+                decay: None,
+                use_adagrad: false,
+            })
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn linear_leaves_trains_without_panic() {
+        let mut model = SGBT::new(linear_leaves_config());
+        let mut rng = 42u64;
+        for _ in 0..200 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            model.train_one(&Sample::new(vec![x1, x2], y));
+        }
+        assert_eq!(model.n_samples_seen(), 200);
+    }
+
+    #[test]
+    fn linear_leaves_prediction_finite() {
+        let mut model = SGBT::new(linear_leaves_config());
+        let mut rng = 42u64;
+        for _ in 0..200 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            model.train_one(&Sample::new(vec![x1, x2], y));
+        }
+        let pred = model.predict(&[0.5, -0.3]);
+        assert!(pred.is_finite(), "prediction should be finite, got {pred}");
+    }
+
+    #[test]
+    fn linear_leaves_learns_linear_target() {
+        let mut model = SGBT::new(linear_leaves_config());
+        let mut rng = 42u64;
+        for _ in 0..500 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            model.train_one(&Sample::new(vec![x1, x2], y));
+        }
+
+        // Test on a few points -- should be reasonably close for a linear target.
+        let mut total_error = 0.0;
+        for _ in 0..50 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            let pred = model.predict(&[x1, x2]);
+            total_error += (pred - y).powi(2);
+        }
+        let mse = total_error / 50.0;
+        assert!(
+            mse < 5.0,
+            "linear leaves MSE on linear target should be < 5.0, got {mse}"
+        );
+    }
+
+    #[test]
+    fn linear_leaves_better_than_constant_at_low_depth() {
+        // Train two models on a linear target at depth 2:
+        // one with constant leaves, one with linear leaves.
+        let constant_config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(2)
+            .n_bins(16)
+            .seed(0xDEAD)
+            .build()
+            .unwrap();
+        let linear_config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(2)
+            .n_bins(16)
+            .seed(0xDEAD)
+            .leaf_model_type(crate::tree::leaf_model::LeafModelType::Linear {
+                learning_rate: 0.1,
+                decay: None,
+                use_adagrad: false,
+            })
+            .build()
+            .unwrap();
+
+        let mut constant_model = SGBT::new(constant_config);
+        let mut linear_model = SGBT::new(linear_config);
+        let mut rng = 42u64;
+
+        for _ in 0..500 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            let sample = Sample::new(vec![x1, x2], y);
+            constant_model.train_one(&sample);
+            linear_model.train_one(&sample);
+        }
+
+        // Evaluate both on test set.
+        let mut constant_mse = 0.0;
+        let mut linear_mse = 0.0;
+        for _ in 0..100 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            constant_mse += (constant_model.predict(&[x1, x2]) - y).powi(2);
+            linear_mse += (linear_model.predict(&[x1, x2]) - y).powi(2);
+        }
+        constant_mse /= 100.0;
+        linear_mse /= 100.0;
+
+        // Linear leaves should outperform constant leaves on a linear target.
+        assert!(
+            linear_mse < constant_mse,
+            "linear leaves MSE ({linear_mse:.4}) should be less than constant ({constant_mse:.4})"
+        );
+    }
+
+    #[test]
+    fn adaptive_leaves_trains_without_panic() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(3)
+            .n_bins(16)
+            .leaf_model_type(crate::tree::leaf_model::LeafModelType::Adaptive {
+                promote_to: Box::new(crate::tree::leaf_model::LeafModelType::Linear {
+                    learning_rate: 0.1,
+                    decay: None,
+                    use_adagrad: false,
+                }),
+            })
+            .build()
+            .unwrap();
+
+        let mut model = SGBT::new(config);
+        let mut rng = 42u64;
+        for _ in 0..500 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            model.train_one(&Sample::new(vec![x1, x2], y));
+        }
+        let pred = model.predict(&[0.5, -0.3]);
+        assert!(
+            pred.is_finite(),
+            "adaptive leaf prediction should be finite, got {pred}"
+        );
+    }
+
+    #[test]
+    fn linear_leaves_with_decay_trains_without_panic() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(3)
+            .n_bins(16)
+            .leaf_model_type(crate::tree::leaf_model::LeafModelType::Linear {
+                learning_rate: 0.1,
+                decay: Some(0.995),
+                use_adagrad: false,
+            })
+            .build()
+            .unwrap();
+
+        let mut model = SGBT::new(config);
+        let mut rng = 42u64;
+        for _ in 0..500 {
+            let x1 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let x2 = rand_f64(&mut rng) * 2.0 - 1.0;
+            let y = 3.0 * x1 + 2.0 * x2 + 1.0;
+            model.train_one(&Sample::new(vec![x1, x2], y));
+        }
+        let pred = model.predict(&[0.5, -0.3]);
+        assert!(
+            pred.is_finite(),
+            "decay leaf prediction should be finite, got {pred}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // predict_smooth returns finite values
+    // -------------------------------------------------------------------
+    #[test]
+    fn predict_smooth_returns_finite() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x.sin()], 2.0 * x + 1.0));
+        }
+
+        let pred_hard = model.predict(&[1.0, 1.0_f64.sin()]);
+        let pred_smooth = model.predict_smooth(&[1.0, 1.0_f64.sin()], 0.5);
+
+        assert!(pred_hard.is_finite(), "hard prediction should be finite");
+        assert!(
+            pred_smooth.is_finite(),
+            "smooth prediction should be finite"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // predict_smooth converges to hard predict at small bandwidth
+    // -------------------------------------------------------------------
+    #[test]
+    fn predict_smooth_converges_to_hard_at_small_bandwidth() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..300 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 0.5], 2.0 * x + 1.0));
+        }
+
+        let features = [5.0, 2.5];
+        let hard = model.predict(&features);
+        let smooth = model.predict_smooth(&features, 0.001);
+
+        assert!(
+            (hard - smooth).abs() < 0.5,
+            "smooth with tiny bandwidth should approximate hard: hard={}, smooth={}",
+            hard,
+            smooth,
+        );
+    }
+
+    #[test]
+    fn auto_bandwidth_computed_after_training() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        // Before training, no bandwidths
+        assert!(model.auto_bandwidths().is_empty());
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 0.5], 2.0 * x + 1.0));
+        }
+
+        // After training, auto_bandwidths should be populated
+        let bws = model.auto_bandwidths();
+        assert_eq!(bws.len(), 2, "should have 2 feature bandwidths");
+
+        // predict() always uses smooth routing with auto-bandwidths
+        let pred = model.predict(&[5.0, 2.5]);
+        assert!(
+            pred.is_finite(),
+            "auto-bandwidth predict should be finite: {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn predict_interpolated_returns_finite() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.01)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x.sin()], x.cos()));
+        }
+
+        let pred = model.predict_interpolated(&[1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "interpolated prediction should be finite: {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn predict_sibling_interpolated_varies_with_features() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(6)
+            .delta(0.1)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..2000 {
+            let x = (i as f64) * 0.01;
+            let y = x.sin() * x + 0.5 * (x * 2.0).cos();
+            model.train_one(&Sample::new(vec![x, x * 0.3], y));
+        }
+
+        // Verify the method is callable and produces finite predictions
+        let pred = model.predict_sibling_interpolated(&[5.0, 1.5]);
+        assert!(pred.is_finite(), "sibling interpolated should be finite");
+
+        // If bandwidths are finite, verify sibling produces at least as much
+        // variation as hard routing across a feature sweep
+        let bws = model.auto_bandwidths();
+        if bws.iter().any(|&b| b.is_finite()) {
+            let hard: Vec<f64> = (0..200)
+                .map(|i| model.predict(&[i as f64 * 0.1, i as f64 * 0.03]))
+                .collect();
+            let sib: Vec<f64> = (0..200)
+                .map(|i| model.predict_sibling_interpolated(&[i as f64 * 0.1, i as f64 * 0.03]))
+                .collect();
+            let hc = hard
+                .windows(2)
+                .filter(|w| (w[0] - w[1]).abs() > f64::EPSILON)
+                .count();
+            let sc = sib
+                .windows(2)
+                .filter(|w| (w[0] - w[1]).abs() > f64::EPSILON)
+                .count();
+            assert!(
+                sc >= hc,
+                "sibling should produce >= hard changes: sib={}, hard={}",
+                sc,
+                hc
+            );
+        }
+    }
+
+    #[test]
+    fn predict_graduated_returns_finite() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.01)
+            .max_tree_samples(200)
+            .shadow_warmup(50)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..300 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x.sin()], x.cos()));
+        }
+
+        let pred = model.predict_graduated(&[1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "graduated prediction should be finite: {}",
+            pred
+        );
+
+        let pred2 = model.predict_graduated_sibling_interpolated(&[1.0, 0.5]);
+        assert!(
+            pred2.is_finite(),
+            "graduated+sibling prediction should be finite: {}",
+            pred2
+        );
+    }
+
+    #[test]
+    fn shadow_warmup_validation() {
+        let result = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.01)
+            .shadow_warmup(0)
+            .build();
+        assert!(result.is_err(), "shadow_warmup=0 should fail validation");
+    }
+}
