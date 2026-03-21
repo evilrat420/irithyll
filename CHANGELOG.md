@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.1] - 2026-03-21
+
+### Added
+
+- **Airlines + Covertype benchmarks** -- prequential evaluation on 3 real datasets:
+  - Electricity (45K, binary, concept drift) -- existing
+  - Airlines (539K, binary, large scale flight delay prediction)
+  - Covertype (581K, 7-class forest cover type, high dimensionality)
+- **Multi-class prequential evaluation** using `MulticlassSGBT` with per-class confusion
+  matrix, multi-class Cohen's Kappa, and macro-F1.
+- **Learning curve CSV output** -- checkpoint-level accuracy/kappa/F1 written to
+  `datasets/results/` for each dataset, enabling accuracy-over-time plots.
+- **Memory tracking** -- peak memory estimates reported in benchmark output.
+- **Dataset download script** -- `datasets/download.py` fetches Airlines and Covertype
+  from standard ML repositories.
+- Comparison scripts extended for all 3 datasets (River, XGBoost, LightGBM).
+- `comparison/collect_results.py` generates unified multi-dataset BENCHMARKS.md.
+
 ## [8.2.0] - 2026-03-21
 
 ### Added
