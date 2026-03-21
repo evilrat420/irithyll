@@ -5,6 +5,10 @@
 //! but can produce poor splits when data is heavily skewed. Serves as the
 //! baseline strategy and fallback when quantile/k-means binning is unnecessary.
 
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::histogram::{BinEdges, BinningStrategy};
 
 /// Equal-width binning: observes min/max, divides range into equal bins.

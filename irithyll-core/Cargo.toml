@@ -1,9 +1,9 @@
 [package]
 name = "irithyll-core"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Core types and inference engine for irithyll streaming ML — no_std, loss functions, observation trait, f32 + int16 packed formats, branch-free traversal"
+description = "Core types, training engine, and inference for irithyll streaming ML — no_std + alloc, histogram binning, Hoeffding trees, SGBT ensembles, drift detection, f32 + int16 packed formats"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/evilrat420/irithyll"
 keywords = ["machine-learning", "inference", "no-std", "embedded", "decision-trees"]
@@ -14,10 +14,14 @@ default = []
 alloc = []
 std = ["alloc"]
 serde = ["dep:serde", "serde/alloc"]
+kmeans-binning = ["alloc"]
+parallel = ["dep:rayon", "alloc"]
+simd = ["std"]
 embedded-bench = ["dep:cortex-m-rt", "dep:cortex-m-semihosting", "dep:panic-halt"]
 
 [dependencies]
 libm = "0.2"
+rayon = { version = "1.10", optional = true }
 serde = { version = "1.0", features = ["derive"], optional = true, default-features = false }
 cortex-m-rt = { version = "0.7", optional = true }
 cortex-m-semihosting = { version = "0.5", optional = true }
@@ -30,6 +34,9 @@ required-features = ["embedded-bench"]
 [[example]]
 name = "cortex_m_hello"
 required-features = ["embedded-bench"]
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("_serde_support", "_stacked_tests_disabled", "_packed_cache_tests_disabled"))'] }
 
 [package.metadata.docs.rs]
 features = ["alloc", "std", "serde"]

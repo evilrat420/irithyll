@@ -3,7 +3,7 @@ members = [".", "irithyll-python", "irithyll-core"]
 
 [package]
 name = "irithyll"
-version = "8.2.2"
+version = "8.2.3"
 edition = "2021"
 rust-version = "1.75"
 description = "Streaming machine learning in Rust -- gradient boosted trees, kernel methods, linear models, and composable pipelines"
@@ -24,7 +24,7 @@ serde_json = { version = "1.0", optional = true }
 bincode = { version = "2", features = ["serde"], optional = true }
 thiserror = "2.0"
 tracing = "0.1"
-irithyll-core = { path = "irithyll-core", version = "0.4.0", features = ["std"] }
+irithyll-core = { path = "irithyll-core", version = "0.5.0", features = ["std", "serde"] }
 
 # Optional acceleration dependencies (activated via feature flags)
 rayon = { version = "1.10", optional = true }
@@ -46,9 +46,9 @@ tokio = { version = "1", features = ["full"] }
 default = ["serde-json"]
 serde-json = ["dep:serde_json", "irithyll-core/serde"]
 serde-bincode = ["dep:bincode", "irithyll-core/serde"]
-kmeans-binning = []
-simd = []
-parallel = ["dep:rayon"]
+kmeans-binning = ["irithyll-core/kmeans-binning"]
+simd = ["irithyll-core/simd"]
+parallel = ["dep:rayon", "irithyll-core/parallel"]
 arrow = ["dep:arrow"]
 parquet = ["dep:parquet", "arrow"]
 onnx = ["dep:prost"]

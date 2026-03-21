@@ -9,6 +9,10 @@
 //! **Per-insert time:** O(log(1/epsilon) + (1/epsilon)) amortized (binary search + compress)
 //! **Query time:** O(1/epsilon) (linear scan of summary)
 
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::histogram::{BinEdges, BinningStrategy};
 
 /// A single entry in the GK summary.
@@ -86,13 +90,13 @@ impl QuantileBinning {
     /// (except the first and last).
     #[inline]
     fn band_width(&self) -> u64 {
-        (2.0 * self.epsilon * self.count as f64).floor() as u64
+        libm::floor(2.0 * self.epsilon * self.count as f64) as u64
     }
 
     /// How often to trigger compression: every floor(1 / (2 * epsilon)) inserts.
     #[inline]
     fn compress_interval(&self) -> u64 {
-        (1.0 / (2.0 * self.epsilon)).floor() as u64
+        libm::floor(1.0 / (2.0 * self.epsilon)) as u64
     }
 
     /// Insert a value into the summary.
@@ -191,8 +195,8 @@ impl QuantileBinning {
         // Clamp phi to [0, 1].
         let phi = phi.clamp(0.0, 1.0);
 
-        let target_rank = (phi * self.count as f64).ceil() as u64;
-        let tolerance = (self.epsilon * self.count as f64).floor() as u64;
+        let target_rank = libm::ceil(phi * self.count as f64) as u64;
+        let tolerance = libm::floor(self.epsilon * self.count as f64) as u64;
 
         // Walk through summary, tracking cumulative rank (sum of gaps).
         let mut rank: u64 = 0;

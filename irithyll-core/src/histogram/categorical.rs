@@ -13,6 +13,9 @@
 //! Supports up to 64 distinct category values per feature (matching the `u64`
 //! bitmask used for categorical split routing in the tree arena).
 
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
 use super::{BinEdges, BinningStrategy};
 
 /// Maximum number of distinct categories supported per feature.

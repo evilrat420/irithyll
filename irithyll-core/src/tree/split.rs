@@ -4,6 +4,9 @@
 //! gradient/hessian sums. The primary implementation is [`XGBoostGain`],
 //! which uses the exact gain formula from Chen & Guestrin (2016).
 
+#[cfg(test)]
+use alloc::vec::Vec;
+
 /// Result of evaluating potential splits across histogram bins.
 #[derive(Debug, Clone, Copy)]
 pub struct SplitCandidate {

@@ -18,9 +18,14 @@
 //! 5. When splitting, use the histogram subtraction trick to initialize one
 //!    child's histograms for free.
 
-use crate::ensemble::config::FeatureType;
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use crate::feature::FeatureType;
 use crate::histogram::bins::LeafHistograms;
 use crate::histogram::{BinEdges, BinnerKind};
+use crate::math;
 use crate::tree::builder::TreeConfig;
 use crate::tree::leaf_model::{LeafModel, LeafModelType};
 use crate::tree::node::{NodeId, TreeArena};
@@ -141,7 +146,7 @@ fn clip_gradient(state: &mut LeafState, gradient: f64, sigma: f64) -> f64 {
     }
 
     let variance = state.clip_grad_m2 / (n - 1.0);
-    let std_dev = variance.sqrt();
+    let std_dev = math::sqrt(variance);
 
     if std_dev < 1e-15 {
         return gradient; // All gradients identical -- no clipping needed
@@ -197,10 +202,10 @@ fn adaptive_bound(state: &LeafState, k: f64, decay_alpha: Option<f64>) -> f64 {
         // Welford: variance = M2 / (n - 1)
         state.output_m2 / (state.output_count as f64 - 1.0)
     };
-    let std = variance.sqrt();
+    let std = math::sqrt(variance);
 
     // Bound = |mean| + k * std, floor at 0.01 to never fully suppress a leaf
-    (state.output_mean.abs() + k * std).max(0.01)
+    (math::abs(state.output_mean) + k * std).max(0.01)
 }
 
 /// Create binners according to feature types.
@@ -783,7 +788,7 @@ impl HoeffdingTree {
         // Continuous split: sigmoid blending for smooth transition around the threshold
         let threshold = self.arena.get_threshold(node);
         let z = (threshold - features[feat_idx]) / bandwidth;
-        let alpha = 1.0 / (1.0 + (-z).exp());
+        let alpha = 1.0 / (1.0 + math::exp(-z));
 
         let left_pred = self.predict_smooth_recursive(left, features, bandwidth);
         let right_pred = self.predict_smooth_recursive(right, features, bandwidth);
@@ -830,7 +835,7 @@ impl HoeffdingTree {
 
         // Sigmoid-blended soft routing with per-feature bandwidth
         let z = (threshold - features[feat_idx]) / bw;
-        let alpha = 1.0 / (1.0 + (-z).exp());
+        let alpha = 1.0 / (1.0 + math::exp(-z));
 
         let left_pred = self.predict_smooth_auto_recursive(left, features, bandwidths);
         let right_pred = self.predict_smooth_auto_recursive(right, features, bandwidths);
@@ -852,7 +857,8 @@ impl HoeffdingTree {
             self.feature_mask.extend(0..n_features);
         } else {
             let target_count =
-                ((n_features as f64) * self.config.feature_subsample_rate).ceil() as usize;
+                crate::math::ceil((n_features as f64) * self.config.feature_subsample_rate)
+                    as usize;
             let target_count = target_count.max(1).min(n_features);
 
             // Prepare the bitset: one bit per feature, O(1) membership test.
@@ -992,7 +998,7 @@ impl HoeffdingTree {
 
                 // Build (bin_index, ratio) pairs, filtering out empty bins
                 let mut bin_order: Vec<usize> = (0..n_bins)
-                    .filter(|&i| hist.hess_sums[i].abs() > 1e-15)
+                    .filter(|&i| math::abs(hist.hess_sums[i]) > 1e-15)
                     .collect();
 
                 if bin_order.len() < 2 {
@@ -1005,7 +1011,7 @@ impl HoeffdingTree {
                     let ratio_b = hist.grad_sums[b] / hist.hess_sums[b];
                     ratio_a
                         .partial_cmp(&ratio_b)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .unwrap_or(core::cmp::Ordering::Equal)
                 });
 
                 // Reorder grad/hess sums according to Fisher order
@@ -1074,7 +1080,7 @@ impl HoeffdingTree {
         candidates.sort_by(|a, b| {
             b.1.gain
                 .partial_cmp(&a.1.gain)
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .unwrap_or(core::cmp::Ordering::Equal)
         });
 
         let best_gain = candidates[0].1.gain;
@@ -1096,8 +1102,8 @@ impl HoeffdingTree {
             Some(alpha) => n.min(1.0 / (1.0 - alpha)),
             None => n,
         };
-        let ln_inv_delta = (1.0 / self.config.delta).ln();
-        let epsilon = (r_squared * ln_inv_delta / (2.0 * effective_n)).sqrt();
+        let ln_inv_delta = math::ln(1.0 / self.config.delta);
+        let epsilon = math::sqrt(r_squared * ln_inv_delta / (2.0 * effective_n));
 
         // Split condition: the best is significantly better than second-best,
         // OR the bound is already so tight that more samples won't help.

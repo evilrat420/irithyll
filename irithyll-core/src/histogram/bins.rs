@@ -5,6 +5,9 @@
 //! keeps each statistic contiguous in memory for cache-friendly sequential scans
 //! during split evaluation.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use crate::histogram::BinEdges;
 
 /// Histogram for a single feature: accumulates grad/hess/count per bin.

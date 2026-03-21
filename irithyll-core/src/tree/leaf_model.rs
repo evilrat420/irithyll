@@ -41,6 +41,12 @@
 //! (the tree's existing `delta` parameter) confirms the shadow model is
 //! statistically superior, the leaf promotes -- no arbitrary thresholds.
 
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::vec::Vec;
+
+use crate::math;
+
 /// A trainable prediction model that lives inside a decision tree leaf.
 ///
 /// Implementations must be `Send + Sync` so trees can be shared across threads.
@@ -197,18 +203,18 @@ impl LeafModel for LinearLeafModel {
         }
 
         // Newton-scaled base learning rate.
-        let base_lr = self.learning_rate / (hessian.abs() + lambda);
+        let base_lr = self.learning_rate / (math::abs(hessian) + lambda);
 
         if self.use_adagrad {
             // AdaGrad: per-weight adaptive learning rates.
             for (i, (w, x)) in self.weights.iter_mut().zip(features.iter()).enumerate() {
                 let g = gradient * x;
                 self.sq_grad_accum[i] += g * g;
-                let adaptive_lr = base_lr / (self.sq_grad_accum[i].sqrt() + ADAGRAD_EPS);
+                let adaptive_lr = base_lr / (math::sqrt(self.sq_grad_accum[i]) + ADAGRAD_EPS);
                 *w -= adaptive_lr * g;
             }
             self.sq_bias_accum += gradient * gradient;
-            let bias_lr = base_lr / (self.sq_bias_accum.sqrt() + ADAGRAD_EPS);
+            let bias_lr = base_lr / (math::sqrt(self.sq_bias_accum) + ADAGRAD_EPS);
             self.bias -= bias_lr * gradient;
         } else {
             // Plain Newton-scaled SGD.
@@ -417,7 +423,7 @@ impl LeafModel for MLPLeafModel {
         // Forward pass (stores activations for backprop)
         let _output = self.forward(features);
 
-        let effective_lr = self.learning_rate / (hessian.abs() + lambda);
+        let effective_lr = self.learning_rate / (math::abs(hessian) + lambda);
 
         // Backprop: output gradient is the incoming `gradient` (chain rule from loss)
         let d_output = gradient;
@@ -578,7 +584,7 @@ impl LeafModel for AdaptiveLeafModel {
         self.n += 1;
 
         // Track range for the Hoeffding bound.
-        let abs_diff = diff.abs();
+        let abs_diff = math::abs(diff);
         if abs_diff > self.max_loss_diff {
             self.max_loss_diff = abs_diff;
         }
@@ -594,13 +600,13 @@ impl LeafModel for AdaptiveLeafModel {
             let mean_advantage = self.cumulative_advantage / self.n as f64;
             if mean_advantage > 0.0 {
                 let r_squared = self.max_loss_diff * self.max_loss_diff;
-                let ln_inv_delta = (1.0 / self.delta).ln();
-                let epsilon = (r_squared * ln_inv_delta / (2.0 * self.n as f64)).sqrt();
+                let ln_inv_delta = math::ln(1.0 / self.delta);
+                let epsilon = math::sqrt(r_squared * ln_inv_delta / (2.0 * self.n as f64));
 
                 if mean_advantage > epsilon {
                     // Promote: swap shadow into active, drop the old active.
                     self.promoted = true;
-                    std::mem::swap(&mut self.active, &mut self.shadow);
+                    core::mem::swap(&mut self.active, &mut self.shadow);
                 }
             }
         }
@@ -645,7 +651,8 @@ unsafe impl Sync for AdaptiveLeafModel {}
 /// - **`Adaptive`** -- Starts as closed-form, auto-promotes to `promote_to`
 ///   when the Hoeffding bound confirms it is statistically superior. Uses the
 ///   tree's existing `delta` parameter -- no arbitrary thresholds.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum LeafModelType {
     /// Standard closed-form leaf weight.
     #[default]
@@ -661,9 +668,9 @@ pub enum LeafModelType {
     /// (default), all weights share a single Newton-scaled learning rate.
     Linear {
         learning_rate: f64,
-        #[serde(default)]
+        #[cfg_attr(feature = "serde", serde(default))]
         decay: Option<f64>,
-        #[serde(default)]
+        #[cfg_attr(feature = "serde", serde(default))]
         use_adagrad: bool,
     },
 
@@ -673,7 +680,7 @@ pub enum LeafModelType {
     MLP {
         hidden_size: usize,
         learning_rate: f64,
-        #[serde(default)]
+        #[cfg_attr(feature = "serde", serde(default))]
         decay: Option<f64>,
     },
 

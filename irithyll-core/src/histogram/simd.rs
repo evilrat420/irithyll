@@ -7,6 +7,9 @@
 //! All public functions are safe; `unsafe` is confined to internal intrinsic
 //! calls behind `#[target_feature]` gates.
 
+#[cfg(target_arch = "x86_64")]
+use std::is_x86_feature_detected;
+
 // ---------------------------------------------------------------------------
 // subtract_f64
 // ---------------------------------------------------------------------------
@@ -57,7 +60,7 @@ fn subtract_f64_scalar(a: &[f64], b: &[f64], out: &mut [f64]) {
 #[target_feature(enable = "avx2")]
 unsafe fn subtract_f64_avx2(a: &[f64], b: &[f64], out: &mut [f64]) {
     #[cfg(target_arch = "x86_64")]
-    use std::arch::x86_64::*;
+    use core::arch::x86_64::*;
 
     let len = a.len();
     let chunks = len / 4;
@@ -69,17 +72,24 @@ unsafe fn subtract_f64_avx2(a: &[f64], b: &[f64], out: &mut [f64]) {
 
     for i in 0..chunks {
         let offset = i * 4;
-        let va = _mm256_loadu_pd(a_ptr.add(offset));
-        let vb = _mm256_loadu_pd(b_ptr.add(offset));
-        let vr = _mm256_sub_pd(va, vb);
-        _mm256_storeu_pd(out_ptr.add(offset), vr);
+        // SAFETY: offset is within bounds (checked by caller's assert_eq on lengths),
+        // and AVX2 availability was verified by the caller.
+        unsafe {
+            let va = _mm256_loadu_pd(a_ptr.add(offset));
+            let vb = _mm256_loadu_pd(b_ptr.add(offset));
+            let vr = _mm256_sub_pd(va, vb);
+            _mm256_storeu_pd(out_ptr.add(offset), vr);
+        }
     }
 
     // Scalar tail for remaining elements.
     let tail_start = chunks * 4;
     for i in 0..remainder {
         let idx = tail_start + i;
-        *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
+        // SAFETY: idx is within bounds of the slices.
+        unsafe {
+            *out_ptr.add(idx) = *a_ptr.add(idx) - *b_ptr.add(idx);
+        }
     }
 }
 
@@ -113,39 +123,43 @@ fn sum_f64_scalar(slice: &[f64]) -> f64 {
 #[target_feature(enable = "avx2")]
 unsafe fn sum_f64_avx2(slice: &[f64]) -> f64 {
     #[cfg(target_arch = "x86_64")]
-    use std::arch::x86_64::*;
+    use core::arch::x86_64::*;
 
     let len = slice.len();
     let chunks = len / 4;
     let remainder = len % 4;
     let ptr = slice.as_ptr();
 
-    let mut acc = _mm256_setzero_pd();
+    // SAFETY: AVX2 availability was verified by the caller. All pointer
+    // arithmetic stays within the slice bounds.
+    unsafe {
+        let mut acc = _mm256_setzero_pd();
 
-    for i in 0..chunks {
-        let offset = i * 4;
-        let v = _mm256_loadu_pd(ptr.add(offset));
-        acc = _mm256_add_pd(acc, v);
+        for i in 0..chunks {
+            let offset = i * 4;
+            let v = _mm256_loadu_pd(ptr.add(offset));
+            acc = _mm256_add_pd(acc, v);
+        }
+
+        // Horizontal reduce: acc = [a0, a1, a2, a3]
+        // Extract high 128 bits and add to low 128 bits.
+        let hi128 = _mm256_extractf128_pd(acc, 1); // [a2, a3]
+        let lo128 = _mm256_castpd256_pd128(acc); // [a0, a1]
+        let sum128 = _mm_add_pd(lo128, hi128); // [a0+a2, a1+a3]
+
+        // Final horizontal add of the two f64 lanes.
+        let shuf = _mm_unpackhi_pd(sum128, sum128); // [a1+a3, a1+a3]
+        let total = _mm_add_sd(sum128, shuf); // low lane = a0+a1+a2+a3
+        let mut result: f64 = _mm_cvtsd_f64(total);
+
+        // Scalar tail.
+        let tail_start = chunks * 4;
+        for i in 0..remainder {
+            result += *ptr.add(tail_start + i);
+        }
+
+        result
     }
-
-    // Horizontal reduce: acc = [a0, a1, a2, a3]
-    // Extract high 128 bits and add to low 128 bits.
-    let hi128 = _mm256_extractf128_pd(acc, 1); // [a2, a3]
-    let lo128 = _mm256_castpd256_pd128(acc); // [a0, a1]
-    let sum128 = _mm_add_pd(lo128, hi128); // [a0+a2, a1+a3]
-
-    // Final horizontal add of the two f64 lanes.
-    let shuf = _mm_unpackhi_pd(sum128, sum128); // [a1+a3, a1+a3]
-    let total = _mm_add_sd(sum128, shuf); // low lane = a0+a1+a2+a3
-    let mut result: f64 = _mm_cvtsd_f64(total);
-
-    // Scalar tail.
-    let tail_start = chunks * 4;
-    for i in 0..remainder {
-        result += *ptr.add(tail_start + i);
-    }
-
-    result
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +198,8 @@ pub fn subtract_u64(a: &[u64], b: &[u64], out: &mut [u64]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     // -----------------------------------------------------------------------
     // subtract_f64 tests

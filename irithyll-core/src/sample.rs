@@ -125,6 +125,88 @@ impl Observation for (&alloc::vec::Vec<f64>, f64) {
 }
 
 // ---------------------------------------------------------------------------
+// Sample -- owned observation (requires alloc)
+// ---------------------------------------------------------------------------
+
+/// A single owned observation with feature vector and target value.
+///
+/// For regression, `target` is the continuous value to predict.
+/// For binary classification, `target` is 0.0 or 1.0.
+/// For multi-class, `target` is the class index as f64 (0.0, 1.0, 2.0, ...).
+#[cfg(feature = "alloc")]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Sample {
+    /// Feature values for this observation.
+    pub features: alloc::vec::Vec<f64>,
+    /// Target value (regression) or class label (classification).
+    pub target: f64,
+    /// Optional sample weight (default 1.0).
+    pub weight: f64,
+}
+
+#[cfg(feature = "alloc")]
+impl Sample {
+    /// Create a new sample with unit weight.
+    #[inline]
+    pub fn new(features: alloc::vec::Vec<f64>, target: f64) -> Self {
+        Self {
+            features,
+            target,
+            weight: 1.0,
+        }
+    }
+
+    /// Create a new sample with explicit weight.
+    #[inline]
+    pub fn weighted(features: alloc::vec::Vec<f64>, target: f64, weight: f64) -> Self {
+        Self {
+            features,
+            target,
+            weight,
+        }
+    }
+
+    /// Number of features in this sample.
+    #[inline]
+    pub fn n_features(&self) -> usize {
+        self.features.len()
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Observation for Sample {
+    #[inline]
+    fn features(&self) -> &[f64] {
+        &self.features
+    }
+    #[inline]
+    fn target(&self) -> f64 {
+        self.target
+    }
+    #[inline]
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl Observation for &Sample {
+    #[inline]
+    fn features(&self) -> &[f64] {
+        &self.features
+    }
+    #[inline]
+    fn target(&self) -> f64 {
+        self.target
+    }
+    #[inline]
+    fn weight(&self) -> f64 {
+        self.weight
+    }
+}
+
+// ---------------------------------------------------------------------------
 // From impls -- conversion convenience
 // ---------------------------------------------------------------------------
 
