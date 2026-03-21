@@ -108,6 +108,13 @@ pub struct TreeConfig {
     /// in feedback loops. `None` (default) means no clamping.
     pub max_leaf_output: Option<f64>,
 
+    /// Per-leaf adaptive output bound (sigma multiplier).
+    ///
+    /// When `Some(k)`, each leaf tracks EWMA of its own output weight and
+    /// clamps predictions to `|output_mean| + k * output_std`.
+    /// `None` (default) disables adaptive bounds.
+    pub adaptive_leaf_bound: Option<f64>,
+
     /// Minimum hessian sum before a leaf produces non-zero output.
     ///
     /// When `Some(min_h)`, leaves with `hess_sum < min_h` return 0.0.
@@ -148,6 +155,7 @@ impl Default for TreeConfig {
             gradient_clip_sigma: None,
             monotone_constraints: None,
             max_leaf_output: None,
+            adaptive_leaf_bound: None,
             min_hessian_sum: None,
             leaf_model_type: LeafModelType::default(),
         }
@@ -300,6 +308,13 @@ impl TreeConfig {
     #[inline]
     pub fn max_leaf_output_opt(mut self, max: Option<f64>) -> Self {
         self.max_leaf_output = max;
+        self
+    }
+
+    /// Optionally set per-leaf adaptive output bound.
+    #[inline]
+    pub fn adaptive_leaf_bound_opt(mut self, k: Option<f64>) -> Self {
+        self.adaptive_leaf_bound = k;
         self
     }
 

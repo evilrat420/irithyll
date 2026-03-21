@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.2] - 2026-03-21
+
+### Added
+
+- **Per-leaf adaptive output bounds** -- `adaptive_leaf_bound` config option. Each leaf
+  tracks EWMA of its own output weight and clamps predictions to `|mean| + k * std`.
+  Synchronized with `leaf_decay_alpha` when `leaf_half_life` is set, Welford online
+  otherwise. Warmup (10 samples) falls back to `max_leaf_output` if set.
+  - New config field: `SGBTConfig::adaptive_leaf_bound: Option<f64>`
+  - New builder method: `.adaptive_leaf_bound(k)`
+  - 9 new tests covering warmup, clamping, EWMA adaptation, and backward compat.
+
 ## [8.2.1] - 2026-03-21
 
 ### Added

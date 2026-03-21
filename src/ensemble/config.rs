@@ -372,6 +372,21 @@ pub struct SGBTConfig {
     #[serde(default)]
     pub max_leaf_output: Option<f64>,
 
+    /// Per-leaf adaptive output bound (sigma multiplier).
+    ///
+    /// When `Some(k)`, each leaf tracks an EWMA of its own output weight and
+    /// clamps predictions to `|output_mean| + k * output_std`. The EWMA uses
+    /// `leaf_decay_alpha` when `leaf_half_life` is set, otherwise Welford online.
+    ///
+    /// This is strictly superior to `max_leaf_output` for streaming — the bound
+    /// is per-leaf, self-calibrating, and regime-synchronized. A leaf that usually
+    /// outputs 0.3 can't suddenly output 2.9 just because it fits in the global clamp.
+    ///
+    /// Typical value: 3.0 (3-sigma bound).
+    /// `None` (default) disables adaptive bounds (falls back to `max_leaf_output`).
+    #[serde(default)]
+    pub adaptive_leaf_bound: Option<f64>,
+
     /// Minimum hessian sum before a leaf produces non-zero output.
     ///
     /// When `Some(min_h)`, leaves with `hess_sum < min_h` return 0.0.
@@ -479,6 +494,7 @@ impl Default for SGBTConfig {
             scale_mode: ScaleMode::default(),
             empirical_sigma_alpha: 0.01,
             max_leaf_output: None,
+            adaptive_leaf_bound: None,
             min_hessian_sum: None,
             huber_k: None,
             shadow_warmup: None,
@@ -745,6 +761,16 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Set per-leaf adaptive output bound (sigma multiplier).
+    ///
+    /// Each leaf tracks EWMA of its own output weight and clamps to
+    /// `|output_mean| + k * output_std`. Self-calibrating per-leaf.
+    /// Recommended: use with `leaf_half_life` for streaming scenarios.
+    pub fn adaptive_leaf_bound(mut self, k: f64) -> Self {
+        self.config.adaptive_leaf_bound = Some(k);
+        self
+    }
+
     /// Set the minimum hessian sum for leaf output.
     ///
     /// Fresh leaves with `hess_sum < min_h` return 0.0, preventing
@@ -940,6 +966,15 @@ impl SGBTConfigBuilder {
             if max <= 0.0 {
                 return Err(
                     ConfigError::out_of_range("max_leaf_output", "must be > 0", max).into(),
+                );
+            }
+        }
+
+        // -- Per-leaf adaptive output bound --
+        if let Some(k) = c.adaptive_leaf_bound {
+            if k <= 0.0 {
+                return Err(
+                    ConfigError::out_of_range("adaptive_leaf_bound", "must be > 0", k).into(),
                 );
             }
         }
@@ -1638,5 +1673,44 @@ mod tests {
     fn feature_names_empty_vec_accepted() {
         let cfg = SGBTConfig::builder().feature_names(vec![]).build().unwrap();
         assert!(cfg.feature_names.unwrap().is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // 16. Adaptive leaf bound -- builder
+    // ------------------------------------------------------------------
+    #[test]
+    fn builder_adaptive_leaf_bound() {
+        let cfg = SGBTConfig::builder()
+            .adaptive_leaf_bound(3.0)
+            .build()
+            .unwrap();
+        assert_eq!(cfg.adaptive_leaf_bound, Some(3.0));
+    }
+
+    // ------------------------------------------------------------------
+    // 17. Adaptive leaf bound -- validation rejects zero
+    // ------------------------------------------------------------------
+    #[test]
+    fn validation_rejects_zero_adaptive_leaf_bound() {
+        let result = SGBTConfig::builder().adaptive_leaf_bound(0.0).build();
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("adaptive_leaf_bound"),
+            "error should mention adaptive_leaf_bound: {}",
+            msg,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // 18. Adaptive leaf bound -- serde backward compat
+    // ------------------------------------------------------------------
+    #[test]
+    fn adaptive_leaf_bound_serde_backward_compat() {
+        let cfg = SGBTConfig::default();
+        assert!(cfg.adaptive_leaf_bound.is_none());
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: SGBTConfig = serde_json::from_str(&json).unwrap();
+        assert!(restored.adaptive_leaf_bound.is_none());
     }
 }

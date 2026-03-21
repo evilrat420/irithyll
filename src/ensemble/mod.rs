@@ -198,6 +198,7 @@ impl<L: Loss> SGBT<L> {
             .gradient_clip_sigma_opt(config.gradient_clip_sigma)
             .monotone_constraints_opt(config.monotone_constraints.clone())
             .max_leaf_output_opt(config.max_leaf_output)
+            .adaptive_leaf_bound_opt(config.adaptive_leaf_bound)
             .min_hessian_sum_opt(config.min_hessian_sum)
             .leaf_model_type(config.leaf_model_type.clone());
 

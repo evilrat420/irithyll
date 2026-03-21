@@ -86,6 +86,15 @@ struct LeafState {
     /// Number of gradients observed for clipping statistics.
     clip_grad_count: u64,
 
+    /// EWMA/Welford mean of this leaf's output weight (for adaptive bounds).
+    output_mean: f64,
+
+    /// EWMA/Welford M2 (variance accumulator) of this leaf's output weight.
+    output_m2: f64,
+
+    /// Number of output weight observations.
+    output_count: u64,
+
     /// Optional trainable leaf model (linear / MLP). `None` for closed-form leaves.
     leaf_model: Option<Box<dyn LeafModel>>,
 }
@@ -102,6 +111,9 @@ impl Clone for LeafState {
             clip_grad_mean: self.clip_grad_mean,
             clip_grad_m2: self.clip_grad_m2,
             clip_grad_count: self.clip_grad_count,
+            output_mean: self.output_mean,
+            output_m2: self.output_m2,
+            output_count: self.output_count,
             leaf_model: self.leaf_model.as_ref().map(|m| m.clone_warm()),
         }
     }
@@ -140,6 +152,57 @@ fn clip_gradient(state: &mut LeafState, gradient: f64, sigma: f64) -> f64 {
     gradient.clamp(lo, hi)
 }
 
+/// Update per-leaf output weight tracking for adaptive bounds.
+///
+/// If `decay_alpha` is Some, uses EWMA synchronized with leaf_decay_alpha.
+/// Otherwise uses Welford online algorithm (batch scenarios).
+#[inline]
+fn update_output_stats(state: &mut LeafState, weight: f64, decay_alpha: Option<f64>) {
+    state.output_count += 1;
+
+    if let Some(alpha) = decay_alpha {
+        // EWMA — synchronized with leaf gradient decay
+        if state.output_count == 1 {
+            state.output_mean = weight;
+            state.output_m2 = 0.0;
+        } else {
+            let diff = weight - state.output_mean;
+            state.output_mean = alpha * state.output_mean + (1.0 - alpha) * weight;
+            let diff2 = weight - state.output_mean;
+            state.output_m2 = alpha * state.output_m2 + (1.0 - alpha) * diff * diff2;
+        }
+    } else {
+        // Welford online (no decay — batch scenarios)
+        let delta = weight - state.output_mean;
+        state.output_mean += delta / (state.output_count as f64);
+        let delta2 = weight - state.output_mean;
+        state.output_m2 += delta * delta2;
+    }
+}
+
+/// Get the adaptive output bound for this leaf.
+///
+/// Returns `|mean| + k * std`, with a floor of 0.01 to never fully suppress a leaf.
+/// During warmup (< 10 samples), returns `f64::MAX` (no bound).
+#[inline]
+fn adaptive_bound(state: &LeafState, k: f64, decay_alpha: Option<f64>) -> f64 {
+    if state.output_count < 10 {
+        return f64::MAX; // warmup — no bound yet
+    }
+
+    let variance = if decay_alpha.is_some() {
+        // EWMA variance is stored directly in output_m2
+        state.output_m2.max(0.0)
+    } else {
+        // Welford: variance = M2 / (n - 1)
+        state.output_m2 / (state.output_count as f64 - 1.0)
+    };
+    let std = variance.sqrt();
+
+    // Bound = |mean| + k * std, floor at 0.01 to never fully suppress a leaf
+    (state.output_mean.abs() + k * std).max(0.01)
+}
+
 /// Create binners according to feature types.
 fn make_binners(n_features: usize, feature_types: Option<&[FeatureType]>) -> Vec<BinnerKind> {
     (0..n_features)
@@ -174,6 +237,9 @@ impl LeafState {
             clip_grad_mean: 0.0,
             clip_grad_m2: 0.0,
             clip_grad_count: 0,
+            output_mean: 0.0,
+            output_m2: 0.0,
+            output_count: 0,
             leaf_model: None,
         }
     }
@@ -205,6 +271,9 @@ impl LeafState {
             clip_grad_mean: 0.0,
             clip_grad_m2: 0.0,
             clip_grad_count: 0,
+            output_mean: 0.0,
+            output_m2: 0.0,
+            output_count: 0,
             leaf_model: None,
         }
     }
@@ -290,6 +359,9 @@ impl HoeffdingTree {
             clip_grad_mean: 0.0,
             clip_grad_m2: 0.0,
             clip_grad_count: 0,
+            output_mean: 0.0,
+            output_m2: 0.0,
+            output_count: 0,
             leaf_model: root_model,
         });
 
@@ -473,7 +545,7 @@ impl HoeffdingTree {
     /// Returns `0.0` if no leaf state exists.
     #[inline]
     fn leaf_prediction(&self, leaf_id: NodeId, features: &[f64]) -> f64 {
-        let raw = if let Some(state) = self
+        let (raw, leaf_bound) = if let Some(state) = self
             .leaf_states
             .get(leaf_id.0 as usize)
             .and_then(|o| o.as_ref())
@@ -484,17 +556,31 @@ impl HoeffdingTree {
                     return 0.0;
                 }
             }
-            if let Some(ref model) = state.leaf_model {
+            let val = if let Some(ref model) = state.leaf_model {
                 model.predict(features)
             } else if state.hess_sum != 0.0 {
                 leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda)
             } else {
                 self.arena.leaf_value[leaf_id.0 as usize]
-            }
+            };
+
+            // Compute per-leaf adaptive bound while state is in scope
+            let bound = self
+                .config
+                .adaptive_leaf_bound
+                .map(|k| adaptive_bound(state, k, self.config.leaf_decay_alpha));
+
+            (val, bound)
         } else {
-            0.0
+            (0.0, None)
         };
-        // max_leaf_output: clamp to prevent prediction explosions
+
+        // Priority: per-leaf adaptive bound > global max_leaf_output > unclamped
+        if let Some(bound) = leaf_bound {
+            if bound < f64::MAX {
+                return raw.clamp(-bound, bound);
+            }
+        }
         if let Some(max) = self.config.max_leaf_output {
             raw.clamp(-max, max)
         } else {
@@ -1174,6 +1260,9 @@ impl HoeffdingTree {
                     clip_grad_mean: 0.0,
                     clip_grad_m2: 0.0,
                     clip_grad_count: 0,
+                    output_mean: 0.0,
+                    output_m2: 0.0,
+                    output_count: 0,
                     leaf_model: left_model,
                 };
 
@@ -1187,6 +1276,9 @@ impl HoeffdingTree {
                     clip_grad_mean: 0.0,
                     clip_grad_m2: 0.0,
                     clip_grad_count: 0,
+                    output_mean: 0.0,
+                    output_m2: 0.0,
+                    output_count: 0,
                     leaf_model: right_model,
                 };
 
@@ -1299,6 +1391,11 @@ impl StreamingTree for HoeffdingTree {
             let lw = leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda);
             self.arena.set_leaf_value(leaf_id, lw);
 
+            // Track per-leaf output weight for adaptive bounds.
+            if self.config.adaptive_leaf_bound.is_some() {
+                update_output_stats(state, lw, self.config.leaf_decay_alpha);
+            }
+
             // Update the leaf model if one exists (linear / MLP).
             if let Some(ref mut model) = state.leaf_model {
                 model.update(features, gradient, hessian, self.config.lambda);
@@ -1352,6 +1449,11 @@ impl StreamingTree for HoeffdingTree {
         }
         let lw = leaf_weight(state.grad_sum, state.hess_sum, self.config.lambda);
         self.arena.set_leaf_value(leaf_id, lw);
+
+        // Track per-leaf output weight for adaptive bounds.
+        if self.config.adaptive_leaf_bound.is_some() {
+            update_output_stats(state, lw, self.config.leaf_decay_alpha);
+        }
 
         // Update the leaf model if one exists (linear / MLP).
         if let Some(ref mut model) = state.leaf_model {
@@ -1988,6 +2090,118 @@ mod tests {
             let clipped = clip_gradient(&mut state, val, 2.0);
             assert_eq!(clipped, val, "warmup should not clip");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: adaptive_bound warmup returns f64::MAX
+    // -----------------------------------------------------------------------
+    #[test]
+    fn adaptive_bound_warmup_returns_max() {
+        let mut state = LeafState::new(1);
+        // Feed < 10 output weights
+        for i in 0..9 {
+            update_output_stats(&mut state, 0.5 + i as f64 * 0.01, None);
+        }
+        let bound = adaptive_bound(&state, 3.0, None);
+        assert_eq!(bound, f64::MAX, "warmup should return f64::MAX");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: adaptive_bound tightens after warmup (Welford path)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn adaptive_bound_tightens_after_warmup() {
+        let mut state = LeafState::new(1);
+        // Feed 20 outputs centered around 0.3 with small variance
+        for i in 0..20 {
+            let w = 0.3 + (i as f64 - 10.0) * 0.01; // range [0.2, 0.39]
+            update_output_stats(&mut state, w, None);
+        }
+        let bound = adaptive_bound(&state, 3.0, None);
+        // Bound should be much less than a global max of 3.0
+        assert!(
+            bound < 1.0,
+            "3-sigma bound on outputs ~0.3 should be < 1.0, got {}",
+            bound,
+        );
+        assert!(bound > 0.2, "bound should be > |mean|, got {}", bound,);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: adaptive_bound clamps outlier leaf
+    // -----------------------------------------------------------------------
+    #[test]
+    fn adaptive_bound_clamps_outlier_leaf() {
+        let mut state = LeafState::new(1);
+        // Build stats: 20 outputs ~0.3
+        for _ in 0..20 {
+            update_output_stats(&mut state, 0.3, None);
+        }
+        let bound = adaptive_bound(&state, 3.0, None);
+        // A leaf output of 2.9 should be clamped
+        let clamped = (2.9_f64).clamp(-bound, bound);
+        assert!(
+            clamped < 2.9,
+            "2.9 should be clamped by adaptive bound {}, got {}",
+            bound,
+            clamped,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: adaptive_bound with EWMA decay adapts
+    // -----------------------------------------------------------------------
+    #[test]
+    fn adaptive_bound_with_decay_adapts() {
+        let alpha = 0.95; // fast decay for testing
+        let mut state = LeafState::new(1);
+
+        // Phase 1: outputs around 0.3
+        for _ in 0..30 {
+            update_output_stats(&mut state, 0.3, Some(alpha));
+        }
+        let bound_phase1 = adaptive_bound(&state, 3.0, Some(alpha));
+
+        // Phase 2: outputs shift to 2.0
+        for _ in 0..100 {
+            update_output_stats(&mut state, 2.0, Some(alpha));
+        }
+        let bound_phase2 = adaptive_bound(&state, 3.0, Some(alpha));
+
+        // After regime change, bound should adapt upward
+        assert!(
+            bound_phase2 > bound_phase1,
+            "EWMA bound should adapt: phase1={}, phase2={}",
+            bound_phase1,
+            bound_phase2,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: adaptive_bound disabled by default
+    // -----------------------------------------------------------------------
+    #[test]
+    fn adaptive_bound_disabled_by_default() {
+        let config = TreeConfig::default();
+        assert!(
+            config.adaptive_leaf_bound.is_none(),
+            "adaptive_leaf_bound should default to None",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: adaptive_bound warmup falls back to global max_leaf_output
+    // -----------------------------------------------------------------------
+    #[test]
+    fn adaptive_bound_warmup_falls_back_to_global() {
+        let mut state = LeafState::new(1);
+        // Only 5 samples — still in warmup
+        for _ in 0..5 {
+            update_output_stats(&mut state, 0.3, None);
+        }
+        let bound = adaptive_bound(&state, 3.0, None);
+        assert_eq!(bound, f64::MAX, "warmup should yield f64::MAX");
+        // In leaf_prediction, f64::MAX falls through to global max_leaf_output
     }
 
     // -----------------------------------------------------------------------
