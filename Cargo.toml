@@ -1,9 +1,9 @@
 [workspace]
-members = [".", "irithyll-python", "irithyll-core"]
+members = [".", "irithyll-python", "irithyll-core", "irithyll-cli"]
 
 [package]
 name = "irithyll"
-version = "8.3.0"
+version = "8.4.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Streaming machine learning in Rust -- gradient boosted trees, kernel methods, linear models, and composable pipelines"
