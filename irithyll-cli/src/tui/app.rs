@@ -1,0 +1,60 @@
+//! Application state shared between the TUI renderer and the training thread.
+
+use std::sync::{Arc, Mutex};
+
+/// Tracks training progress and metrics for TUI display.
+pub struct AppState {
+    /// Number of samples processed so far.
+    pub n_samples: u64,
+    /// Total number of samples to process.
+    pub n_total: u64,
+    /// Current metric snapshots: `(name, value)`.
+    pub metrics: Vec<(String, f64)>,
+    /// Rolling history of loss values for the chart.
+    pub loss_history: Vec<f64>,
+    /// Rolling history of accuracy values for the chart.
+    pub accuracy_history: Vec<f64>,
+    /// Feature importances: `(feature_name, importance)`.
+    pub feature_importances: Vec<(String, f64)>,
+    /// Current throughput in samples per second.
+    pub throughput: f64,
+    /// Wall-clock seconds elapsed since training started.
+    pub elapsed_secs: f64,
+    /// Whether training is currently in progress.
+    pub is_training: bool,
+    /// Whether training has completed.
+    pub is_done: bool,
+    /// Status message displayed in the footer.
+    pub status_message: String,
+}
+
+impl AppState {
+    /// Create a new state for a training run of `n_total` samples.
+    pub fn new(n_total: u64) -> Self {
+        Self {
+            n_samples: 0,
+            n_total,
+            metrics: Vec::new(),
+            loss_history: Vec::new(),
+            accuracy_history: Vec::new(),
+            feature_importances: Vec::new(),
+            throughput: 0.0,
+            elapsed_secs: 0.0,
+            is_training: true,
+            is_done: false,
+            status_message: String::from("Initializing..."),
+        }
+    }
+
+    /// Progress as a percentage (0.0 to 100.0).
+    pub fn progress_pct(&self) -> f64 {
+        if self.n_total == 0 {
+            0.0
+        } else {
+            self.n_samples as f64 / self.n_total as f64 * 100.0
+        }
+    }
+}
+
+/// Thread-safe handle to the shared application state.
+pub type SharedState = Arc<Mutex<AppState>>;
