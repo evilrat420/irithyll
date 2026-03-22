@@ -94,6 +94,30 @@ pub fn tanh(x: f64) -> f64 {
     libm::tanh(x)
 }
 
+/// Softplus: ln(1 + exp(x)), numerically stable.
+#[inline]
+pub fn softplus(x: f64) -> f64 {
+    if x > 20.0 {
+        x
+    } else if x < -20.0 {
+        libm::exp(x)
+    } else {
+        libm::log(1.0 + libm::exp(x))
+    }
+}
+
+/// Logistic sigmoid: 1 / (1 + exp(-x)), numerically stable.
+#[inline]
+pub fn sigmoid(x: f64) -> f64 {
+    if x >= 0.0 {
+        let e = libm::exp(-x);
+        1.0 / (1.0 + e)
+    } else {
+        let e = libm::exp(x);
+        e / (1.0 + e)
+    }
+}
+
 /// Minimum of two f64 values (handles NaN: returns the non-NaN value).
 #[inline]
 pub fn fmin(x: f64, y: f64) -> f64 {
@@ -190,5 +214,63 @@ mod tests {
     fn fmin_fmax() {
         assert_eq!(fmin(1.0, 2.0), 1.0);
         assert_eq!(fmax(1.0, 2.0), 2.0);
+    }
+
+    #[test]
+    fn softplus_large_positive() {
+        // For x >> 0, softplus(x) ~ x
+        assert!((softplus(50.0) - 50.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn softplus_large_negative() {
+        // For x << 0, softplus(x) ~ 0
+        let result = softplus(-50.0);
+        assert!(result >= 0.0 && result < 1e-20);
+    }
+
+    #[test]
+    fn softplus_zero() {
+        let expected = ln(2.0);
+        assert!((softplus(0.0) - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn softplus_always_positive() {
+        for &x in &[-10.0, -1.0, 0.0, 1.0, 10.0] {
+            assert!(softplus(x) > 0.0, "softplus({}) should be > 0", x);
+        }
+    }
+
+    #[test]
+    fn sigmoid_at_zero() {
+        assert!((sigmoid(0.0) - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn sigmoid_range() {
+        for &x in &[-10.0, -1.0, 0.0, 1.0, 10.0] {
+            let s = sigmoid(x);
+            assert!(
+                s > 0.0 && s < 1.0,
+                "sigmoid({}) = {} should be in (0, 1)",
+                x,
+                s
+            );
+        }
+    }
+
+    #[test]
+    fn sigmoid_symmetry() {
+        let x = 3.0;
+        assert!((sigmoid(x) + sigmoid(-x) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn sigmoid_extreme_values() {
+        let s_pos = sigmoid(100.0);
+        let s_neg = sigmoid(-100.0);
+        assert!(s_pos >= 0.0 && s_pos <= 1.0);
+        assert!(s_neg >= 0.0 && s_neg <= 1.0);
     }
 }

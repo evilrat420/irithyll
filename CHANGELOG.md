@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.0.0] - 2026-03-22
+
+### Added
+
+- **Reservoir Computing** (`neural::reservoir`):
+  - `NextGenRC` — time-delay embedding + polynomial features (degree 2–5) + RLS readout.
+    No random matrices needed. Factory: `ngrc(k, s, degree)`.
+  - `EchoStateNetwork` — cycle/ring reservoir topology (O(N) weights) + leaky integrator
+    + RLS readout. Factory: `esn(n_reservoir, spectral_radius)`.
+  - `ESNPreprocessor` — ESN as `StreamingPreprocessor` for pipeline composition.
+    Factory: `esn_preprocessor(...)`.
+  - `DelayBuffer` circular buffer for NG-RC time-delay embedding.
+  - `HighDegreePolynomial` for degree 2–5 monomial generation.
+  - `CycleReservoir` ring topology with leaky integration.
+  - `Xorshift64Rng` deterministic PRNG for reservoir/weight initialization.
+
+- **SSM/Mamba — Selective State Space Models** (`neural::ssm`):
+  - `StreamingMamba` — Mamba-style selective SSM with input-dependent B, C, Delta
+    + RLS readout. Factory: `mamba(d_in, n_state)`.
+  - `DiagonalSSM` — non-selective S4D baseline.
+  - `SelectiveSSM` — full Mamba architecture in irithyll-core (`no_std`).
+  - `MambaPreprocessor` — SSM as `StreamingPreprocessor`.
+    Factory: `mamba_preprocessor(...)`.
+
+- **Spiking Neural Networks with e-prop** (`neural::snn`):
+  - `SpikeNet` — Vec-based SNN with e-prop online learning, f64 interface.
+  - `SpikeNetFixed` — `no_std` SNN with Q1.14 integer arithmetic throughout
+    (full training in fixed-point, no floats).
+  - LIF neurons, delta spike encoding, piecewise linear surrogate gradient.
+  - Random feedback alignment (no weight transport).
+  - `SpikePreprocessor` — SNN as `StreamingPreprocessor`.
+    Factory: `spikenet(n_hidden)`.
+
+- **Math utilities:** `softplus()` and `sigmoid()` in irithyll-core math module.
+
+- **All architectures implement `StreamingLearner`** — composable with existing
+  pipelines (`pipe()`, `normalizer()`, ensembles, evaluation).
+
+- **432 new tests** (total: 1,997). 31 new files, ~8,600 new lines of code.
+  No new external dependencies. All `no_std` compatible.
+
+- irithyll-core: 0.5.0 → 0.6.0. irithyll: 8.4.1 → 9.0.0.
+
 ## [8.4.0] - 2026-03-22
 
 ### Added
