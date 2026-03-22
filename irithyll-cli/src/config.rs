@@ -9,6 +9,8 @@ pub struct CliConfig {
     pub data: DataConfig,
     #[serde(default)]
     pub training: TrainingConfig,
+    #[serde(default)]
+    pub neural: NeuralConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -76,6 +78,174 @@ pub struct TrainingConfig {
     pub output: Option<String>,
     #[serde(default = "default_format")]
     pub format: String,
+}
+
+// ---------------------------------------------------------------------------
+// Neural model configuration (v9)
+// ---------------------------------------------------------------------------
+
+/// Configuration section for v9 neural architecture models.
+///
+/// Parsed from the `[neural]` TOML table. Each sub-table holds
+/// architecture-specific hyperparameters.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct NeuralConfig {
+    #[serde(default)]
+    pub esn: EsnModelConfig,
+    #[serde(default)]
+    pub ngrc: NgrcModelConfig,
+    #[serde(default)]
+    pub mamba: MambaModelConfig,
+    #[serde(default)]
+    pub spikenet: SpikeNetModelConfig,
+}
+
+/// `[neural.esn]` -- Echo State Network hyperparameters.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EsnModelConfig {
+    #[serde(default = "default_esn_n_reservoir")]
+    pub n_reservoir: usize,
+    #[serde(default = "default_esn_spectral_radius")]
+    pub spectral_radius: f64,
+    #[serde(default = "default_esn_leak_rate")]
+    pub leak_rate: f64,
+    #[serde(default = "default_esn_input_scaling")]
+    pub input_scaling: f64,
+    #[serde(default = "default_esn_seed")]
+    pub seed: u64,
+    #[serde(default = "default_esn_warmup")]
+    pub warmup: usize,
+}
+
+impl Default for EsnModelConfig {
+    fn default() -> Self {
+        Self {
+            n_reservoir: default_esn_n_reservoir(),
+            spectral_radius: default_esn_spectral_radius(),
+            leak_rate: default_esn_leak_rate(),
+            input_scaling: default_esn_input_scaling(),
+            seed: default_esn_seed(),
+            warmup: default_esn_warmup(),
+        }
+    }
+}
+
+fn default_esn_n_reservoir() -> usize {
+    100
+}
+fn default_esn_spectral_radius() -> f64 {
+    0.9
+}
+fn default_esn_leak_rate() -> f64 {
+    0.3
+}
+fn default_esn_input_scaling() -> f64 {
+    1.0
+}
+fn default_esn_seed() -> u64 {
+    42
+}
+fn default_esn_warmup() -> usize {
+    50
+}
+
+/// `[neural.ngrc]` -- Next Generation Reservoir Computer hyperparameters.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NgrcModelConfig {
+    #[serde(default = "default_ngrc_k")]
+    pub k: usize,
+    #[serde(default = "default_ngrc_s")]
+    pub s: usize,
+    #[serde(default = "default_ngrc_degree")]
+    pub degree: usize,
+    #[serde(default = "default_ngrc_forgetting_factor")]
+    pub forgetting_factor: f64,
+}
+
+impl Default for NgrcModelConfig {
+    fn default() -> Self {
+        Self {
+            k: default_ngrc_k(),
+            s: default_ngrc_s(),
+            degree: default_ngrc_degree(),
+            forgetting_factor: default_ngrc_forgetting_factor(),
+        }
+    }
+}
+
+fn default_ngrc_k() -> usize {
+    2
+}
+fn default_ngrc_s() -> usize {
+    1
+}
+fn default_ngrc_degree() -> usize {
+    2
+}
+fn default_ngrc_forgetting_factor() -> f64 {
+    0.999
+}
+
+/// `[neural.mamba]` -- Streaming Mamba (SSM) hyperparameters.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MambaModelConfig {
+    #[serde(default = "default_mamba_n_state")]
+    pub n_state: usize,
+    #[serde(default = "default_mamba_seed")]
+    pub seed: u64,
+    #[serde(default = "default_mamba_warmup")]
+    pub warmup: usize,
+}
+
+impl Default for MambaModelConfig {
+    fn default() -> Self {
+        Self {
+            n_state: default_mamba_n_state(),
+            seed: default_mamba_seed(),
+            warmup: default_mamba_warmup(),
+        }
+    }
+}
+
+fn default_mamba_n_state() -> usize {
+    16
+}
+fn default_mamba_seed() -> u64 {
+    42
+}
+fn default_mamba_warmup() -> usize {
+    10
+}
+
+/// `[neural.spikenet]` -- Spiking Neural Network hyperparameters.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SpikeNetModelConfig {
+    #[serde(default = "default_spikenet_n_hidden")]
+    pub n_hidden: usize,
+    #[serde(default = "default_spikenet_learning_rate")]
+    pub learning_rate: f64,
+    #[serde(default = "default_spikenet_seed")]
+    pub seed: u64,
+}
+
+impl Default for SpikeNetModelConfig {
+    fn default() -> Self {
+        Self {
+            n_hidden: default_spikenet_n_hidden(),
+            learning_rate: default_spikenet_learning_rate(),
+            seed: default_spikenet_seed(),
+        }
+    }
+}
+
+fn default_spikenet_n_hidden() -> usize {
+    64
+}
+fn default_spikenet_learning_rate() -> f64 {
+    0.001
+}
+fn default_spikenet_seed() -> u64 {
+    42
 }
 
 // Defaults

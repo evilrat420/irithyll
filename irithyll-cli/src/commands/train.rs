@@ -9,7 +9,7 @@ use irithyll::loss::LossType;
 use irithyll::serde_support::to_json_pretty;
 #[cfg(feature = "tui")]
 use irithyll::Loss;
-use irithyll::{DynSGBT, Sample};
+use irithyll::{DynSGBT, Sample, StreamingLearner};
 
 use crate::config::CliConfig;
 use crate::data::Dataset;
@@ -29,6 +29,14 @@ pub enum ModelType {
     Multiclass,
     /// BaggedSGBT -- Oza online bagging for variance reduction.
     Bagged,
+    /// Next Generation Reservoir Computer (NG-RC).
+    Ngrc,
+    /// Echo State Network (ESN).
+    Esn,
+    /// Streaming Mamba (selective SSM).
+    Mamba,
+    /// Spiking Neural Network with e-prop learning.
+    SpikeNet,
 }
 
 impl ModelType {
@@ -38,8 +46,12 @@ impl ModelType {
             "distributional" => Ok(ModelType::Distributional),
             "multiclass" => Ok(ModelType::Multiclass),
             "bagged" => Ok(ModelType::Bagged),
+            "ngrc" => Ok(ModelType::Ngrc),
+            "esn" => Ok(ModelType::Esn),
+            "mamba" => Ok(ModelType::Mamba),
+            "spikenet" => Ok(ModelType::SpikeNet),
             _ => Err(eyre!(
-                "unknown model type '{}'. supported: sgbt, distributional, multiclass, bagged",
+                "unknown model type '{}'. supported: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet",
                 s
             )),
         }
@@ -75,7 +87,7 @@ pub struct TrainArgs {
     #[arg(long)]
     pub max_depth: Option<usize>,
 
-    /// Model type: sgbt (default), distributional, multiclass, bagged
+    /// Model type: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet
     #[arg(long, default_value = "sgbt")]
     pub model_type: String,
 
@@ -125,6 +137,10 @@ pub fn run(args: TrainArgs) -> Result<()> {
         ModelType::Distributional => run_distributional(args, cli_config, dataset),
         ModelType::Multiclass => run_multiclass(args, cli_config, dataset),
         ModelType::Bagged => run_bagged(args, cli_config, loss_type, dataset),
+        ModelType::Ngrc => run_ngrc(cli_config, dataset),
+        ModelType::Esn => run_esn(cli_config, dataset),
+        ModelType::Mamba => run_mamba(cli_config, dataset),
+        ModelType::SpikeNet => run_spikenet(cli_config, dataset),
     }
 }
 
@@ -504,6 +520,176 @@ fn run_bagged(
 
     // NOTE: JSON serialization not supported for BaggedSGBT.
     println!("  [NOTE] Bagged model save not yet supported -- train-only mode");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// NG-RC (Next Generation Reservoir Computer)
+// ---------------------------------------------------------------------------
+
+fn run_ngrc(cli_config: CliConfig, dataset: Dataset) -> Result<()> {
+    use irithyll::reservoir::{NGRCConfig, NextGenRC};
+
+    let nc = &cli_config.neural.ngrc;
+    let config = NGRCConfig::builder()
+        .k(nc.k)
+        .s(nc.s)
+        .degree(nc.degree)
+        .forgetting_factor(nc.forgetting_factor)
+        .build()
+        .map_err(|e| eyre!("invalid NGRC config: {}", e))?;
+
+    let mut model = NextGenRC::new(config);
+
+    println!(
+        "Loaded {} samples, {} features (ngrc, k={}, s={}, degree={})",
+        dataset.n_samples, dataset.n_features, nc.k, nc.s, nc.degree,
+    );
+
+    run_neural_headless(&mut model, &dataset, "ngrc")
+}
+
+// ---------------------------------------------------------------------------
+// ESN (Echo State Network)
+// ---------------------------------------------------------------------------
+
+fn run_esn(cli_config: CliConfig, dataset: Dataset) -> Result<()> {
+    use irithyll::reservoir::{ESNConfig, EchoStateNetwork};
+
+    let ec = &cli_config.neural.esn;
+    let config = ESNConfig::builder()
+        .n_reservoir(ec.n_reservoir)
+        .spectral_radius(ec.spectral_radius)
+        .leak_rate(ec.leak_rate)
+        .input_scaling(ec.input_scaling)
+        .seed(ec.seed)
+        .warmup(ec.warmup)
+        .build()
+        .map_err(|e| eyre!("invalid ESN config: {}", e))?;
+
+    let mut model = EchoStateNetwork::new(config);
+
+    println!(
+        "Loaded {} samples, {} features (esn, n_reservoir={}, spectral_radius={}, leak_rate={})",
+        dataset.n_samples, dataset.n_features, ec.n_reservoir, ec.spectral_radius, ec.leak_rate,
+    );
+
+    run_neural_headless(&mut model, &dataset, "esn")
+}
+
+// ---------------------------------------------------------------------------
+// Streaming Mamba (selective SSM)
+// ---------------------------------------------------------------------------
+
+fn run_mamba(cli_config: CliConfig, dataset: Dataset) -> Result<()> {
+    use irithyll::ssm::{MambaConfig, StreamingMamba};
+
+    let mc = &cli_config.neural.mamba;
+    let config = MambaConfig::builder()
+        .d_in(dataset.n_features)
+        .n_state(mc.n_state)
+        .seed(mc.seed)
+        .warmup(mc.warmup)
+        .build()
+        .map_err(|e| eyre!("invalid Mamba config: {}", e))?;
+
+    let mut model = StreamingMamba::new(config);
+
+    println!(
+        "Loaded {} samples, {} features (mamba, d_in={}, n_state={})",
+        dataset.n_samples, dataset.n_features, dataset.n_features, mc.n_state,
+    );
+
+    run_neural_headless(&mut model, &dataset, "mamba")
+}
+
+// ---------------------------------------------------------------------------
+// SpikeNet (Spiking Neural Network)
+// ---------------------------------------------------------------------------
+
+fn run_spikenet(cli_config: CliConfig, dataset: Dataset) -> Result<()> {
+    use irithyll::snn::{SpikeNet, SpikeNetConfig};
+
+    let sc = &cli_config.neural.spikenet;
+    let config = SpikeNetConfig::builder()
+        .n_hidden(sc.n_hidden)
+        .learning_rate(sc.learning_rate)
+        .seed(sc.seed)
+        .build()
+        .map_err(|e| eyre!("invalid SpikeNet config: {}", e))?;
+
+    let mut model = SpikeNet::new(config);
+
+    println!(
+        "Loaded {} samples, {} features (spikenet, n_hidden={}, lr={})",
+        dataset.n_samples, dataset.n_features, sc.n_hidden, sc.learning_rate,
+    );
+
+    run_neural_headless(&mut model, &dataset, "spikenet")
+}
+
+// ---------------------------------------------------------------------------
+// Shared headless training loop for all neural models (prequential)
+// ---------------------------------------------------------------------------
+
+fn run_neural_headless(
+    model: &mut dyn StreamingLearner,
+    dataset: &Dataset,
+    model_name: &str,
+) -> Result<()> {
+    use irithyll::metrics::RegressionMetrics;
+
+    let pb = ProgressBar::new(dataset.n_samples as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] [{bar:40}] {pos}/{len} ({per_sec})")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    let mut metrics = RegressionMetrics::new();
+    let print_interval = (dataset.n_samples / 10).max(1);
+
+    let start = Instant::now();
+    for i in 0..dataset.n_samples {
+        let features = &dataset.features[i];
+        let target = dataset.targets[i];
+
+        // Test-then-train (prequential evaluation)
+        let pred = model.predict(features);
+        metrics.update(target, pred);
+
+        model.train(features, target);
+
+        if (i + 1) % print_interval == 0 {
+            pb.println(format!(
+                "  [{}/{}] RMSE={:.6}  MAE={:.6}  R2={:.6}",
+                i + 1,
+                dataset.n_samples,
+                metrics.rmse(),
+                metrics.mae(),
+                metrics.r_squared(),
+            ));
+        }
+
+        pb.inc(1);
+    }
+    pb.finish_with_message("done");
+    let elapsed = start.elapsed();
+
+    println!();
+    println!("Training complete ({})", model_name);
+    println!("  Samples:  {}", dataset.n_samples);
+    println!("  RMSE:     {:.6}", metrics.rmse());
+    println!("  MAE:      {:.6}", metrics.mae());
+    println!("  R2:       {:.6}", metrics.r_squared());
+    println!("  Time:     {:.2}s", elapsed.as_secs_f64());
+    println!(
+        "  Speed:    {:.0} samples/sec",
+        dataset.n_samples as f64 / elapsed.as_secs_f64()
+    );
+    println!("  [NOTE] Neural model save not yet supported -- train-only mode");
 
     Ok(())
 }
