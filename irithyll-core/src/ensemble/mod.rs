@@ -70,7 +70,7 @@ pub type DynSGBT = SGBT<Box<dyn Loss>>;
 ///
 /// # Examples
 ///
-/// ```ignore
+/// ```text
 /// use irithyll::{SGBTConfig, SGBT};
 ///
 /// // Regression with squared loss (default):
@@ -78,7 +78,7 @@ pub type DynSGBT = SGBT<Box<dyn Loss>>;
 /// let model = SGBT::new(config);
 /// ```ignore
 ///
-/// ```ignore
+/// ```text
 /// use irithyll::{SGBTConfig, SGBT};
 /// use irithyll::loss::logistic::LogisticLoss;
 ///

@@ -149,11 +149,12 @@ Learning curve CSVs (accuracy over time) are available in `datasets/results/` fo
 
 ## Hardware
 
-> Results collected on: _(fill in your hardware here)_
+> Results collected on:
 >
-> - **CPU:**
-> - **RAM:**
-> - **OS:**
+> - **CPU:** AMD Ryzen 5 5500 (6C/12T, 3.6GHz base)
+> - **RAM:** 16GB DDR4 3200MHz (2x8GB)
+> - **OS:** Windows 11 Home 10.0.26200
+> - **Rust:** stable (single-threaded, release profile)
 
 ## Reproducing
 
