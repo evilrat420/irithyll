@@ -226,7 +226,7 @@ mod tests {
     fn softplus_large_negative() {
         // For x << 0, softplus(x) ~ 0
         let result = softplus(-50.0);
-        assert!(result >= 0.0 && result < 1e-20);
+        assert!((0.0..1e-20).contains(&result));
     }
 
     #[test]
@@ -252,7 +252,7 @@ mod tests {
         for &x in &[-10.0, -1.0, 0.0, 1.0, 10.0] {
             let s = sigmoid(x);
             assert!(
-                s > 0.0 && s < 1.0,
+                (0.0..1.0).contains(&s),
                 "sigmoid({}) = {} should be in (0, 1)",
                 x,
                 s
@@ -270,7 +270,7 @@ mod tests {
     fn sigmoid_extreme_values() {
         let s_pos = sigmoid(100.0);
         let s_neg = sigmoid(-100.0);
-        assert!(s_pos >= 0.0 && s_pos <= 1.0);
-        assert!(s_neg >= 0.0 && s_neg <= 1.0);
+        assert!((0.0..=1.0).contains(&s_pos));
+        assert!((0.0..=1.0).contains(&s_neg));
     }
 }

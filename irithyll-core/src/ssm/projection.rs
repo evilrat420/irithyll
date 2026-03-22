@@ -197,7 +197,7 @@ mod tests {
         // For x << 0, softplus(x) ~ exp(x) ~ 0
         let result = softplus(-50.0);
         assert!(
-            result < 1e-20 && result >= 0.0,
+            (0.0..1e-20).contains(&result),
             "softplus(-50) should be ~0, got {}",
             result
         );
@@ -247,7 +247,7 @@ mod tests {
         for &x in &extreme {
             let result = sigmoid(x);
             assert!(
-                result >= 0.0 && result <= 1.0,
+                (0.0..=1.0).contains(&result),
                 "sigmoid({}) should be in [0,1], got {}",
                 x,
                 result
@@ -295,7 +295,7 @@ mod tests {
         for i in 0..1000 {
             let val = rng.next_f64();
             assert!(
-                val >= 0.0 && val < 1.0,
+                (0.0..1.0).contains(&val),
                 "next_f64() sample {} = {} not in [0,1)",
                 i,
                 val

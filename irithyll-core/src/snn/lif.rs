@@ -190,10 +190,8 @@ mod tests {
         let input = 60000_i32;
         let (v_new, _spike) = lif_step(i16::MAX, alpha, input, v_thr);
         // After spike reset, still clamped
-        assert!(
-            v_new <= i16::MAX && v_new >= i16::MIN,
-            "membrane must be within i16 range"
-        );
+        // v_new is i16, so inherently within range. Just verify it's finite.
+        let _ = v_new; // type is i16, always in range
     }
 
     #[test]

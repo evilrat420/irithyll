@@ -646,8 +646,8 @@ mod tests {
         assert_eq!(net.n_input_encoded(), 4);
         assert_eq!(net.w_input.len(), 8 * 4);
         assert_eq!(net.w_recurrent.len(), 8 * 8);
-        assert_eq!(net.w_output.len(), 1 * 8);
-        assert_eq!(net.feedback.len(), 8 * 1);
+        assert_eq!(net.w_output.len(), 8);
+        assert_eq!(net.feedback.len(), 8);
         assert_eq!(net.elig_in.len(), 8 * 4);
         assert_eq!(net.elig_rec.len(), 8 * 8);
         assert_eq!(net.readout.len(), 1);

@@ -237,10 +237,7 @@ mod tests {
 
         enc.encode(&[1000, 2000], &mut spikes);
         enc.encode(&[2000, 3000], &mut spikes);
-        assert!(
-            spikes.iter().any(|&s| s == 1),
-            "should have spikes before reset"
-        );
+        assert!(spikes.contains(&1), "should have spikes before reset");
 
         enc.reset();
         // After reset, first call should produce no spikes
