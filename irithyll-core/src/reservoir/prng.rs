@@ -125,7 +125,7 @@ mod tests {
         let mut rng = Xorshift64Rng::new(42);
         for _ in 0..10_000 {
             let u = rng.next_f64();
-            assert!(u >= 0.0 && u < 1.0, "out of range: {}", u);
+            assert!((0.0..1.0).contains(&u), "out of range: {}", u);
         }
     }
 
@@ -136,7 +136,7 @@ mod tests {
         for _ in 0..5_000 {
             let v = rng.next_uniform(scale);
             assert!(
-                v >= -scale && v <= scale,
+                (-scale..=scale).contains(&v),
                 "value {} out of [-{}, {}]",
                 v,
                 scale,

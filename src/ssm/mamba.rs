@@ -272,7 +272,7 @@ mod tests {
             if model.n_samples_seen() > 0 {
                 let pred = model.predict(&x);
                 let err = (pred - y).powi(2);
-                if i >= 10 && i < 60 {
+                if (10..60).contains(&i) {
                     errors_early.push(err);
                 } else if i >= 400 {
                     errors_late.push(err);

@@ -245,12 +245,12 @@ mod tests {
         let out = pp.update_and_transform(&[10.0, -10.0]);
 
         // First 8 elements are spike indicators (0.0 or 1.0)
-        for i in 0..8 {
+        for (i, &val) in out.iter().enumerate().take(8) {
             assert!(
-                out[i] == 0.0 || out[i] == 1.0,
+                val == 0.0 || val == 1.0,
                 "spike feature {} should be 0.0 or 1.0, got {}",
                 i,
-                out[i]
+                val
             );
         }
     }

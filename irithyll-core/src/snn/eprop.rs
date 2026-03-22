@@ -372,9 +372,7 @@ mod tests {
 
         update_weights_fixed(&mut weights, &elig, learning_signal, eta);
 
-        assert!(
-            weights[0] >= i16::MIN && weights[0] <= i16::MAX,
-            "weight should be clamped to i16 range"
-        );
+        // Verify the function executed without panic.
+        let _ = weights[0];
     }
 }
