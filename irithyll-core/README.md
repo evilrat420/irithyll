@@ -11,6 +11,9 @@ WASM, embedded Linux, or full desktops.
 - **Hoeffding trees** — statistically sound split decisions via Hoeffding bound
 - **Histogram binning** — uniform, categorical, quantile sketch, k-means, SIMD
 - **Drift detection** — ADWIN, Page-Hinkley, DDM with automatic tree replacement
+- **Reservoir computing** — NG-RC (time-delay polynomial) and ESN (cycle reservoir) with RLS readout
+- **State space models** — selective SSM with diagonal A, ZOH discretization, input-dependent gating
+- **Spiking neural networks** — `SpikeNetFixed` with Q1.14 integer LIF neurons, e-prop learning, delta encoding (64 neurons in 22KB)
 - **Loss functions** — squared, logistic, Huber, softmax, expectile, quantile
 - **Packed inference** — 12-byte f32 nodes (66ns predict on Cortex-M0+) and
   8-byte int16 nodes (integer-only traversal, zero float ops)
@@ -20,7 +23,7 @@ WASM, embedded Linux, or full desktops.
 
 | Feature | Default | What it enables |
 |---------|---------|-----------------|
-| `alloc` | No | Training: histograms, trees, ensembles, drift detection |
+| `alloc` | No | Training: histograms, trees, ensembles, drift detection, reservoir, SSM, SNN |
 | `std` | No | Implies `alloc`. HashMap-based named features, SIMD runtime detection |
 | `serde` | No | Serialize/deserialize configs and model state |
 | `parallel` | No | Rayon-based parallel tree training |

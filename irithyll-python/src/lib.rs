@@ -1249,6 +1249,270 @@ impl PyEvaluator {
 }
 
 // ---------------------------------------------------------------------------
+// NextGenRC (NG-RC)
+// ---------------------------------------------------------------------------
+
+/// Next Generation Reservoir Computer.
+///
+/// A reservoir-free approach using time-delay embeddings and polynomial
+/// features, trained online via RLS. Fully deterministic -- no random weights.
+///
+/// Example::
+///
+///     model = NextGenRC(k=3, s=1, degree=2)
+///     model.train([1.0], 2.0)
+///     model.train([2.0], 3.0)
+///     model.train([3.0], 4.0)
+///     pred = model.predict([4.0])
+///
+#[pyclass(name = "NextGenRC")]
+struct PyNextGenRC {
+    inner: irithyll::NextGenRC,
+}
+
+#[pymethods]
+impl PyNextGenRC {
+    #[new]
+    #[pyo3(signature = (k=2, s=1, degree=2, forgetting_factor=0.999))]
+    fn new(k: usize, s: usize, degree: usize, forgetting_factor: f64) -> PyResult<Self> {
+        let config = irithyll::NGRCConfig::builder()
+            .k(k)
+            .s(s)
+            .degree(degree)
+            .forgetting_factor(forgetting_factor)
+            .build()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self {
+            inner: irithyll::NextGenRC::new(config),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!("NextGenRC(samples={})", self.inner.n_samples_seen())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EchoStateNetwork (ESN)
+// ---------------------------------------------------------------------------
+
+/// Echo State Network with cycle reservoir topology and RLS readout.
+///
+/// Example::
+///
+///     model = EchoStateNetwork(n_reservoir=50, spectral_radius=0.9)
+///     for i in range(60):
+///         model.train([i * 0.1], 0.0)
+///     pred = model.predict([1.0])
+///
+#[pyclass(name = "EchoStateNetwork")]
+struct PyEchoStateNetwork {
+    inner: irithyll::EchoStateNetwork,
+}
+
+#[pymethods]
+impl PyEchoStateNetwork {
+    #[new]
+    #[pyo3(signature = (n_reservoir=100, spectral_radius=0.9, leak_rate=0.3, seed=42))]
+    fn new(n_reservoir: usize, spectral_radius: f64, leak_rate: f64, seed: u64) -> PyResult<Self> {
+        let config = irithyll::ESNConfig::builder()
+            .n_reservoir(n_reservoir)
+            .spectral_radius(spectral_radius)
+            .leak_rate(leak_rate)
+            .seed(seed)
+            .build()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self {
+            inner: irithyll::EchoStateNetwork::new(config),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!("EchoStateNetwork(samples={})", self.inner.n_samples_seen())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StreamingMamba (selective SSM)
+// ---------------------------------------------------------------------------
+
+/// Streaming Mamba model (selective state space model with RLS readout).
+///
+/// Example::
+///
+///     model = StreamingMamba(d_in=3, n_state=16)
+///     model.train([1.0, 2.0, 3.0], 4.0)
+///     pred = model.predict([1.0, 2.0, 3.0])
+///
+#[pyclass(name = "StreamingMamba")]
+struct PyStreamingMamba {
+    inner: irithyll::StreamingMamba,
+}
+
+#[pymethods]
+impl PyStreamingMamba {
+    #[new]
+    #[pyo3(signature = (d_in, n_state=16, seed=42))]
+    fn new(d_in: usize, n_state: usize, seed: u64) -> PyResult<Self> {
+        let config = irithyll::MambaConfig::builder()
+            .d_in(d_in)
+            .n_state(n_state)
+            .seed(seed)
+            .build()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self {
+            inner: irithyll::StreamingMamba::new(config),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!("StreamingMamba(samples={})", self.inner.n_samples_seen())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SpikeNet (spiking neural network with e-prop)
+// ---------------------------------------------------------------------------
+
+/// Spiking Neural Network with e-prop learning.
+///
+/// Example::
+///
+///     model = SpikeNet(n_hidden=32)
+///     model.train([0.5, -0.3], 1.0)
+///     pred = model.predict([0.5, -0.3])
+///
+#[pyclass(name = "SpikeNet")]
+struct PySpikeNet {
+    inner: irithyll::SpikeNet,
+}
+
+#[pymethods]
+impl PySpikeNet {
+    #[new]
+    #[pyo3(signature = (n_hidden=64, learning_rate=0.001, seed=42))]
+    fn new(n_hidden: usize, learning_rate: f64, seed: u64) -> PyResult<Self> {
+        let config = irithyll::SpikeNetConfig::builder()
+            .n_hidden(n_hidden)
+            .learning_rate(learning_rate)
+            .seed(seed)
+            .build()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self {
+            inner: irithyll::SpikeNet::new(config),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!("SpikeNet(samples={})", self.inner.n_samples_seen())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
 
@@ -1262,5 +1526,9 @@ fn irithyll_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDistributional>()?;
     m.add_class::<PyClassifier>()?;
     m.add_class::<PyEvaluator>()?;
+    m.add_class::<PyNextGenRC>()?;
+    m.add_class::<PyEchoStateNetwork>()?;
+    m.add_class::<PyStreamingMamba>()?;
+    m.add_class::<PySpikeNet>()?;
     Ok(())
 }

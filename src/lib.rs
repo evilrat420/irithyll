@@ -209,6 +209,18 @@ pub use bandits::{
     Bandit, ContextualBandit, EpsilonGreedy, LinUCB, ThompsonSampling, UCBTuned, UCB1,
 };
 
+// Re-exports -- reservoir computing
+pub use reservoir::{
+    ESNConfig, ESNConfigBuilder, ESNPreprocessor, EchoStateNetwork, NGRCConfig, NGRCConfigBuilder,
+    NextGenRC,
+};
+
+// Re-exports -- state space models
+pub use ssm::{MambaConfig, MambaConfigBuilder, MambaPreprocessor, StreamingMamba};
+
+// Re-exports -- spiking neural networks
+pub use snn::{SpikeNet, SpikeNetConfig, SpikeNetConfigBuilder, SpikePreprocessor};
+
 // ---------------------------------------------------------------------------
 // Convenience factory functions
 // ---------------------------------------------------------------------------

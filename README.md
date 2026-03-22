@@ -14,7 +14,7 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.75-blue.svg)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
 [![GitHub stars](https://img.shields.io/github/stars/evilrat420/irithyll?style=social)](https://github.com/evilrat420/irithyll)
 
-**Streaming machine learning in Rust** -- gradient boosted trees, kernel methods, linear models, and composable pipelines, all learning one sample at a time.
+**Streaming machine learning in Rust** -- gradient boosted trees, neural streaming architectures (reservoir computing, state space models, spiking networks), kernel methods, linear models, and composable pipelines, all learning one sample at a time.
 
 ```rust
 use irithyll::{pipe, normalizer, sgbt, StreamingLearner};
@@ -38,14 +38,15 @@ irithyll is structured as a Cargo workspace with three crates:
 
 ## Why irithyll?
 
-- **12+ streaming algorithms** under one unified [`StreamingLearner`](https://docs.rs/irithyll/latest/irithyll/trait.StreamingLearner.html) trait
+- **20+ streaming algorithms** under one unified [`StreamingLearner`](https://docs.rs/irithyll/latest/irithyll/trait.StreamingLearner.html) trait
 - **One sample at a time** -- O(1) memory per model, no batches, no windows, no retraining
 - **Embedded deployment** -- train with `irithyll`, export to packed binary, infer with `irithyll-core` on bare metal
 - **Composable pipelines** -- chain preprocessors and learners with a builder API
 - **Concept drift adaptation** -- automatic model replacement when the data distribution shifts
 - **Confidence intervals** -- prediction uncertainty from RLS and conformal methods
 - **Production-grade** -- async streaming, SIMD acceleration, Arrow/Parquet I/O, ONNX export
-- **Pure Rust** -- zero unsafe in `irithyll`, deterministic, serializable, 1100+ tests
+- **Neural streaming architectures** -- reservoir computing (NG-RC, ESN), state space models (Mamba), spiking neural networks (e-prop)
+- **Pure Rust** -- zero unsafe in `irithyll`, deterministic, serializable, 1,997 tests
 
 ## Algorithms
 
@@ -74,6 +75,34 @@ Every algorithm implements `StreamingLearner` -- train and predict with the same
 | [`OnlineFeatureSelector`](https://docs.rs/irithyll/latest/irithyll/struct.OnlineFeatureSelector.html) | Streaming mutual-information feature selection |
 | [`CCIPCA`](https://docs.rs/irithyll/latest/irithyll/struct.CCIPCA.html) | O(kd) streaming PCA without covariance matrices |
 
+## Neural Streaming Architectures
+
+v9 introduces three families of neural architectures, all implementing `StreamingLearner` -- train and predict one sample at a time, compose in pipelines, no batching required.
+
+### Reservoir Computing
+
+| Model | Description | Per-Sample Cost |
+|-------|-------------|-----------------|
+| [`NextGenRC`](https://docs.rs/irithyll/latest/irithyll/reservoir/struct.NextGenRC.html) | Polynomial features of time-delayed observations + RLS readout. No random matrices. Trains in <10 samples. Based on Gauthier et al. 2021 (*Nature Communications*). | O(k * s * d^degree) |
+| [`EchoStateNetwork`](https://docs.rs/irithyll/latest/irithyll/reservoir/struct.EchoStateNetwork.html) | Deterministic cycle/ring reservoir (O(N) weights, not O(N^2)) with leaky integration + RLS readout. Based on Rodan & Tino 2010, Martinuzzi 2025. | O(N^2) readout |
+| [`ESNPreprocessor`](https://docs.rs/irithyll/latest/irithyll/reservoir/struct.ESNPreprocessor.html) | Use ESN as a pipeline preprocessor feeding any downstream learner. | O(N) reservoir step |
+
+### State Space Models (SSM / Mamba)
+
+| Model | Description | Per-Sample Cost |
+|-------|-------------|-----------------|
+| [`StreamingMamba`](https://docs.rs/irithyll/latest/irithyll/ssm/struct.StreamingMamba.html) | Selective state space model with input-dependent B, C, Delta. ZOH discretization, diagonal A matrix. First streaming SSM implementation in Rust. Based on Gu & Dao 2023. | O(D * N) |
+| [`MambaPreprocessor`](https://docs.rs/irithyll/latest/irithyll/ssm/struct.MambaPreprocessor.html) | SSM temporal features feeding SGBT or other learners in a pipeline. | O(D * N) |
+
+### Spiking Neural Networks (SNN / e-prop)
+
+| Model | Description | Per-Sample Cost |
+|-------|-------------|-----------------|
+| [`SpikeNet`](https://docs.rs/irithyll/latest/irithyll/snn/struct.SpikeNet.html) | LIF neurons with e-prop online learning rule. Delta spike encoding for continuous features. Based on Bellec et al. 2020 (*Nature Communications*), Neftci et al. 2019. | O(N_hidden^2) |
+| [`SpikeNetFixed`](https://docs.rs/irithyll/latest/irithyll/irithyll_core/snn/struct.SpikeNetFixed.html) | Full `no_std` training in Q1.14 integer arithmetic. 64 neurons fits in 22KB (Cortex-M0+ 32KB SRAM). Lives in `irithyll-core`. | O(N_hidden^2) |
+
+All neural models also have preprocessor variants (`ESNPreprocessor`, `MambaPreprocessor`, `SpikePreprocessor`) that implement `StreamingPreprocessor` for pipeline composition.
+
 ## Quick Start
 
 ```sh
@@ -97,6 +126,30 @@ let mut rls_m  = rls(0.99);             // RLS, forgetting factor=0.99
 // All share the same interface
 trees.train(&[1.0, 2.0], 3.0);
 let pred = trees.predict(&[1.0, 2.0]);
+```
+
+### Neural Architectures
+
+Reservoir computing, state space models, and spiking networks -- same `StreamingLearner` interface:
+
+```rust
+use irithyll::*;
+
+// NG-RC: time-delay + polynomial features
+let mut model = ngrc(2, 1, 2);
+model.train(&[1.0], 2.0);
+let pred = model.predict(&[1.0]);
+
+// Echo State Network
+let mut model = esn(100, 0.9);
+
+// SSM as feature extractor -> gradient boosted trees
+let mut model = pipe(mamba_preprocessor(5, 16)).learner(sgbt(50, 0.01));
+
+// Spiking neural network
+let mut model = spikenet(64);
+model.train(&[0.5, -0.3], 1.0);
+let pred = model.predict(&[0.5, -0.3]);
 ```
 
 ### Composable Pipelines
@@ -343,15 +396,21 @@ irithyll/                 Workspace root
     stream/               Async tokio-based training runner and predictor handles
     metrics/              Online regression/classification metrics, conformal intervals, EWMA
     anomaly/              Half-space trees for streaming anomaly detection
+    reservoir/            NG-RC (time-delay polynomial) and ESN (cycle reservoir) + preprocessors
+    ssm/                  StreamingMamba (selective SSM) + MambaPreprocessor
+    snn/                  SpikeNet (f64 wrapper), SpikePreprocessor
     serde_support/        Model checkpoint/restore (JSON, bincode)
     export_embedded.rs    SGBT -> packed binary export for irithyll-core
 
-  irithyll-core/          #![no_std] zero-alloc inference engine
+  irithyll-core/          #![no_std] training engine + zero-alloc inference
     packed.rs             12-byte PackedNode, EnsembleHeader, TreeEntry
     traverse.rs           Branch-free tree traversal (single + x4 batch)
     view.rs               EnsembleView<'a> -- zero-copy inference from &[u8]
     quantize.rs           f64 -> f32 quantization utilities
     error.rs              FormatError (no_std compatible)
+    reservoir/            NG-RC delay buffer, polynomial features, cycle reservoir, PRNG (alloc)
+    ssm/                  Selective SSM: diagonal state, ZOH discretization, projections (alloc)
+    snn/                  SpikeNetFixed: Q1.14 LIF neurons, e-prop, delta encoding (alloc)
 
   irithyll-python/        PyO3 Python bindings
 ```
@@ -392,6 +451,8 @@ These flags apply to the `irithyll` crate. `irithyll-core` has no required featu
 | `neural-leaves` | No | Experimental MLP leaf models |
 | `full` | No | Enable all features |
 
+Neural streaming modules (`reservoir`, `ssm`, `snn`) compile unconditionally -- no feature flag required.
+
 ## Examples
 
 Run any example with `cargo run --example <name>`:
@@ -426,6 +487,16 @@ The MSRV is **1.75**. This is checked in CI and will only be raised in minor ver
 > Lundberg, S. M., Erion, G., Chen, H., DeGrave, A., Prutkin, J. M., Nair, B., Katz, R., Himmelfarb, J., Banber, N., & Lee, S.-I. (2020). *From local explanations to global understanding with explainable AI for trees.* Nature Machine Intelligence, 2, 56-67.
 
 > Weng, J., Zhang, Y., & Hwang, W.-S. (2003). *Candid covariance-free incremental principal component analysis.* IEEE Transactions on Pattern Analysis and Machine Intelligence, 25(8), 1034-1040.
+
+> Gauthier, D. J., Bollt, E., Griffith, A., & Barbosa, W. A. S. (2021). *Next generation reservoir computing.* Nature Communications, 12, 5564.
+
+> Rodan, A., & Tino, P. (2010). *Minimum complexity echo state network.* IEEE Transactions on Neural Networks, 23(1), 131-144.
+
+> Gu, A., & Dao, T. (2023). *Mamba: Linear-time sequence modeling with selective state spaces.* arXiv preprint arXiv:2312.00752.
+
+> Bellec, G., Scherr, F., Subramoney, A., Hajek, E., Salaj, D., Legenstein, R., & Maass, W. (2020). *A solution to the learning dilemma for recurrent networks of spiking neurons.* Nature Communications, 11, 3625.
+
+> Neftci, E. O., Mostafa, H., & Zenke, F. (2019). *Surrogate gradient learning in spiking neural networks.* IEEE Signal Processing Magazine, 36(6), 51-63.
 
 ## License
 
