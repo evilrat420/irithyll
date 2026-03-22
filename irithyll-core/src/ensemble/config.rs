@@ -431,14 +431,17 @@ pub struct SGBTConfig {
     pub packed_refresh_interval: u64,
 }
 
+#[cfg(feature = "serde")]
 fn default_empirical_sigma_alpha() -> f64 {
     0.01
 }
 
+#[cfg(feature = "serde")]
 fn default_quality_prune_threshold() -> f64 {
     1e-6
 }
 
+#[cfg(feature = "serde")]
 fn default_quality_prune_patience() -> u64 {
     500
 }
