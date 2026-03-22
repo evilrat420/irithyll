@@ -25,8 +25,16 @@ pub struct PredictArgs {
     pub output: Option<String>,
 }
 
+// TODO: predict currently only supports DynSGBT (loaded via serde JSON).
+// For distributional, multiclass, and bagged models, predict output differs:
+//   - Distributional: (mu, sigma) tuple
+//   - Multiclass: class index (usize) + probability vector
+//   - Bagged: averaged f64
+// These model types need their own serialize/deserialize support before
+// predict can load them. For now, only SGBT models saved as JSON are supported.
+
 pub fn run(args: PredictArgs) -> Result<()> {
-    // 1. Load model
+    // 1. Load model (SGBT only -- see TODO above)
     let json = std::fs::read_to_string(&args.model)?;
     let model = load_model(&json)?;
     println!(

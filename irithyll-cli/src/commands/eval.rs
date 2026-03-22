@@ -36,6 +36,14 @@ pub struct EvalArgs {
     #[arg(long)]
     pub max_depth: Option<usize>,
 
+    /// Model type: sgbt (default), distributional, multiclass, bagged
+    #[arg(long, default_value = "sgbt")]
+    pub model_type: String,
+
+    /// Number of classes (required for softmax loss and multiclass model type)
+    #[arg(long)]
+    pub n_classes: Option<usize>,
+
     /// Rolling window size for metrics
     #[arg(long, default_value = "1000")]
     pub window: usize,
@@ -64,7 +72,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
         cli_config.model.max_depth = d;
     }
 
-    let loss_type = super::train::parse_loss_type(&cli_config.model.loss)?;
+    let loss_type = super::train::parse_loss_type(&cli_config.model.loss, args.n_classes)?;
     let dataset = Dataset::from_csv(Path::new(&args.data), args.target.as_deref())?;
     let sgbt_config = cli_config
         .to_sgbt_config_builder()?
@@ -208,6 +216,7 @@ fn run_eval_tui(mut model: DynSGBT, dataset: Dataset) -> Result<()> {
                     s.elapsed_secs = elapsed;
                     s.throughput = throughput;
                     s.loss_history.push(loss_val);
+                    s.accuracy_history.push(accuracy);
                     s.metrics = vec![
                         ("Accuracy".to_string(), accuracy),
                         ("RMSE".to_string(), reg_metrics.rmse()),
@@ -240,6 +249,13 @@ fn run_eval_tui(mut model: DynSGBT, dataset: Dataset) -> Result<()> {
                     ),
                     ("Time (s)".to_string(), elapsed.as_secs_f64()),
                 ];
+                s.feature_importances = model
+                    .feature_importances()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| (format!("f{}", i), v))
+                    .filter(|(_, v)| *v > 0.0)
+                    .collect();
             }
 
             Ok::<(), color_eyre::Report>(())
