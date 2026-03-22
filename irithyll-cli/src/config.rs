@@ -144,7 +144,6 @@ impl Default for TrainingConfig {
     }
 }
 
-
 impl CliConfig {
     pub fn from_file(path: &str) -> color_eyre::Result<Self> {
         let content = std::fs::read_to_string(path)?;
