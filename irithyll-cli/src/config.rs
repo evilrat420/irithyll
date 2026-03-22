@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Top-level TOML configuration file structure.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct CliConfig {
     #[serde(default)]
     pub model: ModelConfig,
@@ -144,15 +144,6 @@ impl Default for TrainingConfig {
     }
 }
 
-impl Default for CliConfig {
-    fn default() -> Self {
-        Self {
-            model: ModelConfig::default(),
-            data: DataConfig::default(),
-            training: TrainingConfig::default(),
-        }
-    }
-}
 
 impl CliConfig {
     pub fn from_file(path: &str) -> color_eyre::Result<Self> {
