@@ -101,7 +101,10 @@ pub mod learner;
 pub mod learners;
 pub mod pipeline;
 pub mod preprocessing;
+pub mod reservoir;
 pub mod serde_support;
+pub mod snn;
+pub mod ssm;
 pub mod time_series;
 
 #[cfg(feature = "arrow")]
@@ -487,4 +490,117 @@ pub fn thompson(n_arms: usize) -> ThompsonSampling {
 /// ```
 pub fn lin_ucb(n_arms: usize, n_features: usize, alpha: f64) -> LinUCB {
     LinUCB::new(n_arms, n_features, alpha)
+}
+
+/// Create a Next Generation Reservoir Computer.
+///
+/// ```
+/// use irithyll::{ngrc, StreamingLearner};
+///
+/// let mut model = ngrc(2, 1, 2);
+/// model.train(&[1.0], 2.0);
+/// model.train(&[2.0], 3.0);
+/// model.train(&[3.0], 4.0);
+/// let pred = model.predict(&[4.0]);
+/// ```
+pub fn ngrc(k: usize, s: usize, degree: usize) -> reservoir::NextGenRC {
+    reservoir::NextGenRC::new(
+        reservoir::NGRCConfig::builder()
+            .k(k)
+            .s(s)
+            .degree(degree)
+            .build()
+            .expect("ngrc() factory: invalid parameters"),
+    )
+}
+
+/// Create an Echo State Network with cycle topology.
+///
+/// ```
+/// use irithyll::{esn, StreamingLearner};
+///
+/// let mut model = esn(50, 0.9);
+/// for i in 0..60 {
+///     model.train(&[i as f64 * 0.1], 0.0);
+/// }
+/// let pred = model.predict(&[1.0]);
+/// ```
+pub fn esn(n_reservoir: usize, spectral_radius: f64) -> reservoir::EchoStateNetwork {
+    reservoir::EchoStateNetwork::new(
+        reservoir::ESNConfig::builder()
+            .n_reservoir(n_reservoir)
+            .spectral_radius(spectral_radius)
+            .build()
+            .expect("esn() factory: invalid parameters"),
+    )
+}
+
+/// Create an ESN preprocessor for pipeline composition.
+///
+/// ```
+/// use irithyll::{esn_preprocessor, pipe, rls, StreamingLearner};
+///
+/// let mut pipeline = pipe(esn_preprocessor(30, 0.9)).learner(rls(0.999));
+/// pipeline.train(&[1.0], 2.0);
+/// let pred = pipeline.predict(&[1.5]);
+/// ```
+pub fn esn_preprocessor(n_reservoir: usize, spectral_radius: f64) -> reservoir::ESNPreprocessor {
+    reservoir::ESNPreprocessor::new(
+        reservoir::ESNConfig::builder()
+            .n_reservoir(n_reservoir)
+            .spectral_radius(spectral_radius)
+            .warmup(0)
+            .build()
+            .expect("esn_preprocessor() factory: invalid parameters"),
+    )
+}
+
+/// Create a streaming Mamba (selective SSM) model.
+///
+/// ```
+/// use irithyll::{mamba, StreamingLearner};
+///
+/// let mut model = mamba(3, 16);
+/// model.train(&[1.0, 2.0, 3.0], 4.0);
+/// let pred = model.predict(&[1.0, 2.0, 3.0]);
+/// ```
+pub fn mamba(d_in: usize, n_state: usize) -> ssm::StreamingMamba {
+    ssm::StreamingMamba::new(
+        ssm::MambaConfig::builder()
+            .d_in(d_in)
+            .n_state(n_state)
+            .build()
+            .expect("mamba() factory: invalid parameters"),
+    )
+}
+
+/// Create a Mamba preprocessor for pipeline composition.
+///
+/// ```
+/// use irithyll::{mamba_preprocessor, pipe, rls, StreamingLearner};
+///
+/// let mut pipeline = pipe(mamba_preprocessor(3, 8)).learner(rls(0.99));
+/// pipeline.train(&[1.0, 2.0, 3.0], 4.0);
+/// let pred = pipeline.predict(&[1.0, 2.0, 3.0]);
+/// ```
+pub fn mamba_preprocessor(d_in: usize, n_state: usize) -> ssm::MambaPreprocessor {
+    ssm::MambaPreprocessor::new(d_in, n_state, 42)
+}
+
+/// Create a spiking neural network with e-prop learning.
+///
+/// ```
+/// use irithyll::{spikenet, StreamingLearner};
+///
+/// let mut model = spikenet(32);
+/// model.train(&[0.5, -0.3], 1.0);
+/// let pred = model.predict(&[0.5, -0.3]);
+/// ```
+pub fn spikenet(n_hidden: usize) -> snn::SpikeNet {
+    snn::SpikeNet::new(
+        snn::SpikeNetConfig::builder()
+            .n_hidden(n_hidden)
+            .build()
+            .expect("spikenet() factory: invalid parameters"),
+    )
 }
