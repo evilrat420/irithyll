@@ -1,6 +1,6 @@
 [package]
 name = "irithyll-python"
-version = "3.0.0"
+version = "4.0.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Python bindings for irithyll streaming gradient boosted trees"
