@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.3.0] - 2026-03-22
+
+### Added
+
+- **Python bindings overhaul** (irithyll-python v4.0.0, 490 → 1,287 lines):
+  - **Batch API:** `fit(X, y)`, `partial_fit(X, y)`, `predict_batch(X)`, `score(X, y)`
+    for numpy 2D arrays with GIL released during computation.
+  - **Streaming training:** `train_stream(iterator, callback, every_n)` from Python iterators.
+  - **PrequentialEvaluator:** test-then-train evaluation returning accuracy/RMSE/MAE dicts,
+    with `evaluate_streaming()` for periodic snapshots.
+  - **DistributionalGBT:** Python class wrapping DistributionalSGBT — returns (μ, σ) predictions.
+  - **ClassifierGBT:** Python class wrapping MulticlassSGBT — `predict()`, `predict_proba()`,
+    batch `fit(X, y)` for multi-class classification.
+  - **Config expansion:** 5 new hyperparameter fields (gradient_clip_sigma, max_leaf_output,
+    adaptive_leaf_bound, min_hessian_sum, split_reeval_interval).
+  - **Jupyter support:** `_repr_html_()` for rich notebook display.
+  - **Convenience:** `StreamingGBTConfig.fit(X, y)` creates and trains a model in one call.
+
 ## [8.2.3] - 2026-03-21
 
 ### Changed
