@@ -4,3 +4,5 @@ comparison/target/
 datasets/
 .claude/
 irithyll-cli/RESEARCH.md
+irithyll-python/test_model.json
+marketing/
