@@ -188,7 +188,7 @@ struct ARFMember {
 ///
 /// # Example
 ///
-/// ```
+/// ```text
 /// use irithyll::{AdaptiveRandomForest, StreamingLearner};
 /// use irithyll::ensemble::adaptive_forest::ARFConfig;
 /// use irithyll::learners::linear::StreamingLinearModel;

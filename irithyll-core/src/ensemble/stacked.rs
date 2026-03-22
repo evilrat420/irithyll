@@ -22,7 +22,7 @@
 //!
 //! # Example
 //!
-//! ```
+//! ```text
 //! use irithyll::learner::{StreamingLearner, SGBTLearner};
 //! use irithyll::learners::linear::StreamingLinearModel;
 //! use irithyll::ensemble::stacked::StackedEnsemble;

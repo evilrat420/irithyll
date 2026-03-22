@@ -183,7 +183,7 @@ impl DecomposedPrediction {
 ///
 /// # Example
 ///
-/// ```
+/// ```text
 /// use irithyll::SGBTConfig;
 /// use irithyll::ensemble::distributional::DistributionalSGBT;
 ///

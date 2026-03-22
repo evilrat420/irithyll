@@ -20,7 +20,7 @@ use crate::sample::SampleRef;
 ///
 /// # Examples
 ///
-/// ```
+/// ```text
 /// use irithyll::ensemble::multi_target::MultiTargetSGBT;
 /// use irithyll::SGBTConfig;
 ///

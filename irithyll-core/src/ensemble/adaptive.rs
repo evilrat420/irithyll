@@ -7,7 +7,7 @@
 //!
 //! # Example
 //!
-//! ```
+//! ```text
 //! use irithyll::ensemble::adaptive::AdaptiveSGBT;
 //! use irithyll::ensemble::lr_schedule::ExponentialDecayLR;
 //! use irithyll::SGBTConfig;
@@ -73,7 +73,7 @@ impl AdaptiveSGBT<SquaredLoss> {
     /// The initial learning rate is taken from the config and also stored as
     /// `base_lr` for reference.
     ///
-    /// ```
+    /// ```text
     /// use irithyll::ensemble::adaptive::AdaptiveSGBT;
     /// use irithyll::ensemble::lr_schedule::ConstantLR;
     /// use irithyll::SGBTConfig;
@@ -100,7 +100,7 @@ impl AdaptiveSGBT<SquaredLoss> {
 impl<L: Loss> AdaptiveSGBT<L> {
     /// Create an adaptive SGBT with a specific loss function.
     ///
-    /// ```
+    /// ```text
     /// use irithyll::ensemble::adaptive::AdaptiveSGBT;
     /// use irithyll::ensemble::lr_schedule::LinearDecayLR;
     /// use irithyll::loss::logistic::LogisticLoss;
