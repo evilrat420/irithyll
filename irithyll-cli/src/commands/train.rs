@@ -7,13 +7,44 @@ use std::time::Instant;
 
 use irithyll::loss::LossType;
 use irithyll::serde_support::to_json_pretty;
-use irithyll::{DynSGBT, Loss, Sample};
+#[cfg(feature = "tui")]
+use irithyll::Loss;
+use irithyll::{DynSGBT, Sample};
 
 use crate::config::CliConfig;
 use crate::data::Dataset;
 
 #[cfg(feature = "tui")]
 use std::sync::{Arc, Mutex};
+
+/// Model type selection for the CLI.
+#[derive(Debug, Clone, Default)]
+pub enum ModelType {
+    /// Standard DynSGBT (default).
+    #[default]
+    Sgbt,
+    /// DistributionalSGBT -- outputs Gaussian N(mu, sigma^2).
+    Distributional,
+    /// MulticlassSGBT -- one-vs-rest committee.
+    Multiclass,
+    /// BaggedSGBT -- Oza online bagging for variance reduction.
+    Bagged,
+}
+
+impl ModelType {
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "sgbt" => Ok(ModelType::Sgbt),
+            "distributional" => Ok(ModelType::Distributional),
+            "multiclass" => Ok(ModelType::Multiclass),
+            "bagged" => Ok(ModelType::Bagged),
+            _ => Err(eyre!(
+                "unknown model type '{}'. supported: sgbt, distributional, multiclass, bagged",
+                s
+            )),
+        }
+    }
+}
 
 #[derive(Args)]
 pub struct TrainArgs {
@@ -44,6 +75,18 @@ pub struct TrainArgs {
     #[arg(long)]
     pub max_depth: Option<usize>,
 
+    /// Model type: sgbt (default), distributional, multiclass, bagged
+    #[arg(long, default_value = "sgbt")]
+    pub model_type: String,
+
+    /// Number of classes (required for softmax loss and multiclass model type)
+    #[arg(long)]
+    pub n_classes: Option<usize>,
+
+    /// Number of bags for bagged model type (default: 10)
+    #[arg(long, default_value = "10")]
+    pub n_bags: usize,
+
     /// Launch TUI dashboard
     #[arg(long)]
     #[cfg(feature = "tui")]
@@ -69,22 +112,39 @@ pub fn run(args: TrainArgs) -> Result<()> {
         cli_config.model.max_depth = d;
     }
 
-    // 3. Parse loss type from config string
-    let loss_type = parse_loss_type(&cli_config.model.loss)?;
+    // 3. Parse loss type and model type
+    let loss_type = parse_loss_type(&cli_config.model.loss, args.n_classes)?;
+    let model_type = ModelType::from_str(&args.model_type)?;
 
-    // 4. Load dataset first so we can pass feature names to the config
+    // 4. Load dataset
     let dataset = Dataset::from_csv(Path::new(&args.data), args.target.as_deref())?;
 
-    // 5. Build SGBTConfig with feature names from dataset
+    // 5. Branch on model type
+    match model_type {
+        ModelType::Sgbt => run_sgbt(args, cli_config, loss_type, dataset),
+        ModelType::Distributional => run_distributional(args, cli_config, dataset),
+        ModelType::Multiclass => run_multiclass(args, cli_config, dataset),
+        ModelType::Bagged => run_bagged(args, cli_config, loss_type, dataset),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SGBT (default path -- unchanged except for TUI wiring)
+// ---------------------------------------------------------------------------
+
+fn run_sgbt(
+    args: TrainArgs,
+    cli_config: CliConfig,
+    loss_type: LossType,
+    dataset: Dataset,
+) -> Result<()> {
     let sgbt_config = cli_config
         .to_sgbt_config_builder()?
         .feature_names(dataset.feature_names.clone())
         .build()?;
 
-    // 6. Create model
     let mut model = DynSGBT::with_loss(sgbt_config, loss_type.clone().into_loss());
 
-    // 7. Branch: TUI or headless
     #[cfg(feature = "tui")]
     if args.tui {
         return run_with_tui(model, loss_type, dataset, &args.output);
@@ -193,7 +253,7 @@ fn run_with_tui(
 
             let elapsed = start.elapsed();
 
-            // Mark done and update final metrics
+            // Mark done and update final metrics + feature importances
             {
                 let mut s = train_state.lock().unwrap();
                 s.is_training = false;
@@ -211,6 +271,13 @@ fn run_with_tui(
                     ),
                     ("Time (s)".to_string(), elapsed.as_secs_f64()),
                 ];
+                s.feature_importances = model
+                    .feature_importances()
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| (format!("f{}", i), v))
+                    .filter(|(_, v)| *v > 0.0)
+                    .collect();
             }
 
             // Save model
@@ -231,13 +298,298 @@ fn run_with_tui(
     })
 }
 
-pub fn parse_loss_type(s: &str) -> Result<LossType> {
-    match s.to_lowercase().as_str() {
+// ---------------------------------------------------------------------------
+// Distributional SGBT
+// ---------------------------------------------------------------------------
+
+fn run_distributional(_args: TrainArgs, cli_config: CliConfig, dataset: Dataset) -> Result<()> {
+    use irithyll::ensemble::distributional::DistributionalSGBT;
+
+    let sgbt_config = cli_config
+        .to_sgbt_config_builder()?
+        .feature_names(dataset.feature_names.clone())
+        .build()?;
+
+    let mut model = DistributionalSGBT::new(sgbt_config);
+
+    println!(
+        "Loaded {} samples, {} features (distributional mode)",
+        dataset.n_samples, dataset.n_features
+    );
+
+    let pb = ProgressBar::new(dataset.n_samples as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] [{bar:40}] {pos}/{len} ({per_sec})")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    let start = Instant::now();
+    for i in 0..dataset.n_samples {
+        let sample = Sample::new(dataset.features[i].clone(), dataset.targets[i]);
+        model.train_one(&sample);
+        pb.inc(1);
+    }
+    pb.finish_with_message("done");
+    let elapsed = start.elapsed();
+
+    // Print last prediction as summary
+    if dataset.n_samples > 0 {
+        let last = &dataset.features[dataset.n_samples - 1];
+        let pred = model.predict(last);
+        println!();
+        println!("Training complete (distributional)");
+        println!("  Samples:  {}", dataset.n_samples);
+        println!("  Steps:    {}", model.n_steps());
+        println!("  Leaves:   {}", model.total_leaves());
+        println!("  Time:     {:.2}s", elapsed.as_secs_f64());
+        println!(
+            "  Speed:    {:.0} samples/sec",
+            dataset.n_samples as f64 / elapsed.as_secs_f64()
+        );
+        println!("  Last pred: mu={:.4}, sigma={:.4}", pred.mu, pred.sigma);
+    }
+
+    // NOTE: JSON serialization not supported for DistributionalSGBT.
+    // Model is trained but not saved to disk.
+    println!("  [NOTE] Distributional model save not yet supported -- train-only mode");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Multiclass SGBT
+// ---------------------------------------------------------------------------
+
+fn run_multiclass(args: TrainArgs, cli_config: CliConfig, dataset: Dataset) -> Result<()> {
+    use irithyll::ensemble::multiclass::MulticlassSGBT;
+
+    let n_classes = args
+        .n_classes
+        .ok_or_else(|| eyre!("--n-classes is required for multiclass model type"))?;
+
+    let sgbt_config = cli_config
+        .to_sgbt_config_builder()?
+        .feature_names(dataset.feature_names.clone())
+        .build()?;
+
+    let mut model = MulticlassSGBT::new(sgbt_config, n_classes)
+        .map_err(|e| eyre!("failed to create multiclass model: {}", e))?;
+
+    println!(
+        "Loaded {} samples, {} features (multiclass, {} classes)",
+        dataset.n_samples, dataset.n_features, n_classes
+    );
+
+    let pb = ProgressBar::new(dataset.n_samples as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] [{bar:40}] {pos}/{len} ({per_sec})")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    let mut n_correct: u64 = 0;
+
+    let start = Instant::now();
+    for i in 0..dataset.n_samples {
+        // Test-then-train for accuracy tracking
+        let pred_class = model.predict(&dataset.features[i]);
+        let target_class = dataset.targets[i] as usize;
+        if pred_class == target_class {
+            n_correct += 1;
+        }
+
+        let sample = Sample::new(dataset.features[i].clone(), dataset.targets[i]);
+        model.train_one(&sample);
+        pb.inc(1);
+    }
+    pb.finish_with_message("done");
+    let elapsed = start.elapsed();
+
+    let accuracy = if dataset.n_samples > 0 {
+        n_correct as f64 / dataset.n_samples as f64
+    } else {
+        0.0
+    };
+
+    println!();
+    println!("Training complete (multiclass)");
+    println!("  Samples:  {}", dataset.n_samples);
+    println!("  Classes:  {}", n_classes);
+    println!(
+        "  Accuracy: {:.4} ({}/{})",
+        accuracy, n_correct, dataset.n_samples
+    );
+    println!("  Time:     {:.2}s", elapsed.as_secs_f64());
+    println!(
+        "  Speed:    {:.0} samples/sec",
+        dataset.n_samples as f64 / elapsed.as_secs_f64()
+    );
+
+    // NOTE: JSON serialization not supported for MulticlassSGBT.
+    println!("  [NOTE] Multiclass model save not yet supported -- train-only mode");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Bagged SGBT
+// ---------------------------------------------------------------------------
+
+fn run_bagged(
+    args: TrainArgs,
+    cli_config: CliConfig,
+    loss_type: LossType,
+    dataset: Dataset,
+) -> Result<()> {
+    use irithyll::ensemble::bagged::BaggedSGBT;
+    use irithyll::loss::squared::SquaredLoss;
+
+    let n_bags = args.n_bags;
+
+    let sgbt_config = cli_config
+        .to_sgbt_config_builder()?
+        .feature_names(dataset.feature_names.clone())
+        .build()?;
+
+    // BaggedSGBT::new only supports SquaredLoss.
+    // For other losses, BaggedSGBT::with_loss requires Clone on the loss,
+    // which Box<dyn Loss> does not satisfy. Only squared loss for now.
+    match loss_type {
+        LossType::Squared => {}
+        _ => {
+            return Err(eyre!(
+                "bagged model currently only supports squared loss (got '{:?}')",
+                loss_type
+            ));
+        }
+    }
+
+    let mut model = BaggedSGBT::<SquaredLoss>::new(sgbt_config, n_bags)
+        .map_err(|e| eyre!("failed to create bagged model: {}", e))?;
+
+    println!(
+        "Loaded {} samples, {} features (bagged, {} bags)",
+        dataset.n_samples, dataset.n_features, n_bags
+    );
+
+    let pb = ProgressBar::new(dataset.n_samples as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] [{bar:40}] {pos}/{len} ({per_sec})")
+            .unwrap()
+            .progress_chars("=> "),
+    );
+
+    let start = Instant::now();
+    for i in 0..dataset.n_samples {
+        let sample = Sample::new(dataset.features[i].clone(), dataset.targets[i]);
+        model.train_one(&sample);
+        pb.inc(1);
+    }
+    pb.finish_with_message("done");
+    let elapsed = start.elapsed();
+
+    println!();
+    println!("Training complete (bagged)");
+    println!("  Samples:  {}", dataset.n_samples);
+    println!("  Bags:     {}", n_bags);
+    println!("  Time:     {:.2}s", elapsed.as_secs_f64());
+    println!(
+        "  Speed:    {:.0} samples/sec",
+        dataset.n_samples as f64 / elapsed.as_secs_f64()
+    );
+
+    // NOTE: JSON serialization not supported for BaggedSGBT.
+    println!("  [NOTE] Bagged model save not yet supported -- train-only mode");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Loss type parsing
+// ---------------------------------------------------------------------------
+
+/// Parse a loss type string from config.
+///
+/// Supports:
+/// - "squared"
+/// - "logistic"
+/// - "huber" or "huber:1.5" (custom delta)
+/// - "softmax:3" (n_classes required)
+/// - "quantile:0.5" (tau required)
+/// - "expectile:0.9" (tau required)
+pub fn parse_loss_type(s: &str, n_classes_override: Option<usize>) -> Result<LossType> {
+    let lower = s.to_lowercase();
+    let parts: Vec<&str> = lower.splitn(2, ':').collect();
+    let name = parts[0].trim();
+    let param = parts.get(1).map(|p| p.trim());
+
+    match name {
         "squared" => Ok(LossType::Squared),
         "logistic" => Ok(LossType::Logistic),
-        "huber" => Ok(LossType::Huber { delta: 1.0 }),
+        "huber" => {
+            let delta = if let Some(p) = param {
+                p.parse::<f64>().map_err(|_| {
+                    eyre!(
+                        "invalid huber delta '{}' -- expected a float (e.g. huber:1.5)",
+                        p
+                    )
+                })?
+            } else {
+                1.0
+            };
+            Ok(LossType::Huber { delta })
+        }
+        "softmax" => {
+            // n_classes from param string or from --n-classes flag
+            let n_classes = if let Some(p) = param {
+                p.parse::<usize>().map_err(|_| {
+                    eyre!(
+                        "invalid softmax n_classes '{}' -- expected an integer (e.g. softmax:3)",
+                        p
+                    )
+                })?
+            } else if let Some(n) = n_classes_override {
+                n
+            } else {
+                return Err(eyre!(
+                    "softmax loss requires n_classes -- use 'softmax:3' or --n-classes 3"
+                ));
+            };
+            if n_classes < 2 {
+                return Err(eyre!("softmax n_classes must be >= 2, got {}", n_classes));
+            }
+            Ok(LossType::Softmax { n_classes })
+        }
+        "quantile" => {
+            let tau = param
+                .ok_or_else(|| eyre!("quantile loss requires tau -- use 'quantile:0.5'"))?
+                .parse::<f64>()
+                .map_err(|_| {
+                    eyre!("invalid quantile tau -- expected a float (e.g. quantile:0.5)")
+                })?;
+            if tau <= 0.0 || tau >= 1.0 {
+                return Err(eyre!("quantile tau must be in (0, 1), got {}", tau));
+            }
+            Ok(LossType::Quantile { tau })
+        }
+        "expectile" => {
+            let tau = param
+                .ok_or_else(|| eyre!("expectile loss requires tau -- use 'expectile:0.9'"))?
+                .parse::<f64>()
+                .map_err(|_| {
+                    eyre!("invalid expectile tau -- expected a float (e.g. expectile:0.9)")
+                })?;
+            if tau <= 0.0 || tau >= 1.0 {
+                return Err(eyre!("expectile tau must be in (0, 1), got {}", tau));
+            }
+            Ok(LossType::Expectile { tau })
+        }
         _ => Err(eyre!(
-            "unknown loss type '{}'. supported: squared, logistic, huber",
+            "unknown loss type '{}'. supported: squared, logistic, huber[:delta], softmax:N, quantile:tau, expectile:tau",
             s
         )),
     }

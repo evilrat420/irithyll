@@ -119,7 +119,7 @@ fn render_header(frame: &mut ratatui::Frame, state: &app::AppState, area: ratatu
     frame.render_widget(paragraph, area);
 }
 
-/// Main area: metrics table (left) + loss chart (right).
+/// Main area: metrics + importances (left) + loss/accuracy charts (right).
 #[cfg(feature = "tui")]
 fn render_main(frame: &mut ratatui::Frame, state: &app::AppState, area: ratatui::layout::Rect) {
     use ratatui::prelude::*;
@@ -127,13 +127,40 @@ fn render_main(frame: &mut ratatui::Frame, state: &app::AppState, area: ratatui:
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(40), // Metrics
-            Constraint::Percentage(60), // Chart
+            Constraint::Percentage(40), // Left: metrics + importances
+            Constraint::Percentage(60), // Right: charts
         ])
         .split(area);
 
-    render_metrics_table(frame, state, chunks[0]);
-    render_loss_chart(frame, state, chunks[1]);
+    // Left panel: metrics table, optionally split with feature importances.
+    let left_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(if state.feature_importances.is_empty() {
+            vec![Constraint::Percentage(100)]
+        } else {
+            vec![Constraint::Percentage(55), Constraint::Percentage(45)]
+        })
+        .split(chunks[0]);
+
+    render_metrics_table(frame, state, left_chunks[0]);
+    if !state.feature_importances.is_empty() {
+        render_importances(frame, state, left_chunks[1]);
+    }
+
+    // Right panel: loss chart, optionally split with accuracy chart.
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(if state.accuracy_history.is_empty() {
+            vec![Constraint::Percentage(100)]
+        } else {
+            vec![Constraint::Percentage(50), Constraint::Percentage(50)]
+        })
+        .split(chunks[1]);
+
+    render_loss_chart(frame, state, right_chunks[0]);
+    if !state.accuracy_history.is_empty() {
+        render_accuracy_chart(frame, state, right_chunks[1]);
+    }
 }
 
 /// Left panel: scrollable metrics table.
@@ -202,28 +229,179 @@ fn render_loss_chart(
         return;
     }
 
-    let data: Vec<(f64, f64)> = state
-        .loss_history
-        .iter()
-        .enumerate()
-        .map(|(i, v)| (i as f64, *v))
-        .collect();
+    // Downsample to at most 200 points by averaging buckets so the chart
+    // stays readable even when loss_history grows very large.
+    let max_points = 200;
+    let data: Vec<(f64, f64)> = if state.loss_history.len() > max_points {
+        let bucket_size = state.loss_history.len() / max_points;
+        state
+            .loss_history
+            .chunks(bucket_size)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let avg = chunk.iter().sum::<f64>() / chunk.len() as f64;
+                (i as f64, avg)
+            })
+            .collect()
+    } else {
+        state
+            .loss_history
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i as f64, *v))
+            .collect()
+    };
 
     let x_max = (data.len() as f64).max(1.0);
     let y_max = state.loss_history.iter().cloned().fold(0.0_f64, f64::max);
     let y_min = state.loss_history.iter().cloned().fold(f64::MAX, f64::min);
 
-    // Avoid zero-height axis when all losses are identical.
-    let (y_lo, y_hi) = if (y_max - y_min).abs() < f64::EPSILON {
-        (y_min - 0.1, y_max + 0.1)
-    } else {
-        (y_min * 0.9, y_max * 1.1)
-    };
+    // Pad the Y-axis symmetrically so dots near min/max are never clipped.
+    let range = (y_max - y_min).max(0.001);
+    let padding = range * 0.15;
+    let (y_lo, y_hi) = (y_min - padding, y_max + padding);
 
     let dataset = Dataset::default()
         .marker(Marker::Braille)
         .graph_type(GraphType::Line)
         .style(Style::default().fg(theme::PEACH))
+        .data(&data);
+
+    let chart = Chart::new(vec![dataset])
+        .block(block)
+        .x_axis(
+            Axis::default()
+                .bounds([0.0, x_max])
+                .style(Style::default().fg(theme::SUBTEXT0)),
+        )
+        .y_axis(
+            Axis::default()
+                .bounds([y_lo, y_hi])
+                .labels(vec![
+                    Line::from(format!("{:.4}", y_min)),
+                    Line::from(format!("{:.4}", y_max)),
+                ])
+                .style(Style::default().fg(theme::SUBTEXT0)),
+        );
+
+    frame.render_widget(chart, area);
+}
+
+/// Left sub-panel: horizontal bar chart of feature importances.
+#[cfg(feature = "tui")]
+fn render_importances(
+    frame: &mut ratatui::Frame,
+    state: &app::AppState,
+    area: ratatui::layout::Rect,
+) {
+    use ratatui::{prelude::*, widgets::*};
+
+    let block = Block::default()
+        .title(" Feature Importances ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::SURFACE1))
+        .style(Style::default().bg(theme::BASE));
+
+    // Scale f64 importances to u64 (multiply by 1000) for BarChart.
+    // Take the top entries that fit; sort descending by importance.
+    let mut sorted: Vec<(&str, f64)> = state
+        .feature_importances
+        .iter()
+        .map(|(name, val)| (name.as_str(), *val))
+        .collect();
+    sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Limit to at most 10 features so it fits the panel.
+    sorted.truncate(10);
+
+    let bar_data: Vec<(&str, u64)> = sorted
+        .iter()
+        .map(|(name, val)| (*name, (val * 1000.0) as u64))
+        .collect();
+
+    let chart = BarChart::default()
+        .data(&bar_data)
+        .block(block)
+        .bar_width(1)
+        .bar_gap(0)
+        .bar_style(Style::default().fg(theme::MAUVE))
+        .value_style(
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        )
+        .label_style(Style::default().fg(theme::SUBTEXT0))
+        .direction(Direction::Horizontal);
+
+    frame.render_widget(chart, area);
+}
+
+/// Right sub-panel: Braille-style accuracy curve chart.
+#[cfg(feature = "tui")]
+fn render_accuracy_chart(
+    frame: &mut ratatui::Frame,
+    state: &app::AppState,
+    area: ratatui::layout::Rect,
+) {
+    use ratatui::{prelude::*, symbols::Marker, widgets::*};
+
+    let block = Block::default()
+        .title(" Accuracy Curve ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::SURFACE1))
+        .style(Style::default().bg(theme::BASE));
+
+    if state.accuracy_history.is_empty() {
+        let empty = Paragraph::new("Waiting for data...")
+            .style(Style::default().fg(theme::SUBTEXT0))
+            .block(block)
+            .alignment(Alignment::Center);
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    // Downsample accuracy history the same way as loss.
+    let max_points = 200;
+    let data: Vec<(f64, f64)> = if state.accuracy_history.len() > max_points {
+        let bucket_size = state.accuracy_history.len() / max_points;
+        state
+            .accuracy_history
+            .chunks(bucket_size)
+            .enumerate()
+            .map(|(i, chunk)| {
+                let avg = chunk.iter().sum::<f64>() / chunk.len() as f64;
+                (i as f64, avg)
+            })
+            .collect()
+    } else {
+        state
+            .accuracy_history
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i as f64, *v))
+            .collect()
+    };
+
+    let x_max = (data.len() as f64).max(1.0);
+    let y_max = state
+        .accuracy_history
+        .iter()
+        .cloned()
+        .fold(0.0_f64, f64::max);
+    let y_min = state
+        .accuracy_history
+        .iter()
+        .cloned()
+        .fold(f64::MAX, f64::min);
+
+    let range = (y_max - y_min).max(0.001);
+    let padding = range * 0.15;
+    let (y_lo, y_hi) = (y_min - padding, y_max + padding);
+
+    let dataset = Dataset::default()
+        .marker(Marker::Braille)
+        .graph_type(GraphType::Line)
+        .style(Style::default().fg(theme::GREEN))
         .data(&data);
 
     let chart = Chart::new(vec![dataset])

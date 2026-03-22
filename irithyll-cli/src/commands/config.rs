@@ -21,9 +21,28 @@ pub struct ConfigArgs {
 
 pub fn run(args: ConfigArgs) -> Result<()> {
     if args.generate {
-        // Generate default config
+        // Generate default config with commented advanced options
         let config = CliConfig::default();
-        let toml_str = toml::to_string_pretty(&config)?;
+        let mut toml_str = toml::to_string_pretty(&config)?;
+
+        // Append commented-out advanced options as documentation
+        toml_str.push_str("\n# --- Advanced options (uncomment to enable) ---\n");
+        toml_str.push_str("# gradient_clip_sigma = 3.0\n");
+        toml_str.push_str("# max_leaf_output = 3.0\n");
+        toml_str.push_str("# adaptive_leaf_bound = 3.0\n");
+        toml_str.push_str("# min_hessian_sum = 10.0\n");
+        toml_str.push_str("# split_reeval_interval = 500\n");
+        toml_str.push_str("# max_tree_samples = 50000\n");
+        toml_str.push_str("# leaf_half_life = 1000\n");
+        toml_str.push_str("#\n");
+        toml_str.push_str("# --- Loss types ---\n");
+        toml_str.push_str("# loss = \"squared\"       # regression (default)\n");
+        toml_str.push_str("# loss = \"logistic\"      # binary classification\n");
+        toml_str.push_str("# loss = \"huber:1.0\"     # robust regression (delta=1.0)\n");
+        toml_str.push_str("# loss = \"softmax:3\"     # multiclass (3 classes)\n");
+        toml_str.push_str("# loss = \"quantile:0.5\"  # median regression (tau=0.5)\n");
+        toml_str.push_str("# loss = \"expectile:0.9\" # expectile regression (tau=0.9)\n");
+
         std::fs::write(&args.output, &toml_str)?;
         println!("Generated default config at {}", args.output);
         return Ok(());
@@ -49,6 +68,31 @@ pub fn run(args: ConfigArgs) -> Result<()> {
                         println!("    delta:         {}", config.model.delta);
                         println!("    loss:          {}", config.model.loss);
                         println!("    seed:          {}", config.model.seed);
+                        println!(
+                            "    feature_subsample_rate: {}",
+                            config.model.feature_subsample_rate
+                        );
+                        if let Some(v) = config.model.gradient_clip_sigma {
+                            println!("    gradient_clip_sigma: {}", v);
+                        }
+                        if let Some(v) = config.model.max_leaf_output {
+                            println!("    max_leaf_output: {}", v);
+                        }
+                        if let Some(v) = config.model.adaptive_leaf_bound {
+                            println!("    adaptive_leaf_bound: {}", v);
+                        }
+                        if let Some(v) = config.model.min_hessian_sum {
+                            println!("    min_hessian_sum: {}", v);
+                        }
+                        if let Some(v) = config.model.split_reeval_interval {
+                            println!("    split_reeval_interval: {}", v);
+                        }
+                        if let Some(v) = config.model.max_tree_samples {
+                            println!("    max_tree_samples: {}", v);
+                        }
+                        if let Some(v) = config.model.leaf_half_life {
+                            println!("    leaf_half_life: {}", v);
+                        }
                     }
                     Err(e) => {
                         println!("[ERROR] Config at {} parses but has invalid values:", path);
