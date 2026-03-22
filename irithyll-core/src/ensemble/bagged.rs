@@ -10,7 +10,7 @@
 //!
 //! # Example
 //!
-//! ```
+//! ```text
 //! use irithyll::ensemble::bagged::BaggedSGBT;
 //! use irithyll::SGBTConfig;
 //!

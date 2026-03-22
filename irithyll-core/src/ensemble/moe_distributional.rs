@@ -42,7 +42,7 @@
 //!
 //! # Example
 //!
-//! ```
+//! ```text
 //! use irithyll::ensemble::moe_distributional::MoEDistributionalSGBT;
 //! use irithyll::ensemble::moe::GatingMode;
 //! use irithyll::SGBTConfig;

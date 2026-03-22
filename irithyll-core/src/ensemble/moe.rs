@@ -40,7 +40,7 @@
 //!
 //! # Example
 //!
-//! ```
+//! ```text
 //! use irithyll::ensemble::moe::{MoESGBT, GatingMode};
 //! use irithyll::SGBTConfig;
 //!

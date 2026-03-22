@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```
+//! ```text
 //! use irithyll::ensemble::quantile_regressor::QuantileRegressorSGBT;
 //! use irithyll::SGBTConfig;
 //!
