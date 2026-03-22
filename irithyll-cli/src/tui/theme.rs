@@ -1,5 +1,7 @@
 //! Catppuccin Mocha color palette for the TUI dashboard.
 
+#![allow(dead_code)]
+
 use ratatui::style::Color;
 
 pub const BASE: Color = Color::Rgb(30, 30, 46);
