@@ -498,6 +498,38 @@ The MSRV is **1.75**. This is checked in CI and will only be raised in minor ver
 
 > Neftci, E. O., Mostafa, H., & Zenke, F. (2019). *Surrogate gradient learning in spiking neural networks.* IEEE Signal Processing Magazine, 36(6), 51-63.
 
+> Jaeger, H. (2001). *The "echo state" approach to analysing and training recurrent neural networks.* GMD Report 148.
+
+> Lukoševičius, M., & Jaeger, H. (2009). *Reservoir computing approaches to recurrent neural network training.* Computer Science Review, 3(3), 127-149.
+
+> Martinuzzi, F. (2025). *Minimal deterministic echo state networks outperform random reservoirs in learning chaotic dynamics.* Chaos, 35.
+
+> Sussillo, D., & Abbott, L. F. (2009). *Generating coherent patterns of activity from chaotic neural networks.* Neuron, 63(4), 544-557.
+
+> Yan, M., Huang, C., Bienstman, P., Tino, P., Lin, W., & Sun, J. (2024). *Emerging opportunities and challenges for the future of reservoir computing.* Nature Communications, 15, 2056.
+
+> Gu, A., Goel, K., & Ré, C. (2021). *Efficiently modeling long sequences with structured state spaces.* arXiv preprint arXiv:2111.00396.
+
+> Gu, A., Gupta, A., Goel, K., & Ré, C. (2022). *On the parameterization and initialization of diagonal state space models.* NeurIPS 2022.
+
+> Dao, T., & Gu, A. (2024). *Transformers are SSMs: Generalized models and efficient algorithms through structured state space duality.* arXiv preprint arXiv:2405.21060.
+
+> Liu, B., Wang, R., Wu, L., Feng, Y., Stone, P., & Liu, Q. (2024). *Longhorn: State space models are amortized online learners.* NeurIPS 2024.
+
+> Kleyko, D., Frady, E. P., Kheffache, M., & Osipov, E. (2020). *Integer echo state networks: Efficient reservoir computing for digital hardware.* IEEE TNNLS.
+
+> Zenke, F., & Ganguli, S. (2018). *SuperSpike: Supervised learning in multilayer spiking neural networks.* Neural Computation, 30(6), 1514-1541.
+
+> Eshraghian, J. K., Ward, M., Neftci, E. O., et al. (2023). *Training spiking neural networks using lessons from deep learning.* Proceedings of the IEEE, 111(9), 1016-1054.
+
+> Frenkel, C., & Indiveri, G. (2022). *ReckOn: A 28nm sub-mm² task-agnostic spiking recurrent neural network processor.* ISSCC 2022.
+
+> Meyer, S. M., et al. (2024). *Diagonal state space model on Loihi 2 for efficient streaming.* arXiv preprint arXiv:2409.15022.
+
+> Jaeger, H., Lukoševičius, M., Popovici, D., & Siewert, U. (2007). *Optimization and applications of echo state networks with leaky-integrator neurons.* Neural Networks, 20(3), 335-352.
+
+> Javed, K., Shah, H., Sutton, R., & White, M. (2023). *Scalable real-time recurrent learning.* arXiv preprint arXiv:2302.05326.
+
 ## License
 
 Licensed under either of
