@@ -117,6 +117,17 @@ pub struct TreeConfig {
     /// `None` (default) disables adaptive bounds.
     pub adaptive_leaf_bound: Option<f64>,
 
+    /// Per-split information criterion (Lunde-Kleppe-Skaug 2020).
+    ///
+    /// When `Some(cir_factor)`, replaces `max_depth` with a per-split
+    /// generalization test. Each candidate split must have
+    /// `gain > cir_factor * sigma^2_g / n * n_features`.
+    /// `max_depth * 2` becomes a hard safety ceiling.
+    ///
+    /// Typical: 7.5 (<=10 features), 9.0 (<=50), 11.0 (<=200).
+    /// `None` (default) uses static `max_depth` only.
+    pub adaptive_depth: Option<f64>,
+
     /// Minimum hessian sum before a leaf produces non-zero output.
     ///
     /// When `Some(min_h)`, leaves with `hess_sum < min_h` return 0.0.
@@ -158,6 +169,7 @@ impl Default for TreeConfig {
             monotone_constraints: None,
             max_leaf_output: None,
             adaptive_leaf_bound: None,
+            adaptive_depth: None,
             min_hessian_sum: None,
             leaf_model_type: LeafModelType::default(),
         }
@@ -317,6 +329,24 @@ impl TreeConfig {
     #[inline]
     pub fn adaptive_leaf_bound_opt(mut self, k: Option<f64>) -> Self {
         self.adaptive_leaf_bound = k;
+        self
+    }
+
+    /// Set the per-split information criterion factor (Lunde-Kleppe-Skaug 2020).
+    ///
+    /// When enabled, each candidate split must pass a generalization test
+    /// before being committed. `max_depth * 2` becomes a hard safety ceiling.
+    /// Typical: 7.5 (<=10 features), 9.0 (<=50), 11.0 (<=200).
+    #[inline]
+    pub fn adaptive_depth(mut self, factor: f64) -> Self {
+        self.adaptive_depth = Some(factor);
+        self
+    }
+
+    /// Optionally set the per-split information criterion factor.
+    #[inline]
+    pub fn adaptive_depth_opt(mut self, factor: Option<f64>) -> Self {
+        self.adaptive_depth = factor;
         self
     }
 

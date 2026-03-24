@@ -335,6 +335,7 @@ impl DistributionalSGBT {
             .gradient_clip_sigma_opt(config.gradient_clip_sigma)
             .monotone_constraints_opt(config.monotone_constraints.clone())
             .max_leaf_output_opt(config.max_leaf_output)
+            .adaptive_depth_opt(config.adaptive_depth)
             .min_hessian_sum_opt(config.min_hessian_sum)
             .leaf_model_type(config.leaf_model_type.clone());
 
@@ -1510,6 +1511,7 @@ impl DistributionalSGBT {
             .feature_types_opt(state.config.feature_types.clone())
             .gradient_clip_sigma_opt(state.config.gradient_clip_sigma)
             .monotone_constraints_opt(state.config.monotone_constraints.clone())
+            .adaptive_depth_opt(state.config.adaptive_depth)
             .leaf_model_type(state.config.leaf_model_type.clone());
 
         // Rebuild a Vec<BoostingStep> from step snapshots with a given seed transform.

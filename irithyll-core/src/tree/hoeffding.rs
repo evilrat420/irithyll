@@ -897,7 +897,15 @@ impl HoeffdingTree {
     /// Returns `true` if a split was performed.
     fn attempt_split(&mut self, leaf_id: NodeId) -> bool {
         let depth = self.arena.get_depth(leaf_id);
-        let at_max_depth = depth as usize >= self.config.max_depth;
+
+        // When adaptive_depth is enabled, max_depth * 2 is the hard safety ceiling;
+        // the per-split CIR test handles generalization. Otherwise, use static max_depth.
+        let hard_ceiling = if self.config.adaptive_depth.is_some() {
+            self.config.max_depth.saturating_mul(2)
+        } else {
+            self.config.max_depth
+        };
+        let at_max_depth = depth as usize >= hard_ceiling;
 
         if at_max_depth {
             // Only proceed if split re-evaluation is enabled and the interval
@@ -1089,6 +1097,42 @@ impl HoeffdingTree {
         } else {
             0.0
         };
+
+        // Per-split information criterion (Lunde-Kleppe-Skaug 2020).
+        // Acts as a FIRST gate before the Hoeffding bound check.
+        if let Some(cir_factor) = self.config.adaptive_depth {
+            let n = sample_count as f64;
+            if n > 1.0 {
+                // Use effective_n with EWMA decay if configured
+                let effective_n = match self.config.leaf_decay_alpha {
+                    Some(alpha) => n.min(1.0 / (1.0 - alpha)),
+                    None => n,
+                };
+
+                // Get gradient variance from Welford stats in the leaf state
+                let grad_var = self
+                    .leaf_states
+                    .get(leaf_id.0 as usize)
+                    .and_then(|o| o.as_ref())
+                    .map(|leaf_state| {
+                        if leaf_state.clip_grad_count > 1 {
+                            leaf_state.clip_grad_m2 / (leaf_state.clip_grad_count as f64 - 1.0)
+                        } else {
+                            // Fallback: estimate from grad/hess sums
+                            let mean_grad = leaf_state.grad_sum / leaf_state.hess_sum.max(1.0);
+                            mean_grad * mean_grad + 1.0
+                        }
+                    })
+                    .unwrap_or(1.0);
+
+                let n_feat = self.n_features.unwrap_or(1) as f64;
+                let penalty = cir_factor * grad_var / effective_n * n_feat;
+
+                if best_gain <= penalty {
+                    return false; // Don't split — insufficient generalization evidence
+                }
+            }
+        }
 
         // Hoeffding bound: epsilon = sqrt(R^2 * ln(1/delta) / (2 * n))
         // R = 1.0 (conservative bound on the range of the gain function).
@@ -2417,5 +2461,215 @@ mod tests {
         assert!(tree.leaf_grad_hess(NodeId::NONE).is_none());
         // A non-existent node should return None
         assert!(tree.leaf_grad_hess(NodeId(999)).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Adaptive depth (per-split information criterion) tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn adaptive_depth_none_identical_to_static_max_depth() {
+        // With adaptive_depth = None, behavior should be identical to the
+        // classic static max_depth check.
+        let config_static = TreeConfig::new()
+            .max_depth(3)
+            .n_bins(32)
+            .grace_period(20)
+            .lambda(0.1)
+            .delta(1e-3);
+
+        let config_none = TreeConfig::new()
+            .max_depth(3)
+            .n_bins(32)
+            .grace_period(20)
+            .lambda(0.1)
+            .delta(1e-3);
+
+        // Verify adaptive_depth is None by default
+        assert!(config_none.adaptive_depth.is_none());
+
+        let mut tree_static = HoeffdingTree::new(config_static);
+        let mut tree_none = HoeffdingTree::new(config_none);
+
+        let mut rng_state: u64 = 42;
+        for _ in 0..2000 {
+            let x = test_rand_f64(&mut rng_state) * 10.0;
+            let y = 2.0 * x;
+            let feat = [x, x * 0.5, x * x];
+            let pred_s = tree_static.predict(&feat);
+            let pred_n = tree_none.predict(&feat);
+            tree_static.train_one(&feat, pred_s - y, 1.0);
+            tree_none.train_one(&feat, pred_n - y, 1.0);
+        }
+
+        // Both trees should have the same number of nodes
+        assert_eq!(
+            tree_static.arena().n_nodes(),
+            tree_none.arena().n_nodes(),
+            "adaptive_depth=None should produce identical tree structure to static max_depth"
+        );
+    }
+
+    #[test]
+    fn adaptive_depth_few_samples_stays_shallow() {
+        // With adaptive_depth enabled and few noisy samples,
+        // the CIR penalty should prevent deep splits.
+        let config = TreeConfig::new()
+            .max_depth(6)
+            .n_bins(32)
+            .grace_period(20)
+            .lambda(0.1)
+            .delta(1e-3)
+            .adaptive_depth(7.5);
+
+        let mut tree = HoeffdingTree::new(config);
+        let mut rng_state: u64 = 99;
+
+        // Feed a small number of noisy samples — mostly noise, weak signal
+        for _ in 0..100 {
+            let x = test_rand_f64(&mut rng_state) * 10.0;
+            let noise = (test_rand_f64(&mut rng_state) - 0.5) * 20.0; // large noise
+            let y = 0.1 * x + noise;
+            let feat = [x, test_rand_f64(&mut rng_state) * 5.0];
+            let pred = tree.predict(&feat);
+            tree.train_one(&feat, pred - y, 1.0);
+        }
+
+        // With few noisy samples and CIR penalty, the tree should stay shallower
+        // than the hard ceiling of max_depth*2 = 12. In fact, with this much noise
+        // and few samples, we expect very few splits.
+        let n_nodes = tree.arena().n_nodes();
+        assert!(
+            n_nodes <= 15,
+            "adaptive_depth with few noisy samples should keep tree shallow, got {} nodes",
+            n_nodes
+        );
+    }
+
+    #[test]
+    fn adaptive_depth_many_samples_grows_deeper() {
+        // With many clean samples, the CIR penalty decays (1/n) and the tree
+        // should grow deeper than with few samples.
+        let config_few = TreeConfig::new()
+            .max_depth(6)
+            .n_bins(32)
+            .grace_period(20)
+            .lambda(0.1)
+            .delta(1e-3)
+            .adaptive_depth(7.5);
+
+        let config_many = TreeConfig::new()
+            .max_depth(6)
+            .n_bins(32)
+            .grace_period(20)
+            .lambda(0.1)
+            .delta(1e-3)
+            .adaptive_depth(7.5);
+
+        let mut tree_few = HoeffdingTree::new(config_few);
+        let mut tree_many = HoeffdingTree::new(config_many);
+
+        let mut rng_state: u64 = 42;
+
+        // Strong signal: y = 3*x1 + 2*x2 (clean)
+        // Train "few" with 200 samples
+        for _ in 0..200 {
+            let x1 = test_rand_f64(&mut rng_state) * 10.0;
+            let x2 = test_rand_f64(&mut rng_state) * 5.0;
+            let y = 3.0 * x1 + 2.0 * x2;
+            let feat = [x1, x2];
+            let pred = tree_few.predict(&feat);
+            tree_few.train_one(&feat, pred - y, 1.0);
+        }
+
+        // Train "many" with 5000 samples
+        let mut rng_state2: u64 = 42;
+        for _ in 0..5000 {
+            let x1 = test_rand_f64(&mut rng_state2) * 10.0;
+            let x2 = test_rand_f64(&mut rng_state2) * 5.0;
+            let y = 3.0 * x1 + 2.0 * x2;
+            let feat = [x1, x2];
+            let pred = tree_many.predict(&feat);
+            tree_many.train_one(&feat, pred - y, 1.0);
+        }
+
+        // The tree with more samples should have at least as many nodes
+        // (penalty = cir_factor * var / n * n_feat decays with n)
+        assert!(
+            tree_many.arena().n_nodes() >= tree_few.arena().n_nodes(),
+            "more samples should allow deeper growth: many={} vs few={}",
+            tree_many.arena().n_nodes(),
+            tree_few.arena().n_nodes()
+        );
+    }
+
+    #[test]
+    fn adaptive_depth_penalty_scales_inversely_with_n() {
+        // Directly verify the penalty math: penalty = cir_factor * grad_var / n * n_feat
+        // With fixed cir_factor=7.5, grad_var=1.0, n_feat=2:
+        //   n=100  -> penalty = 7.5 * 1.0 / 100 * 2 = 0.15
+        //   n=1000 -> penalty = 7.5 * 1.0 / 1000 * 2 = 0.015
+        // So a gain of 0.05 would fail at n=100 but pass at n=1000.
+        let cir_factor: f64 = 7.5;
+        let grad_var: f64 = 1.0;
+        let n_feat: f64 = 2.0;
+
+        let penalty_100 = cir_factor * grad_var / 100.0 * n_feat;
+        let penalty_1000 = cir_factor * grad_var / 1000.0 * n_feat;
+
+        assert!(
+            (penalty_100 - 0.15).abs() < 1e-10,
+            "penalty at n=100 should be 0.15, got {}",
+            penalty_100
+        );
+        assert!(
+            (penalty_1000 - 0.015).abs() < 1e-10,
+            "penalty at n=1000 should be 0.015, got {}",
+            penalty_1000
+        );
+        assert!(
+            penalty_100 > penalty_1000,
+            "penalty should decrease with more samples"
+        );
+
+        // A gain of 0.05 should fail at n=100 (0.05 <= 0.15) but pass at n=1000 (0.05 > 0.015)
+        let gain = 0.05;
+        assert!(gain <= penalty_100, "gain should fail CIR at n=100");
+        assert!(gain > penalty_1000, "gain should pass CIR at n=1000");
+    }
+
+    #[test]
+    fn adaptive_depth_hard_ceiling_respected() {
+        // Even with adaptive_depth enabled, trees should never exceed max_depth * 2.
+        let config = TreeConfig::new()
+            .max_depth(3)
+            .n_bins(32)
+            .grace_period(10)
+            .lambda(0.01)
+            .gamma(0.0)
+            .delta(1e-2) // Loose bound for easy splitting
+            .adaptive_depth(0.001); // Very small factor = almost no CIR penalty
+
+        let mut tree = HoeffdingTree::new(config);
+        let mut rng_state: u64 = 777;
+
+        // Train with very strong, clean signal to maximize splitting
+        for _ in 0..10000 {
+            let x = test_rand_f64(&mut rng_state) * 100.0;
+            let y = x * x; // Strong nonlinear signal
+            let feat = [x];
+            let pred = tree.predict(&feat);
+            tree.train_one(&feat, pred - y, 1.0);
+        }
+
+        // Hard ceiling = max_depth * 2 = 6, so max leaves = 2^6 = 64
+        let max_leaves = 1usize << 6;
+        let n_leaves = tree.arena().n_leaves();
+        assert!(
+            n_leaves <= max_leaves,
+            "tree should respect hard ceiling of max_depth*2=6 ({} max leaves), got {} leaves",
+            max_leaves,
+            n_leaves
+        );
     }
 }

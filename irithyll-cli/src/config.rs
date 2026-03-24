@@ -49,6 +49,9 @@ pub struct ModelConfig {
     /// Per-leaf adaptive output bound (sigma multiplier). None = disabled.
     #[serde(default)]
     pub adaptive_leaf_bound: Option<f64>,
+    /// Per-split information criterion factor (Lunde-Kleppe-Skaug 2020). None = disabled.
+    #[serde(default)]
+    pub adaptive_depth: Option<f64>,
     /// Minimum hessian sum before a leaf produces non-zero output. None = disabled.
     #[serde(default)]
     pub min_hessian_sum: Option<f64>,
@@ -297,6 +300,7 @@ impl Default for ModelConfig {
             gradient_clip_sigma: None,
             max_leaf_output: None,
             adaptive_leaf_bound: None,
+            adaptive_depth: None,
             min_hessian_sum: None,
             split_reeval_interval: None,
             max_tree_samples: None,
@@ -348,6 +352,9 @@ impl CliConfig {
         }
         if let Some(v) = self.model.adaptive_leaf_bound {
             builder = builder.adaptive_leaf_bound(v);
+        }
+        if let Some(v) = self.model.adaptive_depth {
+            builder = builder.adaptive_depth(v);
         }
         if let Some(v) = self.model.min_hessian_sum {
             builder = builder.min_hessian_sum(v);

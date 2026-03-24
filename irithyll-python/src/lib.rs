@@ -51,6 +51,7 @@ struct PyConfig {
     gradient_clip_sigma: Option<f64>,
     max_leaf_output: Option<f64>,
     adaptive_leaf_bound: Option<f64>,
+    adaptive_depth: Option<f64>,
     min_hessian_sum: Option<f64>,
     split_reeval_interval: Option<usize>,
 }
@@ -79,6 +80,7 @@ impl PyConfig {
             gradient_clip_sigma: None,
             max_leaf_output: None,
             adaptive_leaf_bound: None,
+            adaptive_depth: None,
             min_hessian_sum: None,
             split_reeval_interval: None,
         }
@@ -182,6 +184,13 @@ impl PyConfig {
         slf
     }
 
+    /// Per-split information criterion (Lunde-Kleppe-Skaug 2020).
+    /// Typical: 7.5 (<=10 features), 9.0 (<=50), 11.0 (<=200).
+    fn adaptive_depth(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
+        slf.adaptive_depth = Some(value);
+        slf
+    }
+
     /// Minimum hessian sum required to keep a leaf (suppress thin leaves).
     fn min_hessian_sum(mut slf: PyRefMut<'_, Self>, value: f64) -> PyRefMut<'_, Self> {
         slf.min_hessian_sum = Some(value);
@@ -252,6 +261,9 @@ impl PyConfig {
         }
         if let Some(v) = self.adaptive_leaf_bound {
             builder = builder.adaptive_leaf_bound(v);
+        }
+        if let Some(v) = self.adaptive_depth {
+            builder = builder.adaptive_depth(v);
         }
         if let Some(v) = self.min_hessian_sum {
             builder = builder.min_hessian_sum(v);

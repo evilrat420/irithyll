@@ -155,6 +155,7 @@ impl<L: Loss> ParallelSGBT<L> {
             .feature_subsample_rate(config.feature_subsample_rate)
             .leaf_decay_alpha_opt(leaf_decay_alpha)
             .split_reeval_interval_opt(config.split_reeval_interval)
+            .adaptive_depth_opt(config.adaptive_depth)
             .leaf_model_type(config.leaf_model_type.clone());
 
         let max_tree_samples = config.max_tree_samples;
