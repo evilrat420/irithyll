@@ -238,9 +238,9 @@ mod tests {
         let b: Vec<f64> = (1..=7).map(|x| x as f64).collect();
         let mut out = vec![0.0; 7];
         subtract_f64(&a, &b, &mut out);
-        for i in 0..7 {
+        for (i, &val) in out.iter().enumerate() {
             let expected = (i + 1) as f64 * 10.0 - (i + 1) as f64;
-            assert!((out[i] - expected).abs() < 1e-12, "mismatch at index {i}");
+            assert!((val - expected).abs() < 1e-12, "mismatch at index {i}");
         }
     }
 
@@ -250,9 +250,9 @@ mod tests {
         let b: Vec<f64> = (0..13).map(|x| x as f64 * 1.5).collect();
         let mut out = vec![0.0; 13];
         subtract_f64(&a, &b, &mut out);
-        for i in 0..13 {
+        for (i, &val) in out.iter().enumerate() {
             let expected = i as f64 * 1.5;
-            assert!((out[i] - expected).abs() < 1e-12, "mismatch at index {i}");
+            assert!((val - expected).abs() < 1e-12, "mismatch at index {i}");
         }
     }
 
@@ -404,9 +404,9 @@ mod tests {
         let b: Vec<u64> = (0..256).map(|x| x * 2 + 50).collect();
         let mut out = vec![0u64; 256];
         subtract_u64(&a, &b, &mut out);
-        for i in 0..256 {
+        for (i, &val) in out.iter().enumerate() {
             let expected = (i as u64 * 3 + 100).saturating_sub(i as u64 * 2 + 50);
-            assert_eq!(out[i], expected, "mismatch at index {i}");
+            assert_eq!(val, expected, "mismatch at index {i}");
         }
     }
 

@@ -82,6 +82,10 @@ pub mod snn;
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub mod ssm;
 
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub mod attention;
+
 // Convenience re-exports -- inference
 pub use error::FormatError;
 pub use packed::{EnsembleHeader, PackedNode, TreeEntry};
