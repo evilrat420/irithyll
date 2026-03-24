@@ -367,6 +367,18 @@ pub struct SGBTConfig {
     #[cfg_attr(feature = "serde", serde(default))]
     pub adaptive_leaf_bound: Option<f64>,
 
+    /// Per-split information criterion (Lunde-Kleppe-Skaug 2020).
+    ///
+    /// When `Some(cir_factor)`, replaces `max_depth` with a per-split
+    /// generalization test. Each candidate split must have
+    /// `gain > cir_factor * sigma^2_g / n * n_features`.
+    /// `max_depth * 2` becomes a hard safety ceiling.
+    ///
+    /// Typical: 7.5 (<=10 features), 9.0 (<=50), 11.0 (<=200).
+    /// `None` (default) uses static `max_depth` only.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub adaptive_depth: Option<f64>,
+
     /// Minimum hessian sum before a leaf produces non-zero output.
     ///
     /// When `Some(min_h)`, leaves with `hess_sum < min_h` return 0.0.
@@ -478,6 +490,7 @@ impl Default for SGBTConfig {
             empirical_sigma_alpha: 0.01,
             max_leaf_output: None,
             adaptive_leaf_bound: None,
+            adaptive_depth: None,
             min_hessian_sum: None,
             huber_k: None,
             shadow_warmup: None,
@@ -754,6 +767,15 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Set the per-split information criterion factor (Lunde-Kleppe-Skaug 2020).
+    ///
+    /// Replaces static `max_depth` with a per-split generalization test.
+    /// Typical: 7.5 (<=10 features), 9.0 (<=50), 11.0 (<=200).
+    pub fn adaptive_depth(mut self, factor: f64) -> Self {
+        self.config.adaptive_depth = Some(factor);
+        self
+    }
+
     /// Set the minimum hessian sum for leaf output.
     ///
     /// Fresh leaves with `hess_sum < min_h` return 0.0, preventing
@@ -960,6 +982,15 @@ impl SGBTConfigBuilder {
             if k <= 0.0 {
                 return Err(
                     ConfigError::out_of_range("adaptive_leaf_bound", "must be > 0", k).into(),
+                );
+            }
+        }
+
+        // -- Adaptive depth (per-split information criterion) --
+        if let Some(factor) = c.adaptive_depth {
+            if factor <= 0.0 {
+                return Err(
+                    ConfigError::out_of_range("adaptive_depth", "must be > 0", factor).into(),
                 );
             }
         }
