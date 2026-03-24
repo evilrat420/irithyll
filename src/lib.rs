@@ -93,6 +93,7 @@ pub mod stream;
 pub mod tree;
 
 pub mod anomaly;
+pub mod attention;
 pub mod bandits;
 pub mod clustering;
 pub mod evaluation;
@@ -220,6 +221,12 @@ pub use ssm::{MambaConfig, MambaConfigBuilder, MambaPreprocessor, StreamingMamba
 
 // Re-exports -- spiking neural networks
 pub use snn::{SpikeNet, SpikeNetConfig, SpikeNetConfigBuilder, SpikePreprocessor};
+
+// Re-exports -- streaming linear attention
+pub use attention::{
+    AttentionPreprocessor, StreamingAttentionConfig, StreamingAttentionConfigBuilder,
+    StreamingAttentionModel,
+};
 
 // ---------------------------------------------------------------------------
 // Convenience factory functions
@@ -615,4 +622,32 @@ pub fn spikenet(n_hidden: usize) -> snn::SpikeNet {
             .build()
             .expect("spikenet() factory: invalid parameters"),
     )
+}
+
+/// Create a Gated Linear Attention model (SOTA streaming attention).
+pub fn gla(d_model: usize, n_heads: usize) -> attention::StreamingAttentionModel {
+    attention::gla(d_model, n_heads)
+}
+
+/// Create a Gated DeltaNet model (strongest retrieval, NVIDIA 2024).
+pub fn delta_net(d_model: usize, n_heads: usize) -> attention::StreamingAttentionModel {
+    attention::delta_net(d_model, n_heads)
+}
+
+/// Create a Hawk model (lightest streaming attention, vector state).
+pub fn hawk(d_model: usize) -> attention::StreamingAttentionModel {
+    attention::hawk(d_model)
+}
+
+/// Create a RetNet model (simplest, fixed decay).
+pub fn ret_net(d_model: usize, gamma: f64) -> attention::StreamingAttentionModel {
+    attention::ret_net(d_model, gamma)
+}
+
+/// Create a streaming attention model with any mode.
+pub fn streaming_attention(
+    d_model: usize,
+    mode: irithyll_core::attention::AttentionMode,
+) -> attention::StreamingAttentionModel {
+    attention::streaming_attention(d_model, mode)
 }
