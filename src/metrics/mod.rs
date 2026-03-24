@@ -11,15 +11,24 @@
 pub mod auc;
 pub mod classification;
 pub mod conformal;
+pub mod conformal_pid;
 pub mod ewma;
 pub mod importance;
 pub mod kappa;
+pub mod platt_scaling;
+pub mod quantile_tracker;
 pub mod regression;
 pub mod rolling;
+pub mod strongly_adaptive;
 
 pub use classification::ClassificationMetrics;
+pub use conformal::StepSchedule;
+pub use conformal_pid::ConformalPID;
 pub use importance::FeatureImportance;
+pub use platt_scaling::OnlinePlattScaling;
+pub use quantile_tracker::StreamingQuantileTracker;
 pub use regression::RegressionMetrics;
+pub use strongly_adaptive::StronglyAdaptiveConformal;
 
 /// Combined metric tracker that holds both regression and classification metrics.
 ///

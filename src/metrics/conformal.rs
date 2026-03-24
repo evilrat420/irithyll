@@ -12,6 +12,29 @@
 //! the ACI tracker. Use `effective_quantiles()` to determine what quantile
 //! levels to use for the next prediction interval.
 
+/// Step size schedule for ACI.
+///
+/// Controls how the adaptation step size `gamma` evolves over time.
+#[derive(Debug, Clone, Copy)]
+pub enum StepSchedule {
+    /// Fixed step size (original ACI from Gibbs & Candes 2021).
+    Fixed,
+    /// Decaying step size: `gamma_t = gamma / t^beta` (Angelopoulos et al. 2024).
+    ///
+    /// Provides both retrospective coverage guarantees AND consistent quantile
+    /// estimation. `beta` controls the decay rate — typical values are 0.5 to 1.0.
+    Decaying {
+        /// Decay exponent. `beta = 0` is equivalent to `Fixed`.
+        beta: f64,
+    },
+}
+
+impl Default for StepSchedule {
+    fn default() -> Self {
+        Self::Fixed
+    }
+}
+
 /// Adaptive Conformal Inference (ACI) tracker for prediction intervals.
 ///
 /// Monitors coverage of prediction intervals and adapts the miscoverage
@@ -45,8 +68,10 @@ pub struct AdaptiveConformalInterval {
     target_alpha: f64,
     /// Current adaptive miscoverage rate.
     alpha_t: f64,
-    /// Step size for adaptation.
+    /// Base step size for adaptation.
     gamma: f64,
+    /// Step size schedule (fixed or decaying).
+    schedule: StepSchedule,
     /// Running count of covered observations.
     n_covered: u64,
     /// Total observations.
@@ -73,9 +98,29 @@ impl AdaptiveConformalInterval {
             target_alpha,
             alpha_t: target_alpha,
             gamma,
+            schedule: StepSchedule::Fixed,
             n_covered: 0,
             n_total: 0,
         }
+    }
+
+    /// Set a decaying step size schedule (Angelopoulos et al. 2024).
+    ///
+    /// The effective step size at time t becomes `gamma / t^beta`.
+    /// This provides stronger theoretical guarantees while still adapting.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `beta` is negative.
+    pub fn with_decaying_step(mut self, beta: f64) -> Self {
+        assert!(beta >= 0.0, "beta must be >= 0, got {beta}");
+        self.schedule = StepSchedule::Decaying { beta };
+        self
+    }
+
+    /// Return the current step size schedule.
+    pub fn step_schedule(&self) -> StepSchedule {
+        self.schedule
     }
 
     /// Update with a new observation and its prediction interval.
@@ -90,8 +135,13 @@ impl AdaptiveConformalInterval {
             self.n_covered += 1;
         }
 
+        let effective_gamma = match self.schedule {
+            StepSchedule::Fixed => self.gamma,
+            StepSchedule::Decaying { beta } => self.gamma / (self.n_total as f64).powf(beta),
+        };
+
         let err = if covered { 0.0 } else { 1.0 };
-        self.alpha_t += self.gamma * (self.target_alpha - err);
+        self.alpha_t += effective_gamma * (self.target_alpha - err);
         self.alpha_t = self.alpha_t.clamp(0.001, 0.999);
     }
 
@@ -238,5 +288,72 @@ mod tests {
     #[should_panic(expected = "gamma must be > 0")]
     fn aci_invalid_gamma() {
         AdaptiveConformalInterval::new(0.1, 0.0);
+    }
+
+    #[test]
+    fn decaying_step_has_smaller_updates_over_time() {
+        // With decaying schedule, the effective gamma decreases
+        let mut aci = AdaptiveConformalInterval::new(0.1, 0.5).with_decaying_step(0.5);
+        // First update: effective_gamma = 0.5 / 1^0.5 = 0.5
+        // Record alpha after first miss
+        aci.update(100.0, 0.0, 10.0); // miss
+        let alpha_after_1 = aci.current_alpha();
+        let delta_1 = (0.1 - alpha_after_1).abs();
+
+        // Reset and use two sequential misses to see smaller second step
+        let mut aci2 = AdaptiveConformalInterval::new(0.1, 0.5).with_decaying_step(0.5);
+        aci2.update(100.0, 0.0, 10.0); // miss at t=1
+        let alpha_mid = aci2.current_alpha();
+        aci2.update(100.0, 0.0, 10.0); // miss at t=2, gamma_2 = 0.5/sqrt(2) < 0.5
+        let alpha_after_2 = aci2.current_alpha();
+        let delta_2 = (alpha_mid - alpha_after_2).abs();
+
+        assert!(
+            delta_2 < delta_1,
+            "second step ({delta_2}) should be smaller than first ({delta_1})"
+        );
+    }
+
+    #[test]
+    fn fixed_schedule_unchanged() {
+        // Fixed schedule should behave identically to original ACI
+        let mut aci_fixed = AdaptiveConformalInterval::new(0.1, 0.01);
+        let mut aci_default = AdaptiveConformalInterval::new(0.1, 0.01);
+        // Both should be Fixed by default
+        for i in 0..100 {
+            if i % 5 == 0 {
+                aci_fixed.update(100.0, 0.0, 10.0);
+                aci_default.update(100.0, 0.0, 10.0);
+            } else {
+                aci_fixed.update(5.0, 0.0, 10.0);
+                aci_default.update(5.0, 0.0, 10.0);
+            }
+        }
+        assert!(
+            (aci_fixed.current_alpha() - aci_default.current_alpha()).abs() < EPS,
+            "fixed schedule should match default behavior"
+        );
+    }
+
+    #[test]
+    fn decaying_beta_zero_equals_fixed() {
+        // beta=0 means gamma / t^0 = gamma / 1 = gamma (no decay)
+        let mut aci_fixed = AdaptiveConformalInterval::new(0.1, 0.01);
+        let mut aci_decay0 = AdaptiveConformalInterval::new(0.1, 0.01).with_decaying_step(0.0);
+        for i in 0..200 {
+            if i % 7 == 0 {
+                aci_fixed.update(100.0, 0.0, 10.0);
+                aci_decay0.update(100.0, 0.0, 10.0);
+            } else {
+                aci_fixed.update(5.0, 0.0, 10.0);
+                aci_decay0.update(5.0, 0.0, 10.0);
+            }
+        }
+        assert!(
+            (aci_fixed.current_alpha() - aci_decay0.current_alpha()).abs() < EPS,
+            "beta=0 decay should equal fixed: {} vs {}",
+            aci_fixed.current_alpha(),
+            aci_decay0.current_alpha()
+        );
     }
 }
