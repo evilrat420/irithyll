@@ -15,9 +15,10 @@
 /// Step size schedule for ACI.
 ///
 /// Controls how the adaptation step size `gamma` evolves over time.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum StepSchedule {
     /// Fixed step size (original ACI from Gibbs & Candes 2021).
+    #[default]
     Fixed,
     /// Decaying step size: `gamma_t = gamma / t^beta` (Angelopoulos et al. 2024).
     ///
@@ -29,11 +30,6 @@ pub enum StepSchedule {
     },
 }
 
-impl Default for StepSchedule {
-    fn default() -> Self {
-        Self::Fixed
-    }
-}
 
 /// Adaptive Conformal Inference (ACI) tracker for prediction intervals.
 ///
