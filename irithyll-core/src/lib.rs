@@ -45,6 +45,7 @@ pub mod packed;
 pub mod packed_i16;
 pub mod quantize;
 pub mod sample;
+pub mod simd;
 pub mod traverse;
 pub mod traverse_i16;
 pub mod view;

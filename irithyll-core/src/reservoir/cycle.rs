@@ -150,10 +150,7 @@ impl CycleReservoir {
 
             // Input contribution: dot(w_input[i], input).
             let row_start = i * d;
-            let mut input_term = 0.0;
-            for (j, &inp_j) in input.iter().enumerate().take(d) {
-                input_term += self.w_input[row_start + j] * inp_j;
-            }
+            let input_term = crate::simd::simd_dot(&self.w_input[row_start..row_start + d], input);
 
             // Pre-activation with bias.
             let pre_activation = cycle_term + input_term + self.bias[i];

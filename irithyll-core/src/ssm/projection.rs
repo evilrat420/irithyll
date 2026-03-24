@@ -17,6 +17,9 @@ use crate::math;
 /// `w` is a `rows x cols` row-major matrix, `x` is a `cols`-vector,
 /// `out` is a `rows`-vector (must be pre-allocated).
 ///
+/// Delegates to [`crate::simd::simd_mat_vec`] for AVX2 acceleration
+/// when available.
+///
 /// # Panics
 ///
 /// Debug-asserts that `w.len() == rows * cols`, `x.len() == cols`,
@@ -26,17 +29,13 @@ pub fn mat_vec(w: &[f64], x: &[f64], rows: usize, cols: usize, out: &mut [f64]) 
     debug_assert_eq!(w.len(), rows * cols, "w must be rows*cols");
     debug_assert_eq!(x.len(), cols, "x must have cols elements");
     debug_assert_eq!(out.len(), rows, "out must have rows elements");
-    for (i, out_i) in out.iter_mut().enumerate() {
-        let row_start = i * cols;
-        let mut sum = 0.0;
-        for j in 0..cols {
-            sum += w[row_start + j] * x[j];
-        }
-        *out_i = sum;
-    }
+    crate::simd::simd_mat_vec(w, x, rows, cols, out);
 }
 
 /// Dot product of two equal-length slices.
+///
+/// Delegates to [`crate::simd::simd_dot`] for AVX2 acceleration
+/// when available.
 ///
 /// # Panics
 ///
@@ -44,11 +43,7 @@ pub fn mat_vec(w: &[f64], x: &[f64], rows: usize, cols: usize, out: &mut [f64]) 
 #[inline]
 pub fn dot(a: &[f64], b: &[f64]) -> f64 {
     debug_assert_eq!(a.len(), b.len(), "dot product requires equal lengths");
-    let mut sum = 0.0;
-    for i in 0..a.len() {
-        sum += a[i] * b[i];
-    }
-    sum
+    crate::simd::simd_dot(a, b)
 }
 
 /// Numerically stable softplus: `ln(1 + exp(x))`.
