@@ -96,6 +96,7 @@ pub mod anomaly;
 pub mod attention;
 pub mod bandits;
 pub mod clustering;
+pub mod continual;
 pub mod evaluation;
 pub mod explain;
 pub mod learner;
