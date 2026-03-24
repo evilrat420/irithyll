@@ -8,7 +8,7 @@
 //! Because [`StreamingLearner`] is intentionally opaque -- no access to
 //! raw parameters or gradients -- the wrapper uses **prequential error**
 //! (predict-then-train) as the drift signal source. Models that expose
-//! parameters can compose with [`ContinualStrategy`] directly; this
+//! parameters can compose with `ContinualStrategy` directly; this
 //! wrapper provides the outer orchestration layer.
 //!
 //! # Prequential Protocol
@@ -41,7 +41,7 @@ use std::fmt;
 /// detection, which triggers model reset on the underlying learner.
 ///
 /// For models that **do** expose parameters (neural models), the
-/// [`ContinualStrategy`](super::ContinualStrategy) trait can be applied
+/// `ContinualStrategy` trait can be applied
 /// directly. This wrapper provides the higher-level orchestration layer.
 ///
 /// # Example

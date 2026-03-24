@@ -1,6 +1,6 @@
 //! Continual learning wrappers for streaming neural models.
 //!
-//! Wraps any [`StreamingLearner`] with drift-aware continual learning strategies
+//! Wraps any `StreamingLearner` with drift-aware continual learning strategies
 //! that prevent catastrophic forgetting and maintain plasticity.
 //!
 //! The primary type is [`ContinualLearner`], which wraps an opaque streaming model

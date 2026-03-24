@@ -1,6 +1,6 @@
 //! Multi-head streaming linear attention.
 //!
-//! [`MultiHeadAttention`] composes multiple [`AttentionHead`] instances with
+//! [`MultiHeadAttention`] composes multiple attention head instances with
 //! an output projection, implementing the [`AttentionLayer`] trait. Each head
 //! independently maintains state and computes its update rule according to
 //! the configured [`AttentionMode`].
