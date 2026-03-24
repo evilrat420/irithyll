@@ -1525,6 +1525,262 @@ impl PySpikeNet {
 }
 
 // ---------------------------------------------------------------------------
+// GLA (Streaming Linear Attention)
+// ---------------------------------------------------------------------------
+
+/// Gated Linear Attention model (streaming linear attention + RLS readout).
+///
+/// Supports 7 attention modes: GLA (default), RetNet, Hawk, DeltaNet,
+/// GatedDeltaNet, RWKV, mLSTM. All process one sample at a time with
+/// O(1) memory per timestep.
+///
+/// Example::
+///
+///     model = GLA(d_model=8, n_heads=2)
+///     model.train([1.0] * 8, 5.0)
+///     pred = model.predict([1.0] * 8)
+///
+#[pyclass(name = "GLA")]
+struct PyGLA {
+    inner: irithyll::StreamingAttentionModel,
+}
+
+#[pymethods]
+impl PyGLA {
+    #[new]
+    #[pyo3(signature = (d_model, n_heads=4, seed=42))]
+    fn new(d_model: usize, n_heads: usize, seed: u64) -> PyResult<Self> {
+        let config = irithyll::StreamingAttentionConfig::builder()
+            .d_model(d_model)
+            .n_heads(n_heads)
+            .seed(seed)
+            .build()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self {
+            inner: irithyll::StreamingAttentionModel::new(config),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!("GLA(samples={})", self.inner.n_samples_seen())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ContinualLearner
+// ---------------------------------------------------------------------------
+
+/// Drift-aware continual learning wrapper for streaming models.
+///
+/// Wraps any streaming learner with prequential error monitoring and
+/// automatic model reset when drift is detected (Page-Hinkley test).
+///
+/// Example::
+///
+///     model = ContinualLearner("linear", learning_rate=0.01)
+///     model.train([1.0, 2.0], 3.0)
+///     pred = model.predict([1.0, 2.0])
+///
+#[pyclass(name = "ContinualLearner")]
+struct PyContinualLearner {
+    inner: irithyll::continual::ContinualLearner,
+}
+
+#[pymethods]
+impl PyContinualLearner {
+    /// Create a continual learner wrapping the given model type.
+    ///
+    /// Args:
+    ///     model_type: one of "linear", "esn", "mamba", "spikenet", "gla"
+    ///     learning_rate: learning rate (for "linear", default 0.01)
+    ///     n_reservoir: reservoir size (for "esn", default 50)
+    ///     d_model: model dimension (for "gla", default 8)
+    ///     n_hidden: hidden neurons (for "spikenet", default 64)
+    ///     d_in: input dimension (for "mamba", default 4)
+    #[new]
+    #[pyo3(signature = (model_type, learning_rate=0.01, n_reservoir=50, d_model=8, n_hidden=64, d_in=4))]
+    fn new(
+        model_type: &str,
+        learning_rate: f64,
+        n_reservoir: usize,
+        d_model: usize,
+        n_hidden: usize,
+        d_in: usize,
+    ) -> PyResult<Self> {
+        use irithyll::drift::pht::PageHinkleyTest;
+
+        let learner: Box<dyn irithyll::StreamingLearner> = match model_type {
+            "linear" => Box::new(irithyll::linear(learning_rate)),
+            "esn" => Box::new(irithyll::esn(n_reservoir, 0.9)),
+            "mamba" => Box::new(irithyll::StreamingMamba::new(
+                irithyll::MambaConfig::builder()
+                    .d_in(d_in)
+                    .build()
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            )),
+            "spikenet" => Box::new(irithyll::spikenet(n_hidden)),
+            "gla" => Box::new(irithyll::attention::gla(d_model, 1)),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown model_type '{}': expected 'linear', 'esn', 'mamba', 'spikenet', or 'gla'",
+                    other
+                )));
+            }
+        };
+
+        let inner = irithyll::continual::ContinualLearner::from_boxed(learner)
+            .with_drift_detector(PageHinkleyTest::new());
+
+        Ok(Self { inner })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    /// Number of drift events detected.
+    #[getter]
+    fn drift_count(&self) -> u64 {
+        self.inner.drift_count()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!(
+            "ContinualLearner(samples={}, drifts={})",
+            self.inner.n_samples_seen(),
+            self.inner.drift_count()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ConformalPID
+// ---------------------------------------------------------------------------
+
+/// PID-controlled conformal prediction for adaptive prediction intervals.
+///
+/// Uses proportional-integral-derivative control to maintain calibrated
+/// coverage levels. Update with (prediction, target) pairs; query the
+/// current adaptive threshold via ``interval_width``.
+///
+/// Example::
+///
+///     cpid = ConformalPID(coverage=0.9)
+///     for pred, target in predictions:
+///         cpid.update(pred, target)
+///     print(cpid.coverage(), cpid.interval_width())
+///
+#[pyclass(name = "ConformalPID")]
+struct PyConformalPID {
+    inner: irithyll::metrics::ConformalPID,
+}
+
+#[pymethods]
+impl PyConformalPID {
+    /// Create a PID-controlled conformal predictor.
+    ///
+    /// Args:
+    ///     coverage: target coverage level (default 0.9 for 90%)
+    #[new]
+    #[pyo3(signature = (coverage=0.9))]
+    fn new(coverage: f64) -> PyResult<Self> {
+        let alpha = 1.0 - coverage;
+        if alpha <= 0.0 || alpha >= 1.0 {
+            return Err(PyValueError::new_err(format!(
+                "coverage must be in (0, 1), got {}",
+                coverage
+            )));
+        }
+        Ok(Self {
+            inner: irithyll::metrics::ConformalPID::new(alpha, 0.05, 0.01, 0.005),
+        })
+    }
+
+    /// Update with a new (prediction, target) pair.
+    fn update(&mut self, prediction: f64, target: f64) {
+        self.inner.update(prediction, target);
+    }
+
+    /// Current adaptive interval width (threshold).
+    fn interval_width(&self) -> f64 {
+        self.inner.interval_width()
+    }
+
+    /// Empirical coverage rate.
+    fn coverage(&self) -> f64 {
+        self.inner.coverage()
+    }
+
+    /// Number of updates processed.
+    #[getter]
+    fn n_updates(&self) -> u64 {
+        self.inner.n_updates()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ConformalPID(coverage={:.4}, width={:.4}, updates={})",
+            self.inner.coverage(),
+            self.inner.interval_width(),
+            self.inner.n_updates()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
 
@@ -1542,5 +1798,8 @@ fn irithyll_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEchoStateNetwork>()?;
     m.add_class::<PyStreamingMamba>()?;
     m.add_class::<PySpikeNet>()?;
+    m.add_class::<PyGLA>()?;
+    m.add_class::<PyContinualLearner>()?;
+    m.add_class::<PyConformalPID>()?;
     Ok(())
 }

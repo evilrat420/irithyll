@@ -14,6 +14,9 @@ WASM, embedded Linux, or full desktops.
 - **Reservoir computing** — NG-RC (time-delay polynomial) and ESN (cycle reservoir) with RLS readout
 - **State space models** — selective SSM with diagonal A, ZOH discretization, input-dependent gating
 - **Spiking neural networks** — `SpikeNetFixed` with Q1.14 integer LIF neurons, e-prop learning, delta encoding (64 neurons in 22KB)
+- **Streaming linear attention** — 7 modes (RetNet, Hawk, GLA, DeltaNet, GatedDeltaNet, RWKV, mLSTM) via unified recurrence engine
+- **Continual learning** — EWC (elastic weight consolidation), neuron regeneration (Dohare et al. 2024), drift-triggered parameter isolation
+- **SIMD primitives** — AVX2-accelerated `simd_dot` and `simd_mat_vec` with automatic runtime detection and scalar fallback
 - **Loss functions** — squared, logistic, Huber, softmax, expectile, quantile
 - **Packed inference** — 12-byte f32 nodes (66ns predict on Cortex-M0+) and
   8-byte int16 nodes (integer-only traversal, zero float ops)

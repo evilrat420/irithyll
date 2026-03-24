@@ -38,7 +38,7 @@ irithyll is structured as a Cargo workspace with three crates:
 
 ## Why irithyll?
 
-- **20+ streaming algorithms** under one unified [`StreamingLearner`](https://docs.rs/irithyll/latest/irithyll/trait.StreamingLearner.html) trait
+- **30+ streaming algorithms** under one unified [`StreamingLearner`](https://docs.rs/irithyll/latest/irithyll/trait.StreamingLearner.html) trait
 - **One sample at a time** -- O(1) memory per model, no batches, no windows, no retraining
 - **Embedded deployment** -- train with `irithyll`, export to packed binary, infer with `irithyll-core` on bare metal
 - **Composable pipelines** -- chain preprocessors and learners with a builder API
@@ -46,7 +46,7 @@ irithyll is structured as a Cargo workspace with three crates:
 - **Confidence intervals** -- prediction uncertainty from RLS and conformal methods
 - **Production-grade** -- async streaming, SIMD acceleration, Arrow/Parquet I/O, ONNX export
 - **Neural streaming architectures** -- reservoir computing (NG-RC, ESN), state space models (Mamba), spiking neural networks (e-prop)
-- **Pure Rust** -- zero unsafe in `irithyll`, deterministic, serializable, 1,997 tests
+- **Pure Rust** -- zero unsafe in `irithyll`, deterministic, serializable, 2,500+ tests
 
 ## Algorithms
 
@@ -529,6 +529,28 @@ The MSRV is **1.75**. This is checked in CI and will only be raised in minor ver
 > Jaeger, H., Lukoševičius, M., Popovici, D., & Siewert, U. (2007). *Optimization and applications of echo state networks with leaky-integrator neurons.* Neural Networks, 20(3), 335-352.
 
 > Javed, K., Shah, H., Sutton, R., & White, M. (2023). *Scalable real-time recurrent learning.* arXiv preprint arXiv:2302.05326.
+
+> Yang, S., Wang, B., Shen, Y., Panda, R., & Kim, Y. (2023). *Gated linear attention transformers with hardware-efficient training.* arXiv preprint arXiv:2312.06635.
+
+> Yang, S., et al. (2024). *Gated Delta Networks: Improving Mamba2 with Delta Rule.* arXiv preprint arXiv:2412.06464.
+
+> Peng, B., et al. (2024). *Eagle and Finch: RWKV with matrix-valued states and dynamic recurrence.* arXiv preprint arXiv:2404.05892.
+
+> Beck, M., et al. (2024). *xLSTM: Extended long short-term memory.* NeurIPS 2024.
+
+> Sun, Y., et al. (2023). *Retentive network: A successor to transformer for large language models.* arXiv preprint arXiv:2307.08621.
+
+> De, S., Smith, S. L., et al. (2024). *Griffin: Mixing gated linear recurrences with local attention for efficient language models.* arXiv preprint arXiv:2402.19427.
+
+> Kirkpatrick, J., et al. (2017). *Overcoming catastrophic forgetting in neural networks.* PNAS, 114(13), 3521-3526.
+
+> Dohare, S., et al. (2024). *Loss of plasticity in deep continual learning.* Nature, 632, 768-774.
+
+> Angelopoulos, A. N., Candes, E. J., & Tibshirani, R. J. (2023). *Conformal PID control for time series prediction.* NeurIPS 2023.
+
+> Bhatnagar, A., Wang, H., Xiong, C., & Bai, Y. (2023). *Improved online conformal prediction via strongly adaptive online learning.* ICML 2023.
+
+> Gupta, C., & Ramdas, A. (2023). *Online Platt scaling with calibeating.* ICML 2023.
 
 ## License
 

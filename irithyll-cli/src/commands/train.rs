@@ -37,6 +37,14 @@ pub enum ModelType {
     Mamba,
     /// Spiking Neural Network with e-prop learning.
     SpikeNet,
+    /// Gated Linear Attention (SOTA streaming attention).
+    Gla,
+    /// Gated DeltaNet (strongest retrieval, NVIDIA 2024).
+    DeltaNet,
+    /// Hawk (lightest streaming attention, vector state).
+    Hawk,
+    /// Retentive Network (simplest, fixed decay).
+    RetNet,
 }
 
 impl ModelType {
@@ -50,8 +58,12 @@ impl ModelType {
             "esn" => Ok(ModelType::Esn),
             "mamba" => Ok(ModelType::Mamba),
             "spikenet" => Ok(ModelType::SpikeNet),
+            "gla" => Ok(ModelType::Gla),
+            "deltanet" => Ok(ModelType::DeltaNet),
+            "hawk" => Ok(ModelType::Hawk),
+            "retnet" => Ok(ModelType::RetNet),
             _ => Err(eyre!(
-                "unknown model type '{}'. supported: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet",
+                "unknown model type '{}'. supported: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet, gla, deltanet, hawk, retnet",
                 s
             )),
         }
@@ -87,7 +99,7 @@ pub struct TrainArgs {
     #[arg(long)]
     pub max_depth: Option<usize>,
 
-    /// Model type: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet
+    /// Model type: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet, gla, deltanet, hawk, retnet
     #[arg(long, default_value = "sgbt")]
     pub model_type: String,
 
@@ -141,6 +153,10 @@ pub fn run(args: TrainArgs) -> Result<()> {
         ModelType::Esn => run_esn(cli_config, dataset),
         ModelType::Mamba => run_mamba(cli_config, dataset),
         ModelType::SpikeNet => run_spikenet(cli_config, dataset),
+        ModelType::Gla => run_gla(&dataset, &cli_config),
+        ModelType::DeltaNet => run_deltanet(&dataset, &cli_config),
+        ModelType::Hawk => run_hawk(&dataset, &cli_config),
+        ModelType::RetNet => run_retnet(&dataset, &cli_config),
     }
 }
 
@@ -627,6 +643,114 @@ fn run_spikenet(cli_config: CliConfig, dataset: Dataset) -> Result<()> {
     );
 
     run_neural_headless(&mut model, &dataset, "spikenet")
+}
+
+// ---------------------------------------------------------------------------
+// GLA (Gated Linear Attention)
+// ---------------------------------------------------------------------------
+
+fn run_gla(dataset: &Dataset, config: &CliConfig) -> Result<()> {
+    use irithyll::attention::{AttentionMode, StreamingAttentionConfig, StreamingAttentionModel};
+
+    let att = &config.neural.attention;
+    let att_config = StreamingAttentionConfig::builder()
+        .d_model(dataset.n_features)
+        .n_heads(att.n_heads)
+        .mode(AttentionMode::GLA)
+        .seed(att.seed)
+        .warmup(att.warmup)
+        .build()
+        .map_err(|e| eyre!("invalid GLA config: {}", e))?;
+
+    let mut model = StreamingAttentionModel::new(att_config);
+
+    println!(
+        "Loaded {} samples, {} features (gla, n_heads={})",
+        dataset.n_samples, dataset.n_features, att.n_heads,
+    );
+
+    run_neural_headless(&mut model, dataset, "gla")
+}
+
+// ---------------------------------------------------------------------------
+// DeltaNet (Gated DeltaNet)
+// ---------------------------------------------------------------------------
+
+fn run_deltanet(dataset: &Dataset, config: &CliConfig) -> Result<()> {
+    use irithyll::attention::{AttentionMode, StreamingAttentionConfig, StreamingAttentionModel};
+
+    let att = &config.neural.attention;
+    let att_config = StreamingAttentionConfig::builder()
+        .d_model(dataset.n_features)
+        .n_heads(att.n_heads)
+        .mode(AttentionMode::GatedDeltaNet)
+        .seed(att.seed)
+        .warmup(att.warmup)
+        .build()
+        .map_err(|e| eyre!("invalid DeltaNet config: {}", e))?;
+
+    let mut model = StreamingAttentionModel::new(att_config);
+
+    println!(
+        "Loaded {} samples, {} features (deltanet, n_heads={})",
+        dataset.n_samples, dataset.n_features, att.n_heads,
+    );
+
+    run_neural_headless(&mut model, dataset, "deltanet")
+}
+
+// ---------------------------------------------------------------------------
+// Hawk (lightest attention, vector state)
+// ---------------------------------------------------------------------------
+
+fn run_hawk(dataset: &Dataset, config: &CliConfig) -> Result<()> {
+    use irithyll::attention::{AttentionMode, StreamingAttentionConfig, StreamingAttentionModel};
+
+    let att = &config.neural.attention;
+    let att_config = StreamingAttentionConfig::builder()
+        .d_model(dataset.n_features)
+        .n_heads(1) // Hawk always uses 1 head (vector state)
+        .mode(AttentionMode::Hawk)
+        .seed(att.seed)
+        .warmup(att.warmup)
+        .build()
+        .map_err(|e| eyre!("invalid Hawk config: {}", e))?;
+
+    let mut model = StreamingAttentionModel::new(att_config);
+
+    println!(
+        "Loaded {} samples, {} features (hawk, single-head vector state)",
+        dataset.n_samples, dataset.n_features,
+    );
+
+    run_neural_headless(&mut model, dataset, "hawk")
+}
+
+// ---------------------------------------------------------------------------
+// RetNet (Retentive Network, fixed decay)
+// ---------------------------------------------------------------------------
+
+fn run_retnet(dataset: &Dataset, config: &CliConfig) -> Result<()> {
+    use irithyll::attention::{AttentionMode, StreamingAttentionConfig, StreamingAttentionModel};
+
+    let att = &config.neural.attention;
+    let att_config = StreamingAttentionConfig::builder()
+        .d_model(dataset.n_features)
+        .n_heads(1) // RetNet uses 1 head with fixed gamma decay
+        .mode(AttentionMode::RetNet { gamma: att.gamma })
+        .seed(att.seed)
+        .warmup(att.warmup)
+        .build()
+        .map_err(|e| eyre!("invalid RetNet config: {}", e))?;
+
+    let mut model = StreamingAttentionModel::new(att_config);
+
+    println!(
+        "Loaded {} samples, {} features (retnet, gamma={})",
+        dataset.n_samples, dataset.n_features, att.gamma,
+    );
+
+    run_neural_headless(&mut model, dataset, "retnet")
 }
 
 // ---------------------------------------------------------------------------

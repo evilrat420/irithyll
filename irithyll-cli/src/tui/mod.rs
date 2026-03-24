@@ -75,11 +75,17 @@ fn render(frame: &mut ratatui::Frame, state: &SharedState) {
     let state = state.lock().unwrap();
     let area = frame.area();
 
-    // Top-level vertical layout: header | main | footer
+    // Fill entire background with BASE color
+    frame.render_widget(
+        ratatui::widgets::Block::default().style(Style::default().bg(theme::BASE)),
+        area,
+    );
+
+    // Top-level vertical layout: header (progress bar + sparkline) | main | footer
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
+            Constraint::Length(5), // Header: title + progress bar + sparkline
             Constraint::Min(10),   // Main
             Constraint::Length(3), // Footer
         ])
@@ -90,33 +96,102 @@ fn render(frame: &mut ratatui::Frame, state: &SharedState) {
     render_footer(frame, &state, chunks[2]);
 }
 
-/// Header: title + progress summary line.
+/// Header: title + progress gauge + sparkline.
 #[cfg(feature = "tui")]
 fn render_header(frame: &mut ratatui::Frame, state: &app::AppState, area: ratatui::layout::Rect) {
-    use ratatui::{prelude::*, widgets::*};
+    use ratatui::{prelude::*, symbols, widgets::*};
 
     let block = Block::default()
-        .title(" irithyll ")
-        .title_alignment(Alignment::Center)
+        .title(
+            Line::from(vec![Span::styled(
+                " irithyll ",
+                Style::default()
+                    .fg(theme::BLUE)
+                    .add_modifier(Modifier::BOLD),
+            )])
+            .alignment(Alignment::Center),
+        )
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BLUE))
         .style(Style::default().bg(theme::BASE));
 
-    let text = format!(
-        "Training: {}/{} ({:.1}%) | {:.0} samples/sec | {:.1}s elapsed",
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Split inner into: progress bar row | sparkline + info row
+    let header_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Progress gauge
+            Constraint::Length(1), // Sparkline + info text
+        ])
+        .split(inner);
+
+    // -- Progress bar (LineGauge) --
+    let ratio = state.progress_ratio();
+    let gauge_color = if state.is_done {
+        theme::GREEN
+    } else if ratio > 0.75 {
+        theme::BLUE
+    } else if ratio > 0.4 {
+        theme::TEAL
+    } else {
+        theme::MAUVE
+    };
+
+    let eta_str = state.eta_display();
+    let gauge_label = format!(
+        " {}/{} ({:.1}%) | {:.0} samp/s | {:.1}s | ETA: {}",
         state.n_samples,
         state.n_total,
         state.progress_pct(),
         state.throughput,
         state.elapsed_secs,
+        eta_str,
     );
 
-    let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(theme::TEXT))
-        .block(block)
-        .alignment(Alignment::Center);
+    let gauge = LineGauge::default()
+        .ratio(ratio)
+        .filled_style(Style::default().fg(gauge_color))
+        .unfilled_style(Style::default().fg(theme::SURFACE0))
+        .label(Span::styled(gauge_label, Style::default().fg(theme::TEXT)))
+        .line_set(symbols::line::THICK);
 
-    frame.render_widget(paragraph, area);
+    frame.render_widget(gauge, header_chunks[0]);
+
+    // -- Sparkline (last 50 loss values) --
+    let sparkline_data = state.sparkline_data(50);
+    if sparkline_data.is_empty() {
+        let waiting = Paragraph::new(Span::styled(
+            "  Loss trend: waiting for data...",
+            Style::default().fg(theme::SUBTEXT0),
+        ));
+        frame.render_widget(waiting, header_chunks[1]);
+    } else {
+        // Split row: label | sparkline
+        let spark_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(14), // "  Loss trend: " label
+                Constraint::Min(10),    // Sparkline fill
+            ])
+            .split(header_chunks[1]);
+
+        let label = Paragraph::new(Span::styled(
+            "  Loss trend: ",
+            Style::default().fg(theme::SUBTEXT0),
+        ));
+        frame.render_widget(label, spark_chunks[0]);
+
+        let spark_max = sparkline_data.iter().copied().max().unwrap_or(1).max(1);
+        let sparkline = Sparkline::default()
+            .data(&sparkline_data)
+            .bar_set(symbols::bar::NINE_LEVELS)
+            .style(Style::default().fg(theme::PEACH).bg(theme::BASE))
+            .max(spark_max);
+
+        frame.render_widget(sparkline, spark_chunks[1]);
+    }
 }
 
 /// Main area: metrics + importances (left) + loss/accuracy charts (right).
@@ -163,7 +238,7 @@ fn render_main(frame: &mut ratatui::Frame, state: &app::AppState, area: ratatui:
     }
 }
 
-/// Left panel: scrollable metrics table.
+/// Left panel: metrics table with color-coded values.
 #[cfg(feature = "tui")]
 fn render_metrics_table(
     frame: &mut ratatui::Frame,
@@ -172,10 +247,14 @@ fn render_metrics_table(
 ) {
     use ratatui::{prelude::*, widgets::*};
 
-    let block = Block::default()
-        .title(" Metrics ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::SURFACE1))
+    let block = Block::bordered()
+        .title(Line::from(vec![Span::styled(
+            " Metrics ",
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .border_style(Style::default().fg(theme::BLUE))
         .style(Style::default().bg(theme::BASE));
 
     let header = Row::new(vec!["Metric", "Value"]).style(
@@ -188,15 +267,51 @@ fn render_metrics_table(
         .metrics
         .iter()
         .map(|(name, value)| {
+            let value_color = color_for_metric(name, *value);
             Row::new(vec![
-                Cell::from(name.as_str()).style(Style::default().fg(theme::SUBTEXT0)),
-                Cell::from(format!("{:.6}", value)).style(Style::default().fg(theme::GREEN)),
+                Cell::from(Span::styled(
+                    name.as_str(),
+                    Style::default()
+                        .fg(theme::TEXT)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    format!("{:.6}", value),
+                    Style::default().fg(value_color),
+                )),
             ])
         })
         .collect();
 
+    // Add ETA row at the bottom
+    let mut all_rows = rows;
+    all_rows.push(Row::new(vec![
+        Cell::from(Span::styled(
+            "ETA",
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Cell::from(Span::styled(
+            state.eta_display(),
+            Style::default().fg(theme::LAVENDER),
+        )),
+    ]));
+    all_rows.push(Row::new(vec![
+        Cell::from(Span::styled(
+            "Throughput",
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Cell::from(Span::styled(
+            format!("{:.0} samp/s", state.throughput),
+            Style::default().fg(theme::TEAL),
+        )),
+    ]));
+
     let table = Table::new(
-        rows,
+        all_rows,
         [Constraint::Percentage(50), Constraint::Percentage(50)],
     )
     .block(block)
@@ -205,7 +320,122 @@ fn render_metrics_table(
     frame.render_widget(table, area);
 }
 
-/// Right panel: Braille-style loss curve chart.
+/// Color-code metric values based on their name and magnitude.
+#[cfg(feature = "tui")]
+fn color_for_metric(name: &str, value: f64) -> ratatui::style::Color {
+    let lower = name.to_lowercase();
+
+    // R-squared: >0.5 good, >0.25 mediocre, else poor
+    if lower.contains("r2") || lower.contains("r_squared") || lower.contains("r²") {
+        return if value > 0.5 {
+            theme::GREEN
+        } else if value > 0.25 {
+            theme::YELLOW
+        } else {
+            theme::RED
+        };
+    }
+
+    // Accuracy: >0.7 good, >0.4 mediocre, else poor
+    if lower.contains("accuracy") || lower.contains("acc") {
+        return if value > 0.7 {
+            theme::GREEN
+        } else if value > 0.4 {
+            theme::YELLOW
+        } else {
+            theme::RED
+        };
+    }
+
+    // Loss/error metrics: lower is better. <0.1 good, <0.5 mediocre, else poor
+    if lower.contains("loss")
+        || lower.contains("mse")
+        || lower.contains("mae")
+        || lower.contains("rmse")
+        || lower.contains("error")
+    {
+        return if value < 0.1 {
+            theme::GREEN
+        } else if value < 0.5 {
+            theme::YELLOW
+        } else {
+            theme::RED
+        };
+    }
+
+    // Default: neutral green
+    theme::GREEN
+}
+
+/// Min-max envelope downsampling: preserves peaks and valleys better than averaging.
+/// For each bucket, emits (bucket_start_x, min) and (bucket_start_x, max) as two points.
+#[cfg(feature = "tui")]
+fn downsample_minmax(history: &[f64], max_points: usize) -> Vec<(f64, f64)> {
+    if history.len() <= max_points {
+        return history
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (i as f64, *v))
+            .collect();
+    }
+
+    let bucket_size = history.len() / max_points;
+    let mut data = Vec::with_capacity(max_points * 2);
+
+    for (bi, chunk) in history.chunks(bucket_size).enumerate() {
+        let x = bi as f64;
+        let mut lo = f64::MAX;
+        let mut hi = f64::MIN;
+        for &v in chunk {
+            if v < lo {
+                lo = v;
+            }
+            if v > hi {
+                hi = v;
+            }
+        }
+        // Emit min first, then max — this creates an envelope
+        data.push((x, lo));
+        if (hi - lo).abs() > f64::EPSILON {
+            data.push((x, hi));
+        }
+    }
+
+    data
+}
+
+/// Generate Y-axis labels with intermediate ticks.
+#[cfg(feature = "tui")]
+fn y_axis_labels(y_min: f64, y_max: f64) -> Vec<ratatui::text::Line<'static>> {
+    let range = y_max - y_min;
+    if range < f64::EPSILON {
+        return vec![ratatui::text::Line::from(format!("{:.4}", y_min))];
+    }
+
+    // 5 labels: min, 25%, 50%, 75%, max
+    (0..=4)
+        .map(|i| {
+            let v = y_min + range * (i as f64 / 4.0);
+            ratatui::text::Line::from(format!("{:.4}", v))
+        })
+        .collect()
+}
+
+/// Generate X-axis labels at 0%, 25%, 50%, 75%, 100%.
+#[cfg(feature = "tui")]
+fn x_axis_labels(_x_max: f64, total_samples: u64) -> Vec<ratatui::text::Span<'static>> {
+    if total_samples == 0 {
+        return vec![ratatui::text::Span::from("0")];
+    }
+    (0..=4)
+        .map(|i| {
+            let sample = (total_samples as f64 * i as f64 / 4.0) as u64;
+            ratatui::text::Span::from(format!("{}", sample))
+        })
+        .collect()
+}
+
+/// Right panel: loss curve chart with min-max envelope and improved axes.
 #[cfg(feature = "tui")]
 fn render_loss_chart(
     frame: &mut ratatui::Frame,
@@ -214,11 +444,15 @@ fn render_loss_chart(
 ) {
     use ratatui::{prelude::*, symbols::Marker, widgets::*};
 
-    let block = Block::default()
-        .title(" Loss Curve ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::SURFACE1))
-        .style(Style::default().bg(theme::BASE));
+    let block = Block::bordered()
+        .title(Line::from(vec![Span::styled(
+            " Loss Curve ",
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .border_style(Style::default().fg(theme::BLUE))
+        .style(Style::default().bg(theme::SURFACE0));
 
     if state.loss_history.is_empty() {
         let empty = Paragraph::new("Waiting for data...")
@@ -229,65 +463,51 @@ fn render_loss_chart(
         return;
     }
 
-    // Downsample to at most 200 points by averaging buckets so the chart
-    // stays readable even when loss_history grows very large.
+    // Min-max envelope downsampling for dense rendering
     let max_points = 200;
-    let data: Vec<(f64, f64)> = if state.loss_history.len() > max_points {
-        let bucket_size = state.loss_history.len() / max_points;
-        state
-            .loss_history
-            .chunks(bucket_size)
-            .enumerate()
-            .map(|(i, chunk)| {
-                let avg = chunk.iter().sum::<f64>() / chunk.len() as f64;
-                (i as f64, avg)
-            })
-            .collect()
-    } else {
-        state
-            .loss_history
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (i as f64, *v))
-            .collect()
-    };
+    let data = downsample_minmax(&state.loss_history, max_points);
 
-    let x_max = (data.len() as f64).max(1.0);
+    let x_max = data
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
     let y_max = state.loss_history.iter().cloned().fold(0.0_f64, f64::max);
     let y_min = state.loss_history.iter().cloned().fold(f64::MAX, f64::min);
 
-    // Pad the Y-axis symmetrically so dots near min/max are never clipped.
+    // Pad Y-axis so dots near min/max are never clipped
     let range = (y_max - y_min).max(0.001);
     let padding = range * 0.15;
     let (y_lo, y_hi) = (y_min - padding, y_max + padding);
 
     let dataset = Dataset::default()
-        .marker(Marker::Braille)
+        .marker(Marker::Dot)
         .graph_type(GraphType::Line)
         .style(Style::default().fg(theme::PEACH))
         .data(&data);
+
+    let x_labels = x_axis_labels(x_max, state.n_samples);
+    let y_labels = y_axis_labels(y_lo, y_hi);
 
     let chart = Chart::new(vec![dataset])
         .block(block)
         .x_axis(
             Axis::default()
                 .bounds([0.0, x_max])
+                .labels(x_labels)
                 .style(Style::default().fg(theme::SUBTEXT0)),
         )
         .y_axis(
             Axis::default()
                 .bounds([y_lo, y_hi])
-                .labels(vec![
-                    Line::from(format!("{:.4}", y_min)),
-                    Line::from(format!("{:.4}", y_max)),
-                ])
+                .labels(y_labels)
                 .style(Style::default().fg(theme::SUBTEXT0)),
         );
 
     frame.render_widget(chart, area);
 }
 
-/// Left sub-panel: horizontal bar chart of feature importances.
+/// Left sub-panel: horizontal bar chart of feature importances with cycling colors.
 #[cfg(feature = "tui")]
 fn render_importances(
     frame: &mut ratatui::Frame,
@@ -296,47 +516,63 @@ fn render_importances(
 ) {
     use ratatui::{prelude::*, widgets::*};
 
-    let block = Block::default()
-        .title(" Feature Importances ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::SURFACE1))
+    let block = Block::bordered()
+        .title(Line::from(vec![Span::styled(
+            " Feature Importances ",
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .border_style(Style::default().fg(theme::BLUE))
         .style(Style::default().bg(theme::BASE));
 
-    // Scale f64 importances to u64 (multiply by 1000) for BarChart.
-    // Take the top entries that fit; sort descending by importance.
+    // Sort descending by importance, take top 10.
     let mut sorted: Vec<(&str, f64)> = state
         .feature_importances
         .iter()
         .map(|(name, val)| (name.as_str(), *val))
         .collect();
     sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Limit to at most 10 features so it fits the panel.
     sorted.truncate(10);
 
-    let bar_data: Vec<(&str, u64)> = sorted
+    // Build individual Bar items with cycling colors and value labels
+    let colors = [theme::MAUVE, theme::BLUE, theme::TEAL, theme::LAVENDER];
+
+    let bars: Vec<Bar> = sorted
         .iter()
-        .map(|(name, val)| (*name, (val * 1000.0) as u64))
+        .enumerate()
+        .map(|(i, (name, val))| {
+            let color = colors[i % colors.len()];
+            Bar::default()
+                .label(Line::from(Span::styled(
+                    *name,
+                    Style::default().fg(theme::SUBTEXT0),
+                )))
+                .value((val * 1000.0) as u64)
+                .style(Style::default().fg(color))
+                .value_style(
+                    Style::default()
+                        .fg(theme::TEXT)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .text_value(format!("{:.3}", val))
+        })
         .collect();
 
+    let bar_group = BarGroup::default().bars(&bars);
+
     let chart = BarChart::default()
-        .data(&bar_data)
+        .data(bar_group)
         .block(block)
         .bar_width(1)
         .bar_gap(0)
-        .bar_style(Style::default().fg(theme::MAUVE))
-        .value_style(
-            Style::default()
-                .fg(theme::TEXT)
-                .add_modifier(Modifier::BOLD),
-        )
         .label_style(Style::default().fg(theme::SUBTEXT0))
         .direction(Direction::Horizontal);
 
     frame.render_widget(chart, area);
 }
 
-/// Right sub-panel: Braille-style accuracy curve chart.
+/// Right sub-panel: accuracy curve chart with improved rendering.
 #[cfg(feature = "tui")]
 fn render_accuracy_chart(
     frame: &mut ratatui::Frame,
@@ -345,11 +581,15 @@ fn render_accuracy_chart(
 ) {
     use ratatui::{prelude::*, symbols::Marker, widgets::*};
 
-    let block = Block::default()
-        .title(" Accuracy Curve ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::SURFACE1))
-        .style(Style::default().bg(theme::BASE));
+    let block = Block::bordered()
+        .title(Line::from(vec![Span::styled(
+            " Accuracy Curve ",
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .border_style(Style::default().fg(theme::BLUE))
+        .style(Style::default().bg(theme::SURFACE0));
 
     if state.accuracy_history.is_empty() {
         let empty = Paragraph::new("Waiting for data...")
@@ -360,29 +600,15 @@ fn render_accuracy_chart(
         return;
     }
 
-    // Downsample accuracy history the same way as loss.
+    // Min-max envelope downsampling
     let max_points = 200;
-    let data: Vec<(f64, f64)> = if state.accuracy_history.len() > max_points {
-        let bucket_size = state.accuracy_history.len() / max_points;
-        state
-            .accuracy_history
-            .chunks(bucket_size)
-            .enumerate()
-            .map(|(i, chunk)| {
-                let avg = chunk.iter().sum::<f64>() / chunk.len() as f64;
-                (i as f64, avg)
-            })
-            .collect()
-    } else {
-        state
-            .accuracy_history
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (i as f64, *v))
-            .collect()
-    };
+    let data = downsample_minmax(&state.accuracy_history, max_points);
 
-    let x_max = (data.len() as f64).max(1.0);
+    let x_max = data
+        .iter()
+        .map(|(x, _)| *x)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
     let y_max = state
         .accuracy_history
         .iter()
@@ -399,32 +625,33 @@ fn render_accuracy_chart(
     let (y_lo, y_hi) = (y_min - padding, y_max + padding);
 
     let dataset = Dataset::default()
-        .marker(Marker::Braille)
+        .marker(Marker::Dot)
         .graph_type(GraphType::Line)
         .style(Style::default().fg(theme::GREEN))
         .data(&data);
+
+    let x_labels = x_axis_labels(x_max, state.n_samples);
+    let y_labels = y_axis_labels(y_lo, y_hi);
 
     let chart = Chart::new(vec![dataset])
         .block(block)
         .x_axis(
             Axis::default()
                 .bounds([0.0, x_max])
+                .labels(x_labels)
                 .style(Style::default().fg(theme::SUBTEXT0)),
         )
         .y_axis(
             Axis::default()
                 .bounds([y_lo, y_hi])
-                .labels(vec![
-                    Line::from(format!("{:.4}", y_min)),
-                    Line::from(format!("{:.4}", y_max)),
-                ])
+                .labels(y_labels)
                 .style(Style::default().fg(theme::SUBTEXT0)),
         );
 
     frame.render_widget(chart, area);
 }
 
-/// Footer: status message + keybinding hints.
+/// Footer: keybinding hints + status.
 #[cfg(feature = "tui")]
 fn render_footer(frame: &mut ratatui::Frame, state: &app::AppState, area: ratatui::layout::Rect) {
     use ratatui::{prelude::*, widgets::*};
@@ -435,14 +662,31 @@ fn render_footer(frame: &mut ratatui::Frame, state: &app::AppState, area: ratatu
         .style(Style::default().bg(theme::BASE));
 
     let status = if state.is_done {
-        "Training complete. Press 'q' to exit."
+        Span::styled(
+            " complete ",
+            Style::default()
+                .fg(theme::GREEN)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else if state.is_training {
+        Span::styled(" training... ", Style::default().fg(theme::PEACH))
     } else {
-        &state.status_message
+        Span::styled(&state.status_message, Style::default().fg(theme::TEXT))
     };
 
-    let paragraph = Paragraph::new(format!(" {} | q: quit", status))
-        .style(Style::default().fg(theme::SUBTEXT0))
-        .block(block);
+    let line = Line::from(vec![
+        Span::styled(
+            " q",
+            Style::default()
+                .fg(theme::BLUE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(": quit", Style::default().fg(theme::SUBTEXT0)),
+        Span::styled(" | ", Style::default().fg(theme::SURFACE1)),
+        status,
+    ]);
+
+    let paragraph = Paragraph::new(line).block(block);
 
     frame.render_widget(paragraph, area);
 }

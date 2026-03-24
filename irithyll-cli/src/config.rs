@@ -101,6 +101,8 @@ pub struct NeuralConfig {
     pub mamba: MambaModelConfig,
     #[serde(default)]
     pub spikenet: SpikeNetModelConfig,
+    #[serde(default)]
+    pub attention: AttentionModelConfig,
 }
 
 /// `[neural.esn]` -- Echo State Network hyperparameters.
@@ -249,6 +251,44 @@ fn default_spikenet_learning_rate() -> f64 {
 }
 fn default_spikenet_seed() -> u64 {
     42
+}
+
+/// `[neural.attention]` -- Streaming attention model hyperparameters (GLA, DeltaNet, Hawk, RetNet).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AttentionModelConfig {
+    #[serde(default = "default_attention_n_heads")]
+    pub n_heads: usize,
+    #[serde(default = "default_attention_seed")]
+    pub seed: u64,
+    #[serde(default = "default_attention_warmup")]
+    pub warmup: usize,
+    /// Decay factor for RetNet (default: 0.99). Only used by RetNet.
+    #[serde(default = "default_attention_gamma")]
+    pub gamma: f64,
+}
+
+impl Default for AttentionModelConfig {
+    fn default() -> Self {
+        Self {
+            n_heads: default_attention_n_heads(),
+            seed: default_attention_seed(),
+            warmup: default_attention_warmup(),
+            gamma: default_attention_gamma(),
+        }
+    }
+}
+
+fn default_attention_n_heads() -> usize {
+    4
+}
+fn default_attention_seed() -> u64 {
+    42
+}
+fn default_attention_warmup() -> usize {
+    10
+}
+fn default_attention_gamma() -> f64 {
+    0.99
 }
 
 // Defaults
