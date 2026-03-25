@@ -78,7 +78,7 @@ Every algorithm implements `StreamingLearner` -- train and predict with the same
 
 ## Neural Streaming Architectures
 
-v9 introduces three families of neural architectures, all implementing `StreamingLearner` -- train and predict one sample at a time, compose in pipelines, no batching required.
+Three families of neural architectures, all implementing `StreamingLearner` -- train and predict one sample at a time, compose in pipelines, no batching required.
 
 ### Reservoir Computing
 
@@ -106,7 +106,7 @@ All neural models also have preprocessor variants (`ESNPreprocessor`, `MambaPrep
 
 ## Streaming AutoML
 
-v9.5 introduces online hyperparameter optimization via champion-challenger racing -- the first streaming AutoML framework in Rust.
+Online hyperparameter optimization via champion-challenger tournament racing -- the first streaming AutoML framework in Rust.
 
 | Component | Description |
 |-----------|-------------|
@@ -131,7 +131,7 @@ Based on Wu et al. (2021) ChaCha, Qi et al. (2023) Discounted Thompson Sampling.
 
 ## Neural Mixture of Experts
 
-v9.6 introduces polymorphic MoE where each expert can be **any** `StreamingLearner` -- mix ESN, Mamba, SpikeNet, SGBT, and attention models in one ensemble.
+Polymorphic MoE where each expert can be **any** `StreamingLearner` -- mix ESN, Mamba, SpikeNet, SGBT, and attention models in one ensemble.
 
 | Component | Description |
 |-----------|-------------|
