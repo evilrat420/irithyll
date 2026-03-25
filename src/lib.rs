@@ -94,7 +94,9 @@ pub mod tree;
 
 pub mod anomaly;
 pub mod attention;
+pub mod automl;
 pub mod bandits;
+
 pub mod clustering;
 pub mod continual;
 pub mod evaluation;
@@ -208,7 +210,8 @@ pub use time_series::{
 
 // Re-exports -- bandits
 pub use bandits::{
-    Bandit, ContextualBandit, EpsilonGreedy, LinUCB, ThompsonSampling, UCBTuned, UCB1,
+    Bandit, ContextualBandit, DiscountedThompsonSampling, EpsilonGreedy, LinUCB, ThompsonSampling,
+    UCBTuned, UCB1,
 };
 
 // Re-exports -- reservoir computing
@@ -228,6 +231,11 @@ pub use attention::{
     AttentionPreprocessor, StreamingAttentionConfig, StreamingAttentionConfigBuilder,
     StreamingAttentionModel,
 };
+
+// Re-exports -- automl
+pub use automl::{AttentionFactory, EsnFactory, MambaFactory, SgbtFactory, SpikeNetFactory};
+pub use automl::{AutoMetric, AutoTuner, AutoTunerBuilder, AutoTunerConfig, ModelFactory};
+pub use automl::{ConfigSampler, ConfigSpace, HyperConfig, HyperParam, RewardNormalizer};
 
 // ---------------------------------------------------------------------------
 // Convenience factory functions
@@ -651,4 +659,23 @@ pub fn streaming_attention(
     mode: irithyll_core::attention::AttentionMode,
 ) -> attention::StreamingAttentionModel {
     attention::streaming_attention(d_model, mode)
+}
+
+/// Create an auto-tuning streaming learner with default settings.
+///
+/// Uses champion-challenger racing to automatically tune hyperparameters
+/// for the given model factory. The champion always provides predictions
+/// while challengers with different configs are evaluated in parallel.
+///
+/// For full control, use [`AutoTuner::builder()`].
+///
+/// ```no_run
+/// use irithyll::{auto_tune, automl::SgbtFactory, StreamingLearner};
+///
+/// let mut tuner = auto_tune(SgbtFactory::new(5));
+/// tuner.train(&[1.0, 2.0, 3.0, 4.0, 5.0], 10.0);
+/// let pred = tuner.predict(&[1.0, 2.0, 3.0, 4.0, 5.0]);
+/// ```
+pub fn auto_tune(factory: impl automl::ModelFactory + 'static) -> automl::AutoTuner {
+    automl::AutoTuner::builder().factory(factory).build()
 }

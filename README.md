@@ -46,6 +46,7 @@ irithyll is structured as a Cargo workspace with three crates:
 - **Confidence intervals** -- prediction uncertainty from RLS and conformal methods
 - **Production-grade** -- async streaming, SIMD acceleration, Arrow/Parquet I/O, ONNX export
 - **Neural streaming architectures** -- reservoir computing (NG-RC, ESN), state space models (Mamba), spiking neural networks (e-prop)
+- **Streaming AutoML** -- champion-challenger hyperparameter racing with bandit-guided search
 - **Pure Rust** -- zero unsafe in `irithyll`, deterministic, serializable, 2,500+ tests
 
 ## Algorithms
@@ -102,6 +103,31 @@ v9 introduces three families of neural architectures, all implementing `Streamin
 | [`SpikeNetFixed`](https://docs.rs/irithyll/latest/irithyll/irithyll_core/snn/struct.SpikeNetFixed.html) | Full `no_std` training in Q1.14 integer arithmetic. 64 neurons fits in 22KB (Cortex-M0+ 32KB SRAM). Lives in `irithyll-core`. | O(N_hidden^2) |
 
 All neural models also have preprocessor variants (`ESNPreprocessor`, `MambaPreprocessor`, `SpikePreprocessor`) that implement `StreamingPreprocessor` for pipeline composition.
+
+## Streaming AutoML
+
+v9.5 introduces online hyperparameter optimization via champion-challenger racing -- the first streaming AutoML framework in Rust.
+
+| Component | Description |
+|-----------|-------------|
+| [`AutoTuner`](https://docs.rs/irithyll/latest/irithyll/automl/struct.AutoTuner.html) | Top-level orchestrator (implements `StreamingLearner`). Champion always predicts; challengers race in parallel. |
+| [`ModelFactory`](https://docs.rs/irithyll/latest/irithyll/automl/trait.ModelFactory.html) | Trait for creating model instances from hyperparameter configs. Built-in factories for SGBT, ESN, Mamba, Attention, SpikeNet. |
+| [`ConfigSpace`](https://docs.rs/irithyll/latest/irithyll/automl/struct.ConfigSpace.html) | Hyperparameter search space with float (linear/log), integer, and categorical params. |
+| [`DiscountedThompsonSampling`](https://docs.rs/irithyll/latest/irithyll/bandits/struct.DiscountedThompsonSampling.html) | Non-stationary bandit with exponential forgetting for config-space exploration. |
+
+```rust
+use irithyll::{auto_tune, automl::SgbtFactory, StreamingLearner};
+
+// One-liner: auto-tune SGBT hyperparameters online
+let mut tuner = auto_tune(SgbtFactory::new(5));
+for i in 0..1000 {
+    let x = [i as f64 * 0.01; 5];
+    tuner.train(&x, x[0].sin());
+}
+let pred = tuner.predict(&[0.5; 5]);
+```
+
+Based on Wu et al. (2021) ChaCha, Qi et al. (2023) Discounted Thompson Sampling.
 
 ## Quick Start
 
@@ -396,6 +422,7 @@ irithyll/                 Workspace root
     stream/               Async tokio-based training runner and predictor handles
     metrics/              Online regression/classification metrics, conformal intervals, EWMA
     anomaly/              Half-space trees for streaming anomaly detection
+    automl/               Champion-challenger racing, config space, model factories, reward normalization
     reservoir/            NG-RC (time-delay polynomial) and ESN (cycle reservoir) + preprocessors
     ssm/                  StreamingMamba (selective SSM) + MambaPreprocessor
     snn/                  SpikeNet (f64 wrapper), SpikePreprocessor
@@ -551,6 +578,10 @@ The MSRV is **1.75**. This is checked in CI and will only be raised in minor ver
 > Bhatnagar, A., Wang, H., Xiong, C., & Bai, Y. (2023). *Improved online conformal prediction via strongly adaptive online learning.* ICML 2023.
 
 > Gupta, C., & Ramdas, A. (2023). *Online Platt scaling with calibeating.* ICML 2023.
+
+> Wu, Q., Iyer, C., & Wang, C. (2021). *ChaCha for online AutoML.* ICML 2021.
+
+> Qi, Y., et al. (2023). *Discounted Thompson Sampling for non-stationary bandits.* arXiv preprint arXiv:2305.10718.
 
 ## License
 

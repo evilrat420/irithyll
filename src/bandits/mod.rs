@@ -11,6 +11,8 @@
 //! - [`UCB1`] — upper confidence bound (Auer et al., 2002).
 //! - [`UCBTuned`] — UCB with per-arm variance estimates for tighter bounds.
 //! - [`ThompsonSampling`] — Bayesian arm selection via Beta posterior sampling.
+//! - [`DiscountedThompsonSampling`] — Thompson Sampling with exponential discounting
+//!   for non-stationary environments (Qi et al., 2023).
 //!
 //! # Contextual bandits
 //!
@@ -33,11 +35,13 @@
 //! assert_eq!(bandit.arm_counts().iter().copied().max(), bandit.arm_counts().get(1).copied());
 //! ```
 
+mod discounted_thompson;
 mod epsilon_greedy;
 mod lin_ucb;
 mod thompson;
 mod ucb;
 
+pub use discounted_thompson::DiscountedThompsonSampling;
 pub use epsilon_greedy::EpsilonGreedy;
 pub use lin_ucb::LinUCB;
 pub use thompson::ThompsonSampling;
