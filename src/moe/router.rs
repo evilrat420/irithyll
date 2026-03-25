@@ -378,12 +378,12 @@ mod tests {
             "expert 0 load should be high after always being active, got {}",
             loads[0]
         );
-        for k in 1..4 {
+        for (k, &load) in loads.iter().enumerate().skip(1) {
             assert!(
-                loads[k] < 0.05,
+                load < 0.05,
                 "expert {} load should be near zero when never active, got {}",
                 k,
-                loads[k]
+                load
             );
         }
         // Load bias should favor underloaded experts
