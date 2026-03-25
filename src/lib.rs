@@ -111,6 +111,7 @@ pub mod serde_support;
 pub mod snn;
 pub mod ssm;
 pub mod time_series;
+pub mod ttt;
 
 #[cfg(feature = "arrow")]
 pub mod arrow_support;
@@ -226,6 +227,9 @@ pub use ssm::{MambaConfig, MambaConfigBuilder, MambaPreprocessor, StreamingMamba
 
 // Re-exports -- spiking neural networks
 pub use snn::{SpikeNet, SpikeNetConfig, SpikeNetConfigBuilder, SpikePreprocessor};
+
+// Re-exports -- test-time training
+pub use ttt::{StreamingTTT, TTTConfig, TTTConfigBuilder};
 
 // Re-exports -- streaming linear attention
 pub use attention::{
@@ -634,6 +638,28 @@ pub fn spikenet(n_hidden: usize) -> snn::SpikeNet {
             .n_hidden(n_hidden)
             .build()
             .expect("spikenet() factory: invalid parameters"),
+    )
+}
+
+/// Create a streaming TTT (Test-Time Training) model.
+///
+/// The hidden state is a linear model updated by gradient descent at every
+/// step. Optional Titans-style momentum and weight decay.
+///
+/// ```no_run
+/// use irithyll::{streaming_ttt, StreamingLearner};
+///
+/// let mut model = streaming_ttt(16, 0.01);
+/// model.train(&[1.0, 2.0], 3.0);
+/// let pred = model.predict(&[1.0, 2.0]);
+/// ```
+pub fn streaming_ttt(d_model: usize, eta: f64) -> ttt::StreamingTTT {
+    ttt::StreamingTTT::new(
+        ttt::TTTConfig::builder()
+            .d_model(d_model)
+            .eta(eta)
+            .build()
+            .expect("streaming_ttt() factory: invalid parameters"),
     )
 }
 

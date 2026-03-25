@@ -197,6 +197,32 @@ pub struct SGBTConfig {
     #[cfg_attr(feature = "serde", serde(default))]
     pub max_tree_samples: Option<u64>,
 
+    /// Sigma-modulated tree replacement speed.
+    ///
+    /// When `Some((base_mts, k))`, the effective max_tree_samples becomes:
+    /// `effective_mts = base_mts / (1.0 + k * normalized_sigma)`
+    /// where `normalized_sigma = contribution_sigma / rolling_contribution_sigma_mean`.
+    ///
+    /// High uncertainty (contribution variance) shortens tree lifetime for faster
+    /// adaptation. Low uncertainty lengthens lifetime for more knowledge accumulation.
+    ///
+    /// Overrides `max_tree_samples` when set. Default: `None`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub adaptive_mts: Option<(u64, f64)>,
+
+    /// Proactive tree pruning interval.
+    ///
+    /// Every `interval` training samples, the tree with the lowest EWMA
+    /// marginal contribution is replaced with a fresh tree.
+    /// Fresh trees (fewer than `interval / 2` samples) are excluded.
+    ///
+    /// When set, contribution tracking is automatically enabled even if
+    /// `quality_prune_alpha` is `None` (uses alpha=0.01).
+    ///
+    /// Default: `None` (disabled).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub proactive_prune_interval: Option<u64>,
+
     /// Interval (in samples per leaf) at which max-depth leaves re-evaluate
     /// whether a split would improve them.
     ///
@@ -476,6 +502,8 @@ impl Default for SGBTConfig {
             initial_target_count: 50,
             leaf_half_life: None,
             max_tree_samples: None,
+            adaptive_mts: None,
+            proactive_prune_interval: None,
             split_reeval_interval: None,
             feature_names: None,
             feature_types: None,
@@ -631,6 +659,26 @@ impl SGBTConfigBuilder {
     /// After `n` samples, the tree is replaced regardless of drift detector state.
     pub fn max_tree_samples(mut self, n: u64) -> Self {
         self.config.max_tree_samples = Some(n);
+        self
+    }
+
+    /// Enable sigma-modulated tree replacement speed.
+    ///
+    /// The effective max_tree_samples becomes `base_mts / (1.0 + k * normalized_sigma)`,
+    /// where `normalized_sigma` tracks contribution variance across ensemble trees.
+    /// Overrides `max_tree_samples` when set.
+    pub fn adaptive_mts(mut self, base_mts: u64, k: f64) -> Self {
+        self.config.adaptive_mts = Some((base_mts, k));
+        self
+    }
+
+    /// Set the proactive tree pruning interval.
+    ///
+    /// Every `interval` training samples, the tree with the lowest EWMA
+    /// marginal contribution is replaced. Automatically enables contribution
+    /// tracking with alpha=0.01 when `quality_prune_alpha` is not set.
+    pub fn proactive_prune_interval(mut self, interval: u64) -> Self {
+        self.config.proactive_prune_interval = Some(interval);
         self
     }
 
@@ -898,6 +946,29 @@ impl SGBTConfigBuilder {
                 return Err(
                     ConfigError::out_of_range("max_tree_samples", "must be >= 100", max).into(),
                 );
+            }
+        }
+        if let Some((base_mts, k)) = c.adaptive_mts {
+            if base_mts < 100 {
+                return Err(ConfigError::out_of_range(
+                    "adaptive_mts.base_mts",
+                    "must be >= 100",
+                    base_mts,
+                )
+                .into());
+            }
+            if k <= 0.0 {
+                return Err(ConfigError::out_of_range("adaptive_mts.k", "must be > 0", k).into());
+            }
+        }
+        if let Some(interval) = c.proactive_prune_interval {
+            if interval < 100 {
+                return Err(ConfigError::out_of_range(
+                    "proactive_prune_interval",
+                    "must be >= 100",
+                    interval,
+                )
+                .into());
             }
         }
         if let Some(interval) = c.split_reeval_interval {

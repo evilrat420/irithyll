@@ -616,10 +616,18 @@ impl MoEDistributionalSGBT {
         let var_mix = (second_moment - mu_mix * mu_mix).max(1e-16);
         let sigma_mix = crate::math::sqrt(var_mix);
 
+        // Weighted average of expert honest_sigmas
+        let honest_sigma_mix: f64 = probs
+            .iter()
+            .zip(preds.iter())
+            .map(|(&p, pred)| p * pred.honest_sigma)
+            .sum();
+
         GaussianPrediction {
             mu: mu_mix,
             sigma: sigma_mix,
             log_sigma: crate::math::ln(sigma_mix),
+            honest_sigma: honest_sigma_mix,
         }
     }
 
@@ -646,10 +654,17 @@ impl MoEDistributionalSGBT {
         let var_mix = (second_moment - mu_mix * mu_mix).max(1e-16);
         let sigma_mix = crate::math::sqrt(var_mix);
 
+        let honest_sigma_mix: f64 = probs
+            .iter()
+            .zip(preds.iter())
+            .map(|(&p, pred)| p * pred.honest_sigma)
+            .sum();
+
         let pred = GaussianPrediction {
             mu: mu_mix,
             sigma: sigma_mix,
             log_sigma: crate::math::ln(sigma_mix),
+            honest_sigma: honest_sigma_mix,
         };
         (pred, probs)
     }

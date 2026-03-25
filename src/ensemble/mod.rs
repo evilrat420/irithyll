@@ -114,6 +114,9 @@ pub struct SGBT<L: Loss = SquaredLoss> {
     /// Sum of replacement counts across all steps at last bandwidth computation.
     /// Used to detect when trees have been replaced and bandwidths need refresh.
     last_replacement_sum: u64,
+    /// EWMA of contribution variance (sigma) across trees for adaptive_mts.
+    /// Used as the denominator when computing sigma_ratio for tree lifetime modulation.
+    rolling_contribution_sigma: f64,
 }
 
 impl<L: Loss + Clone> Clone for SGBT<L> {
@@ -133,6 +136,7 @@ impl<L: Loss + Clone> Clone for SGBT<L> {
             rolling_mean_error: self.rolling_mean_error,
             auto_bandwidths: self.auto_bandwidths.clone(),
             last_replacement_sum: self.last_replacement_sum,
+            rolling_contribution_sigma: self.rolling_contribution_sigma,
         }
     }
 }
@@ -242,7 +246,29 @@ impl<L: Loss> SGBT<L> {
             rolling_mean_error: 0.0,
             auto_bandwidths: Vec::new(),
             last_replacement_sum: 0,
+            rolling_contribution_sigma: 0.0,
         }
+    }
+
+    /// Compute contribution sigma (std dev of tree contributions for a feature vector).
+    fn compute_contribution_sigma(&self, features: &[f64]) -> f64 {
+        let n = self.steps.len();
+        if n <= 1 {
+            return 0.0;
+        }
+        let lr = self.config.learning_rate;
+        let mut sum = 0.0_f64;
+        let mut sq_sum = 0.0_f64;
+        for step in &self.steps {
+            let c = lr * step.predict(features);
+            sum += c;
+            sq_sum += c * c;
+        }
+        let nf = n as f64;
+        let mean_c = sum / nf;
+        let var = (sq_sum / nf) - (mean_c * mean_c);
+        let var_corrected = var * nf / (nf - 1.0);
+        var_corrected.max(0.0).sqrt()
     }
 
     /// Train on a single observation.
@@ -263,6 +289,25 @@ impl<L: Loss> SGBT<L> {
                 self.base_initialized = true;
                 self.initial_targets.clear();
                 self.initial_targets.shrink_to_fit();
+            }
+        }
+
+        // Apply adaptive_mts: override per-step max_tree_samples based on contribution sigma.
+        if let Some((base_mts, k)) = self.config.adaptive_mts {
+            let contribution_sigma = self.compute_contribution_sigma(features);
+            const CONTRIBUTION_SIGMA_ALPHA: f64 = 0.001;
+            self.rolling_contribution_sigma = (1.0 - CONTRIBUTION_SIGMA_ALPHA)
+                * self.rolling_contribution_sigma
+                + CONTRIBUTION_SIGMA_ALPHA * contribution_sigma;
+
+            let sigma_ratio = if self.rolling_contribution_sigma > 1e-12 {
+                contribution_sigma / self.rolling_contribution_sigma
+            } else {
+                1.0
+            };
+            let effective_mts = (base_mts as f64 / (1.0 + k * sigma_ratio)).max(100.0) as u64;
+            for step in &mut self.steps {
+                step.slot_mut().set_max_tree_samples(Some(effective_mts));
             }
         }
 
@@ -319,6 +364,26 @@ impl<L: Loss> SGBT<L> {
                 } else {
                     self.low_contrib_count[s] = 0;
                 }
+            }
+        }
+
+        // Proactive pruning: replace worst-contributing tree every N samples.
+        if let Some(interval) = self.config.proactive_prune_interval {
+            if interval > 0 && self.samples_seen % interval == 0 && self.steps.len() > 1 {
+                let worst_idx = self
+                    .steps
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        let a_std = a.slot().prediction_std();
+                        let b_std = b.slot().prediction_std();
+                        a_std
+                            .partial_cmp(&b_std)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                self.steps[worst_idx].slot_mut().replace_active();
             }
         }
 
@@ -971,6 +1036,7 @@ impl<L: Loss> SGBT<L> {
             rolling_mean_error: self.rolling_mean_error,
             contribution_ewma: self.contribution_ewma.clone(),
             low_contrib_count: self.low_contrib_count.clone(),
+            rolling_contribution_sigma: self.rolling_contribution_sigma,
         }
     }
 }
@@ -1083,6 +1149,7 @@ impl SGBT<Box<dyn Loss>> {
             rolling_mean_error: state.rolling_mean_error,
             auto_bandwidths: Vec::new(),
             last_replacement_sum: 0,
+            rolling_contribution_sigma: state.rolling_contribution_sigma,
         }
     }
 }
@@ -2187,5 +2254,57 @@ mod tests {
             .shadow_warmup(0)
             .build();
         assert!(result.is_err(), "shadow_warmup=0 should fail validation");
+    }
+
+    #[test]
+    fn adaptive_mts_base_sgbt() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.05)
+            .max_depth(3)
+            .grace_period(5)
+            .initial_target_count(10)
+            .adaptive_mts(500, 1.0)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        // Train 500 samples -- should not crash and produce finite predictions.
+        for i in 0..500 {
+            let x = (i as f64) * 0.02;
+            model.train_one(&(vec![x, x * 0.5], x.sin()));
+        }
+        let pred = model.predict(&[1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "adaptive_mts base SGBT: prediction should be finite, got {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn proactive_prune_base_sgbt() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.05)
+            .max_depth(3)
+            .grace_period(5)
+            .initial_target_count(10)
+            .proactive_prune_interval(100)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        // Train 300 samples -- prune fires at 100, 200, 300.
+        for i in 0..300 {
+            let x = (i as f64) * 0.03;
+            model.train_one(&(vec![x, x * 0.7], x.cos()));
+        }
+        let pred = model.predict(&[2.0, 1.4]);
+        assert!(
+            pred.is_finite(),
+            "proactive_prune base SGBT: prediction should be finite, got {}",
+            pred
+        );
     }
 }

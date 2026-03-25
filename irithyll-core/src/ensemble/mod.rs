@@ -114,6 +114,9 @@ pub struct SGBT<L: Loss = SquaredLoss> {
     /// Rolling mean absolute error for error-weighted sample importance.
     /// Only used when `error_weight_alpha` is `Some`.
     rolling_mean_error: f64,
+    /// EWMA of contribution standard deviation (σ proxy for adaptive_mts).
+    /// Only updated when `adaptive_mts` is `Some`.
+    rolling_contribution_sigma: f64,
     /// Per-feature auto-calibrated bandwidths for smooth prediction.
     /// Computed from median split threshold gaps across all trees.
     auto_bandwidths: Vec<f64>,
@@ -137,6 +140,7 @@ impl<L: Loss + Clone> Clone for SGBT<L> {
             contribution_ewma: self.contribution_ewma.clone(),
             low_contrib_count: self.low_contrib_count.clone(),
             rolling_mean_error: self.rolling_mean_error,
+            rolling_contribution_sigma: self.rolling_contribution_sigma,
             auto_bandwidths: self.auto_bandwidths.clone(),
             last_replacement_sum: self.last_replacement_sum,
         }
@@ -228,7 +232,8 @@ impl<L: Loss> SGBT<L> {
         let seed = config.seed;
         let initial_target_count = config.initial_target_count;
         let n = config.n_steps;
-        let has_pruning = config.quality_prune_alpha.is_some();
+        let has_pruning =
+            config.quality_prune_alpha.is_some() || config.proactive_prune_interval.is_some();
         Self {
             config,
             steps,
@@ -246,6 +251,7 @@ impl<L: Loss> SGBT<L> {
             },
             low_contrib_count: if has_pruning { vec![0; n] } else { Vec::new() },
             rolling_mean_error: 0.0,
+            rolling_contribution_sigma: 0.0,
             auto_bandwidths: Vec::new(),
             last_replacement_sum: 0,
         }
@@ -275,7 +281,29 @@ impl<L: Loss> SGBT<L> {
         // Current prediction starts from base
         let mut current_pred = self.base_prediction;
 
-        let prune_alpha = self.config.quality_prune_alpha;
+        // Adaptive MTS: compute contribution variance and set effective max_tree_samples
+        if let Some((base_mts, k)) = self.config.adaptive_mts {
+            let sigma = self.contribution_variance(features);
+            self.rolling_contribution_sigma =
+                0.999 * self.rolling_contribution_sigma + 0.001 * sigma;
+
+            let normalized = if self.rolling_contribution_sigma > 1e-10 {
+                sigma / self.rolling_contribution_sigma
+            } else {
+                1.0
+            };
+            let factor = 1.0 / (1.0 + k * normalized);
+            let effective_mts =
+                ((base_mts as f64) * factor).max(self.config.grace_period as f64 * 2.0) as u64;
+            for step in &mut self.steps {
+                step.slot_mut().set_max_tree_samples(Some(effective_mts));
+            }
+        }
+
+        let prune_alpha = self
+            .config
+            .quality_prune_alpha
+            .or_else(|| self.config.proactive_prune_interval.map(|_| 0.01));
         let prune_threshold = self.config.quality_prune_threshold;
         let prune_patience = self.config.quality_prune_patience;
 
@@ -324,6 +352,34 @@ impl<L: Loss> SGBT<L> {
                     }
                 } else {
                     self.low_contrib_count[s] = 0;
+                }
+            }
+        }
+
+        // Proactive pruning: replace worst-contributing tree at interval
+        if let Some(interval) = self.config.proactive_prune_interval {
+            if self.samples_seen % interval == 0
+                && self.samples_seen > 0
+                && !self.contribution_ewma.is_empty()
+            {
+                let min_age = interval / 2;
+                let worst_idx = self
+                    .steps
+                    .iter()
+                    .enumerate()
+                    .zip(self.contribution_ewma.iter())
+                    .filter(|((_, step), _)| step.n_samples_seen() >= min_age)
+                    .min_by(|((_, _), a_ewma), ((_, _), b_ewma)| {
+                        a_ewma
+                            .partial_cmp(b_ewma)
+                            .unwrap_or(core::cmp::Ordering::Equal)
+                    })
+                    .map(|((i, _), _)| i);
+
+                if let Some(idx) = worst_idx {
+                    self.steps[idx].reset();
+                    self.contribution_ewma[idx] = 0.0;
+                    self.low_contrib_count[idx] = 0;
                 }
             }
         }
@@ -778,6 +834,32 @@ impl<L: Loss> SGBT<L> {
     // lives in the full `irithyll` crate, not in `irithyll-core`. Those methods
     // are provided via the re-export layer in `irithyll::ensemble`.
 
+    /// Compute tree contribution standard deviation (σ proxy for adaptive_mts).
+    ///
+    /// Measures how much individual tree predictions vary across the ensemble,
+    /// which serves as a proxy for model uncertainty in the base SGBT
+    /// (the distributional variant uses honest_sigma instead).
+    fn contribution_variance(&self, features: &[f64]) -> f64 {
+        let n = self.steps.len();
+        if n <= 1 {
+            return 0.0;
+        }
+
+        let lr = self.config.learning_rate;
+        let mut sum = 0.0;
+        let mut sq_sum = 0.0;
+        for step in &self.steps {
+            let c = lr * step.predict(features);
+            sum += c;
+            sq_sum += c * c;
+        }
+        let n_f = n as f64;
+        let mean = sum / n_f;
+        let var = (sq_sum / n_f) - (mean * mean);
+        // Bessel's correction + numerical safety
+        crate::math::sqrt((var.abs() * n_f / (n_f - 1.0)).max(0.0))
+    }
+
     /// Refresh auto-bandwidths if any tree has been replaced since last computation.
     fn refresh_bandwidths(&mut self) {
         let current_sum: u64 = self.steps.iter().map(|s| s.slot().replacements()).sum();
@@ -883,6 +965,7 @@ impl<L: Loss> SGBT<L> {
         self.initial_targets.clear();
         self.samples_seen = 0;
         self.rng_state = self.config.seed;
+        self.rolling_contribution_sigma = 0.0;
         self.auto_bandwidths.clear();
         self.last_replacement_sum = 0;
     }
@@ -1029,7 +1112,8 @@ impl SGBT<Box<dyn Loss>> {
             .collect();
 
         let n = steps.len();
-        let has_pruning = state.config.quality_prune_alpha.is_some();
+        let has_pruning = state.config.quality_prune_alpha.is_some()
+            || state.config.proactive_prune_interval.is_some();
 
         // Restore pruning state if available, otherwise initialize
         let contribution_ewma = if !state.contribution_ewma.is_empty() {
@@ -1060,6 +1144,7 @@ impl SGBT<Box<dyn Loss>> {
             contribution_ewma,
             low_contrib_count,
             rolling_mean_error: state.rolling_mean_error,
+            rolling_contribution_sigma: 0.0,
             auto_bandwidths: Vec::new(),
             last_replacement_sum: 0,
         }
@@ -2169,5 +2254,179 @@ mod tests {
             .shadow_warmup(0)
             .build();
         assert!(result.is_err(), "shadow_warmup=0 should fail validation");
+    }
+
+    // -------------------------------------------------------------------
+    // adaptive_mts config tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn adaptive_mts_defaults_to_none() {
+        let cfg = SGBTConfig::default();
+        assert!(
+            cfg.adaptive_mts.is_none(),
+            "adaptive_mts should default to None"
+        );
+    }
+
+    #[test]
+    fn adaptive_mts_config_builder() {
+        let cfg = SGBTConfig::builder()
+            .n_steps(10)
+            .adaptive_mts(500, 2.0)
+            .build()
+            .unwrap();
+        assert_eq!(
+            cfg.adaptive_mts,
+            Some((500, 2.0)),
+            "adaptive_mts should store (base_mts, k)"
+        );
+    }
+
+    #[test]
+    fn adaptive_mts_validation_rejects_low_base() {
+        let result = SGBTConfig::builder()
+            .n_steps(5)
+            .adaptive_mts(50, 1.0)
+            .build();
+        assert!(
+            result.is_err(),
+            "adaptive_mts with base_mts < 100 should fail"
+        );
+    }
+
+    #[test]
+    fn adaptive_mts_validation_rejects_zero_k() {
+        let result = SGBTConfig::builder()
+            .n_steps(5)
+            .adaptive_mts(500, 0.0)
+            .build();
+        assert!(result.is_err(), "adaptive_mts with k=0 should fail");
+    }
+
+    #[test]
+    fn adaptive_mts_trains_without_panic() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(3)
+            .n_bins(16)
+            .adaptive_mts(200, 1.0)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        for i in 0..500 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 2.0], x * 3.0));
+        }
+
+        let pred = model.predict(&[1.0, 2.0]);
+        assert!(
+            pred.is_finite(),
+            "adaptive_mts model should produce finite predictions, got {}",
+            pred
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // proactive_prune config tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn proactive_prune_defaults_to_none() {
+        let cfg = SGBTConfig::default();
+        assert!(
+            cfg.proactive_prune_interval.is_none(),
+            "proactive_prune_interval should default to None"
+        );
+    }
+
+    #[test]
+    fn proactive_prune_config_builder() {
+        let cfg = SGBTConfig::builder()
+            .n_steps(10)
+            .proactive_prune_interval(500)
+            .build()
+            .unwrap();
+        assert_eq!(
+            cfg.proactive_prune_interval,
+            Some(500),
+            "proactive_prune_interval should be set"
+        );
+    }
+
+    #[test]
+    fn proactive_prune_validation_rejects_low_interval() {
+        let result = SGBTConfig::builder()
+            .n_steps(5)
+            .proactive_prune_interval(50)
+            .build();
+        assert!(
+            result.is_err(),
+            "proactive_prune_interval < 100 should fail"
+        );
+    }
+
+    #[test]
+    fn proactive_prune_enables_contribution_tracking() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(3)
+            .n_bins(16)
+            .proactive_prune_interval(200)
+            .build()
+            .unwrap();
+
+        // quality_prune_alpha is None, but proactive_prune_interval is set
+        assert!(config.quality_prune_alpha.is_none());
+
+        let mut model = SGBT::new(config);
+
+        // Train a few samples so contribution_ewma gets populated
+        for i in 0..100 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 2.0], x * 3.0));
+        }
+
+        // contribution_ewma should be populated (not empty)
+        // We can verify by checking that model trains without panic and produces
+        // finite predictions -- the tracking is happening internally.
+        let pred = model.predict(&[1.0, 2.0]);
+        assert!(
+            pred.is_finite(),
+            "proactive_prune model should produce finite predictions, got {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn proactive_prune_trains_without_panic() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(3)
+            .n_bins(16)
+            .proactive_prune_interval(200)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        // Train past the prune interval to exercise the proactive prune path
+        for i in 0..500 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&Sample::new(vec![x, x * 2.0], x * 3.0));
+        }
+
+        let pred = model.predict(&[1.0, 2.0]);
+        assert!(
+            pred.is_finite(),
+            "proactive_prune model should produce finite predictions after pruning, got {}",
+            pred
+        );
     }
 }

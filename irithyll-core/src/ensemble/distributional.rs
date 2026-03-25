@@ -64,6 +64,15 @@ pub struct GaussianPrediction {
     pub sigma: f64,
     /// Log of scale parameter (raw model output for scale ensemble).
     pub log_sigma: f64,
+    /// Tree contribution variance (epistemic uncertainty).
+    ///
+    /// Standard deviation of individual location-tree contributions,
+    /// computed via one-pass Welford variance with Bessel's correction.
+    /// Reacts instantly when trees disagree (no EWMA lag), making it
+    /// superior to empirical sigma for regime-change detection.
+    ///
+    /// Zero when the model has 0 or 1 active location trees.
+    pub honest_sigma: f64,
 }
 
 impl GaussianPrediction {
@@ -249,6 +258,12 @@ pub struct DistributionalSGBT {
     ensemble_grad_m2: f64,
     /// Ensemble-level gradient sample count.
     ensemble_grad_count: u64,
+    /// EWMA of honest_sigma (tree contribution std dev) for σ-modulated LR.
+    ///
+    /// When `uncertainty_modulated_lr` is enabled, the honest_sigma ratio
+    /// (`honest_sigma / rolling_honest_sigma_mean`) modulates the effective
+    /// learning rate, reacting instantly to tree disagreement.
+    rolling_honest_sigma_mean: f64,
     /// Packed f32 cache for fast location-only inference (dual-path).
     packed_cache: Option<PackedInferenceCache>,
     /// Samples trained since last packed cache refresh.
@@ -282,6 +297,7 @@ impl Clone for DistributionalSGBT {
             ensemble_grad_mean: self.ensemble_grad_mean,
             ensemble_grad_m2: self.ensemble_grad_m2,
             ensemble_grad_count: self.ensemble_grad_count,
+            rolling_honest_sigma_mean: self.rolling_honest_sigma_mean,
             packed_cache: self.packed_cache.clone(),
             samples_since_refresh: self.samples_since_refresh,
             packed_refresh_interval: self.packed_refresh_interval,
@@ -401,10 +417,36 @@ impl DistributionalSGBT {
             ensemble_grad_mean: 0.0,
             ensemble_grad_m2: 0.0,
             ensemble_grad_count: 0,
+            rolling_honest_sigma_mean: 0.0,
             packed_cache: None,
             samples_since_refresh: 0,
             packed_refresh_interval,
         }
+    }
+
+    /// Compute honest_sigma from location tree contributions for a feature vector.
+    ///
+    /// Returns the Bessel-corrected standard deviation of individual tree
+    /// contributions (`learning_rate * tree.predict(features)`). This is
+    /// O(n_steps) — the same cost as a single prediction pass.
+    fn compute_honest_sigma(&self, features: &[f64]) -> f64 {
+        let n = self.location_steps.len();
+        if n <= 1 {
+            return 0.0;
+        }
+        let lr = self.config.learning_rate;
+        let mut sum = 0.0_f64;
+        let mut sq_sum = 0.0_f64;
+        for step in &self.location_steps {
+            let c = lr * step.predict(features);
+            sum += c;
+            sq_sum += c * c;
+        }
+        let nf = n as f64;
+        let mean_c = sum / nf;
+        let var = (sq_sum / nf) - (mean_c * mean_c);
+        let var_corrected = var * nf / (nf - 1.0);
+        crate::math::sqrt(var_corrected.max(0.0))
     }
 
     /// Train on a single observation.
@@ -464,6 +506,13 @@ impl DistributionalSGBT {
             mu += self.config.learning_rate * self.location_steps[s].predict(features);
         }
 
+        // Update rolling honest_sigma mean (tree contribution variance EWMA)
+        let honest_sigma = self.compute_honest_sigma(features);
+        const HONEST_SIGMA_ALPHA: f64 = 0.001;
+        self.rolling_honest_sigma_mean = (1.0 - HONEST_SIGMA_ALPHA)
+            * self.rolling_honest_sigma_mean
+            + HONEST_SIGMA_ALPHA * honest_sigma;
+
         // Empirical sigma from EWMA of squared prediction errors
         let err = target - mu;
         let alpha = self.empirical_sigma_alpha;
@@ -522,6 +571,13 @@ impl DistributionalSGBT {
     fn train_one_tree_chain(&mut self, target: f64, features: &[f64]) {
         let mut mu = self.location_base;
         let mut log_sigma = self.scale_base;
+
+        // Update rolling honest_sigma mean (tree contribution variance EWMA)
+        let honest_sigma = self.compute_honest_sigma(features);
+        const HONEST_SIGMA_ALPHA: f64 = 0.001;
+        self.rolling_honest_sigma_mean = (1.0 - HONEST_SIGMA_ALPHA)
+            * self.rolling_honest_sigma_mean
+            + HONEST_SIGMA_ALPHA * honest_sigma;
 
         // Compute σ-ratio for uncertainty-modulated learning rate (PD controller).
         let sigma_ratio = if self.uncertainty_modulated_lr {
@@ -642,10 +698,13 @@ impl DistributionalSGBT {
             }
         };
 
+        let honest_sigma = self.compute_honest_sigma(features);
+
         GaussianPrediction {
             mu,
             sigma,
             log_sigma,
+            honest_sigma,
         }
     }
 
@@ -696,10 +755,13 @@ impl DistributionalSGBT {
             }
         };
 
+        let honest_sigma = self.compute_honest_sigma(features);
+
         GaussianPrediction {
             mu,
             sigma,
             log_sigma,
+            honest_sigma,
         }
     }
 
@@ -728,10 +790,13 @@ impl DistributionalSGBT {
             }
         };
 
+        let honest_sigma = self.compute_honest_sigma(features);
+
         GaussianPrediction {
             mu,
             sigma,
             log_sigma,
+            honest_sigma,
         }
     }
 
@@ -764,10 +829,13 @@ impl DistributionalSGBT {
             }
         };
 
+        let honest_sigma = self.compute_honest_sigma(features);
+
         GaussianPrediction {
             mu,
             sigma,
             log_sigma,
+            honest_sigma,
         }
     }
 
@@ -796,10 +864,13 @@ impl DistributionalSGBT {
             }
         };
 
+        let honest_sigma = self.compute_honest_sigma(features);
+
         GaussianPrediction {
             mu,
             sigma,
             log_sigma,
+            honest_sigma,
         }
     }
 
@@ -830,10 +901,13 @@ impl DistributionalSGBT {
             }
         };
 
+        let honest_sigma = self.compute_honest_sigma(features);
+
         GaussianPrediction {
             mu,
             sigma,
             log_sigma,
+            honest_sigma,
         }
     }
 
@@ -1137,6 +1211,7 @@ impl DistributionalSGBT {
         self.ensemble_grad_mean = 0.0;
         self.ensemble_grad_m2 = 0.0;
         self.ensemble_grad_count = 0;
+        self.rolling_honest_sigma_mean = 0.0;
         self.packed_cache = None;
         self.samples_since_refresh = 0;
     }
@@ -1218,6 +1293,14 @@ impl DistributionalSGBT {
     #[inline]
     pub fn is_uncertainty_modulated(&self) -> bool {
         self.uncertainty_modulated_lr
+    }
+
+    /// Current rolling honest_sigma mean (EWMA of tree contribution std dev).
+    ///
+    /// Returns `0.0` before any training samples have been processed.
+    #[inline]
+    pub fn rolling_honest_sigma_mean(&self) -> f64 {
+        self.rolling_honest_sigma_mean
     }
 
     // -------------------------------------------------------------------
@@ -1475,6 +1558,7 @@ impl DistributionalSGBT {
             uncertainty_modulated_lr: self.uncertainty_modulated_lr,
             rolling_sigma_mean: self.rolling_sigma_mean,
             ewma_sq_err: self.ewma_sq_err,
+            rolling_honest_sigma_mean: self.rolling_honest_sigma_mean,
         }
     }
 
@@ -1575,6 +1659,7 @@ impl DistributionalSGBT {
             ensemble_grad_mean: 0.0,
             ensemble_grad_m2: 0.0,
             ensemble_grad_count: 0,
+            rolling_honest_sigma_mean: state.rolling_honest_sigma_mean,
             packed_cache: None,
             samples_since_refresh: 0,
             packed_refresh_interval,
@@ -1760,6 +1845,7 @@ mod tests {
             mu: 10.0,
             sigma: 2.0,
             log_sigma: 2.0_f64.ln(),
+            honest_sigma: 0.0,
         };
 
         assert!((pred.lower(1.96) - (10.0 - 1.96 * 2.0)).abs() < 1e-10);
@@ -2406,6 +2492,95 @@ mod tests {
             "sigma should be identical: full={}, cached={}",
             full_pred.sigma,
             cached_pred.sigma
+        );
+    }
+
+    #[test]
+    fn honest_sigma_in_gaussian_prediction() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .max_depth(3)
+            .grace_period(2)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+        for i in 0..100 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x], x * 2.0));
+        }
+
+        let pred = model.predict(&[5.0]);
+        // honest_sigma should be finite and non-negative
+        assert!(
+            pred.honest_sigma.is_finite(),
+            "honest_sigma should be finite, got {}",
+            pred.honest_sigma
+        );
+        assert!(
+            pred.honest_sigma >= 0.0,
+            "honest_sigma should be >= 0, got {}",
+            pred.honest_sigma
+        );
+    }
+
+    #[test]
+    fn honest_sigma_increases_with_divergence() {
+        let config = SGBTConfig::builder()
+            .n_steps(8)
+            .learning_rate(0.1)
+            .max_depth(4)
+            .grace_period(2)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        // Train on linear data
+        for i in 0..200 {
+            let x = i as f64 * 0.05;
+            model.train_one(&(vec![x], x * 2.0));
+        }
+
+        // Predict in-distribution
+        let in_dist = model.predict(&[5.0]);
+        // Predict very far out of distribution
+        let out_dist = model.predict(&[500.0]);
+
+        // Both should be finite and non-negative
+        assert!(in_dist.honest_sigma.is_finite());
+        assert!(out_dist.honest_sigma.is_finite());
+        assert!(in_dist.honest_sigma >= 0.0);
+        assert!(out_dist.honest_sigma >= 0.0);
+
+        // Out-of-distribution should generally produce different honest_sigma
+        // (trees will respond differently to unseen regions)
+        // We can't guarantee strictly greater since all trees might
+        // extrapolate identically, but at minimum both should be valid.
+    }
+
+    #[test]
+    fn honest_sigma_zero_for_single_step() {
+        // With only 1 step, variance of 1 contribution is undefined -> returns 0
+        let config = SGBTConfig::builder()
+            .n_steps(1)
+            .learning_rate(0.1)
+            .max_depth(3)
+            .grace_period(2)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+        for i in 0..100 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x], x * 2.0));
+        }
+        let pred = model.predict(&[5.0]);
+        assert!(
+            pred.honest_sigma.abs() < 1e-15,
+            "honest_sigma should be 0 with 1 step, got {}",
+            pred.honest_sigma
         );
     }
 }

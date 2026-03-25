@@ -411,6 +411,14 @@ impl TreeSlot {
         (active_w * active_pred + shadow_w * shadow_pred) / total
     }
 
+    /// Dynamically update the max_tree_samples threshold.
+    ///
+    /// Used by adaptive_mts to modulate tree lifetime based on contribution variance.
+    #[inline]
+    pub fn set_max_tree_samples(&mut self, max: Option<u64>) {
+        self.max_tree_samples = max;
+    }
+
     /// Shadow warmup configuration (0 = disabled).
     #[inline]
     pub fn shadow_warmup(&self) -> usize {

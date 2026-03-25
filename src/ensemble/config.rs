@@ -135,6 +135,8 @@ impl DriftDetectorType {
 /// | `leaf_half_life`         | None (disabled)      |
 /// | `max_tree_samples`       | None (disabled)      |
 /// | `split_reeval_interval`  | None (disabled)      |
+/// | `adaptive_mts`           | None (disabled)      |
+/// | `proactive_prune_interval` | None (disabled)    |
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SGBTConfig {
     /// Number of boosting steps (trees in the ensemble). Default 100.
@@ -433,6 +435,33 @@ pub struct SGBTConfig {
     /// `0` (default) disables the packed cache.
     #[serde(default)]
     pub packed_refresh_interval: u64,
+
+    /// Sigma-modulated adaptive tree replacement speed.
+    ///
+    /// When `Some((base_mts, k))`, trees are replaced faster during high
+    /// uncertainty and slower during stability. The effective max-tree-samples
+    /// is computed as `base_mts / (1 + k * sigma_ratio)`, where `sigma_ratio`
+    /// is derived from the model's contribution variance (base SGBT) or
+    /// honest_sigma (distributional SGBT).
+    ///
+    /// Overrides `max_tree_samples` when set. `k` controls sensitivity
+    /// (typical: 1.0).
+    ///
+    /// `None` (default) disables adaptive replacement speed.
+    #[serde(default)]
+    pub adaptive_mts: Option<(u64, f64)>,
+
+    /// Proactive pruning interval.
+    ///
+    /// Every `interval` samples, the worst-contributing tree is identified
+    /// and replaced. This enables continuous ensemble hygiene beyond
+    /// drift-detector-triggered replacement.
+    ///
+    /// Enables contribution tracking automatically.
+    ///
+    /// `None` (default) disables proactive pruning.
+    #[serde(default)]
+    pub proactive_prune_interval: Option<u64>,
 }
 
 fn default_empirical_sigma_alpha() -> f64 {
@@ -485,6 +514,8 @@ impl Default for SGBTConfig {
             shadow_warmup: None,
             leaf_model_type: LeafModelType::default(),
             packed_refresh_interval: 0,
+            adaptive_mts: None,
+            proactive_prune_interval: None,
         }
     }
 }
@@ -815,6 +846,27 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Set sigma-modulated tree replacement speed.
+    ///
+    /// `base_mts` is the tree lifetime under normal conditions.
+    /// `k` controls sensitivity (typical: 1.0).
+    ///
+    /// When set, trees are replaced faster during high uncertainty
+    /// and slower during stability. Overrides `max_tree_samples`.
+    pub fn adaptive_mts(mut self, base_mts: u64, k: f64) -> Self {
+        self.config.adaptive_mts = Some((base_mts, k));
+        self
+    }
+
+    /// Set proactive pruning interval.
+    ///
+    /// Every `interval` samples, the worst-contributing tree is replaced.
+    /// Enables contribution tracking automatically.
+    pub fn proactive_prune_interval(mut self, interval: u64) -> Self {
+        self.config.proactive_prune_interval = Some(interval);
+        self
+    }
+
     /// Validate and build the configuration.
     ///
     /// # Errors
@@ -1045,6 +1097,33 @@ impl SGBTConfigBuilder {
                     "error_weight_alpha",
                     "must be in (0, 1)",
                     alpha,
+                )
+                .into());
+            }
+        }
+
+        // -- Adaptive MTS --
+        if let Some((base_mts, k)) = c.adaptive_mts {
+            if base_mts < 100 {
+                return Err(ConfigError::out_of_range(
+                    "adaptive_mts.base_mts",
+                    "must be >= 100",
+                    base_mts,
+                )
+                .into());
+            }
+            if k <= 0.0 {
+                return Err(ConfigError::out_of_range("adaptive_mts.k", "must be > 0", k).into());
+            }
+        }
+
+        // -- Proactive prune interval --
+        if let Some(interval) = c.proactive_prune_interval {
+            if interval < 10 {
+                return Err(ConfigError::out_of_range(
+                    "proactive_prune_interval",
+                    "must be >= 10",
+                    interval,
                 )
                 .into());
             }
@@ -1715,5 +1794,116 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let restored: SGBTConfig = serde_json::from_str(&json).unwrap();
         assert!(restored.adaptive_leaf_bound.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // 19. Adaptive MTS -- builder sets the config field
+    // ------------------------------------------------------------------
+    #[test]
+    fn adaptive_mts_builder() {
+        let cfg = SGBTConfig::builder()
+            .adaptive_mts(5000, 1.5)
+            .build()
+            .unwrap();
+        assert_eq!(cfg.adaptive_mts, Some((5000, 1.5)));
+    }
+
+    // ------------------------------------------------------------------
+    // 20. Adaptive MTS -- default is None
+    // ------------------------------------------------------------------
+    #[test]
+    fn adaptive_mts_default_is_none() {
+        let cfg = SGBTConfig::default();
+        assert!(cfg.adaptive_mts.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // 21. Adaptive MTS -- validation rejects base_mts < 100
+    // ------------------------------------------------------------------
+    #[test]
+    fn adaptive_mts_rejects_small_base() {
+        let result = SGBTConfig::builder().adaptive_mts(50, 1.0).build();
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("adaptive_mts"),
+            "error should mention adaptive_mts: {}",
+            msg,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // 22. Adaptive MTS -- validation rejects k <= 0
+    // ------------------------------------------------------------------
+    #[test]
+    fn adaptive_mts_rejects_nonpositive_k() {
+        let result = SGBTConfig::builder().adaptive_mts(5000, 0.0).build();
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("adaptive_mts"),
+            "error should mention adaptive_mts: {}",
+            msg,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // 23. Adaptive MTS -- serde backward compat
+    // ------------------------------------------------------------------
+    #[test]
+    fn adaptive_mts_serde_backward_compat() {
+        let cfg = SGBTConfig::default();
+        assert!(cfg.adaptive_mts.is_none());
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: SGBTConfig = serde_json::from_str(&json).unwrap();
+        assert!(restored.adaptive_mts.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // 24. Proactive prune interval -- builder sets the config field
+    // ------------------------------------------------------------------
+    #[test]
+    fn proactive_prune_builder() {
+        let cfg = SGBTConfig::builder()
+            .proactive_prune_interval(200)
+            .build()
+            .unwrap();
+        assert_eq!(cfg.proactive_prune_interval, Some(200));
+    }
+
+    // ------------------------------------------------------------------
+    // 25. Proactive prune interval -- default is None
+    // ------------------------------------------------------------------
+    #[test]
+    fn proactive_prune_default_is_none() {
+        let cfg = SGBTConfig::default();
+        assert!(cfg.proactive_prune_interval.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // 26. Proactive prune interval -- validation rejects < 10
+    // ------------------------------------------------------------------
+    #[test]
+    fn proactive_prune_rejects_too_small() {
+        let result = SGBTConfig::builder().proactive_prune_interval(5).build();
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("proactive_prune_interval"),
+            "error should mention proactive_prune_interval: {}",
+            msg,
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // 27. Proactive prune interval -- serde backward compat
+    // ------------------------------------------------------------------
+    #[test]
+    fn proactive_prune_serde_backward_compat() {
+        let cfg = SGBTConfig::default();
+        assert!(cfg.proactive_prune_interval.is_none());
+        let json = serde_json::to_string(&cfg).unwrap();
+        let restored: SGBTConfig = serde_json::from_str(&json).unwrap();
+        assert!(restored.proactive_prune_interval.is_none());
     }
 }

@@ -145,6 +145,9 @@ pub struct ModelState {
     /// Per-step consecutive low-contribution count for quality pruning (v6+).
     #[serde(default)]
     pub low_contrib_count: Vec<u64>,
+    /// Rolling contribution sigma for adaptive_mts (v9.7+).
+    #[serde(default)]
+    pub rolling_contribution_sigma: f64,
 }
 
 /// Save an SGBT model to a JSON string.
@@ -269,6 +272,9 @@ pub struct DistributionalModelState {
     /// EWMA of squared prediction errors (for empirical σ mode).
     #[serde(default = "default_ewma_sq_err")]
     pub ewma_sq_err: f64,
+    /// EWMA of honest_sigma (tree contribution std dev).
+    #[serde(default)]
+    pub rolling_honest_sigma_mean: f64,
 }
 
 fn default_ewma_sq_err() -> f64 {

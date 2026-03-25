@@ -507,6 +507,34 @@ impl TreeSlot {
         None
     }
 
+    /// Override the max_tree_samples for dynamic adaptive replacement.
+    ///
+    /// Used by adaptive_mts to adjust tree lifetime based on model uncertainty.
+    #[inline]
+    pub fn set_max_tree_samples(&mut self, mts: Option<u64>) {
+        self.max_tree_samples = mts;
+    }
+
+    /// Replace the active tree with a fresh one (proactive pruning).
+    ///
+    /// Resets the drift detector and prediction statistics.
+    /// Increments the replacement counter.
+    pub fn replace_active(&mut self) {
+        self.active = self
+            .alternate
+            .take()
+            .unwrap_or_else(|| HoeffdingTree::new(self.tree_config.clone()));
+        self.samples_at_activation = self.active.n_samples_seen();
+        self.detector = self.detector.clone_fresh();
+        self.replacements += 1;
+        self.pred_count = 0;
+        self.pred_mean = 0.0;
+        self.pred_m2 = 0.0;
+        if self.shadow_warmup > 0 {
+            self.alternate = Some(HoeffdingTree::new(self.tree_config.clone()));
+        }
+    }
+
     /// Reset to a completely fresh state: new tree, no alternate, reset detector.
     pub fn reset(&mut self) {
         self.active = HoeffdingTree::new(self.tree_config.clone());
