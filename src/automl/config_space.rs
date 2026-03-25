@@ -26,6 +26,19 @@ fn xorshift64_f64(state: &mut u64) -> f64 {
     (xorshift64(state) >> 11) as f64 / ((1u64 << 53) as f64)
 }
 
+/// Standard normal sample via Box-Muller transform.
+fn standard_normal(state: &mut u64) -> f64 {
+    loop {
+        let u1 = xorshift64_f64(state);
+        let u2 = xorshift64_f64(state);
+        if u1 > 0.0 {
+            let r = (-2.0 * u1.ln()).sqrt();
+            let theta = 2.0 * std::f64::consts::PI * u2;
+            return r * theta.cos();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HyperParam
 // ---------------------------------------------------------------------------
@@ -249,6 +262,74 @@ impl ConfigSampler {
                 HyperConfig { values }
             })
             .collect()
+    }
+
+    /// Create a new configuration by perturbing an existing one.
+    ///
+    /// Each parameter is perturbed by adding Gaussian noise scaled by `sigma`
+    /// and the parameter's range. The result is clamped to valid bounds.
+    ///
+    /// - **Float (linear)**: `value + N(0, sigma * (high - low))`, clamped to `[low, high]`
+    /// - **Float (log-scale)**: perturb in log-space: `exp(ln(value) + N(0, sigma * (ln(high) - ln(low))))`, clamped
+    /// - **Int**: `round(value + N(0, sigma * (high - low)))`, clamped to `[low, high]`
+    /// - **Categorical**: with probability `sigma.min(1.0)`, pick a random different choice; otherwise keep
+    ///
+    /// `sigma` controls perturbation strength: 0.0 = no change, 0.2 = moderate, 1.0 = large.
+    pub fn perturb(&mut self, config: &HyperConfig, sigma: f64) -> HyperConfig {
+        let rng = &mut self.rng_state;
+        let values = self
+            .space
+            .params
+            .iter()
+            .enumerate()
+            .map(|(i, param)| {
+                let current = config.values()[i];
+                match param {
+                    HyperParam::Float {
+                        low,
+                        high,
+                        log_scale,
+                        ..
+                    } => {
+                        if *log_scale {
+                            // Perturb in log space
+                            let ln_low = low.ln();
+                            let ln_high = high.ln();
+                            let ln_current = current.max(*low).ln(); // guard against 0
+                            let noise = standard_normal(rng) * sigma * (ln_high - ln_low);
+                            (ln_current + noise).exp().clamp(*low, *high)
+                        } else {
+                            let noise = standard_normal(rng) * sigma * (high - low);
+                            (current + noise).clamp(*low, *high)
+                        }
+                    }
+                    HyperParam::Int { low, high, .. } => {
+                        let range = (*high - *low) as f64;
+                        let noise = standard_normal(rng) * sigma * range;
+                        let perturbed = (current + noise).round();
+                        perturbed.clamp(*low as f64, *high as f64)
+                    }
+                    HyperParam::Categorical { n_choices, .. } => {
+                        // With probability sigma, pick a random choice; otherwise keep current
+                        let p = xorshift64_f64(rng);
+                        if p < sigma.min(1.0) && *n_choices > 1 {
+                            // Pick a different choice
+                            let new_choice = (xorshift64(rng) as usize) % (*n_choices - 1);
+                            let current_idx = current as usize;
+                            // Avoid picking the same value
+                            if new_choice >= current_idx {
+                                (new_choice + 1) as f64
+                            } else {
+                                new_choice as f64
+                            }
+                        } else {
+                            current
+                        }
+                    }
+                }
+            })
+            .collect();
+        HyperConfig { values }
     }
 
     // -----------------------------------------------------------------------
@@ -544,6 +625,140 @@ mod tests {
         assert!(
             space.params().is_empty(),
             "new space params should be empty"
+        );
+    }
+
+    /// Perturbed configs should stay within bounds.
+    #[test]
+    fn perturb_stays_in_bounds() {
+        let space = ConfigSpace::new()
+            .push(HyperParam::Float {
+                name: "lr",
+                low: 0.001,
+                high: 1.0,
+                log_scale: false,
+            })
+            .push(HyperParam::Int {
+                name: "depth",
+                low: 1,
+                high: 20,
+            })
+            .push(HyperParam::Categorical {
+                name: "act",
+                n_choices: 5,
+            });
+
+        let mut sampler = ConfigSampler::new(space, 42);
+        let base = sampler.random();
+
+        for i in 0..200 {
+            let perturbed = sampler.perturb(&base, 0.3);
+            assert_eq!(perturbed.len(), 3, "perturbed should have 3 values");
+
+            let lr = perturbed.get(0);
+            assert!(
+                (0.001..=1.0).contains(&lr),
+                "perturb {i}: lr={lr} out of [0.001, 1.0]"
+            );
+
+            let depth = perturbed.get(1);
+            assert!(
+                (1.0..=20.0).contains(&depth),
+                "perturb {i}: depth={depth} out of [1, 20]"
+            );
+
+            let act = perturbed.get(2);
+            assert!(
+                (0.0..=4.0).contains(&act),
+                "perturb {i}: act={act} out of [0, 4]"
+            );
+            assert_eq!(act, act.floor(), "perturb {i}: act={act} should be integer");
+        }
+    }
+
+    /// With sigma=0, perturbed config should be very close to original (only categorical may change with tiny probability).
+    #[test]
+    fn perturb_zero_sigma_preserves_float_and_int() {
+        let space = ConfigSpace::new()
+            .push(HyperParam::Float {
+                name: "lr",
+                low: 0.001,
+                high: 1.0,
+                log_scale: false,
+            })
+            .push(HyperParam::Int {
+                name: "depth",
+                low: 1,
+                high: 20,
+            });
+
+        let mut sampler = ConfigSampler::new(space, 42);
+        let base = HyperConfig::new(vec![0.5, 10.0]);
+
+        for _ in 0..100 {
+            let perturbed = sampler.perturb(&base, 0.0);
+            assert!(
+                (perturbed.get(0) - 0.5).abs() < 1e-10,
+                "sigma=0 should not change float, got {}",
+                perturbed.get(0)
+            );
+            assert!(
+                (perturbed.get(1) - 10.0).abs() < 1e-10,
+                "sigma=0 should not change int, got {}",
+                perturbed.get(1)
+            );
+        }
+    }
+
+    /// Log-scale perturbation should stay in bounds.
+    #[test]
+    fn perturb_log_scale_in_bounds() {
+        let space = ConfigSpace::new().push(HyperParam::Float {
+            name: "lr",
+            low: 1e-5,
+            high: 1.0,
+            log_scale: true,
+        });
+
+        let mut sampler = ConfigSampler::new(space, 77);
+        let base = HyperConfig::new(vec![0.001]);
+
+        for i in 0..200 {
+            let perturbed = sampler.perturb(&base, 0.5);
+            let v = perturbed.get(0);
+            assert!(
+                (1e-5..=1.0).contains(&v),
+                "perturb {i}: log-scale value {v} out of [1e-5, 1.0]"
+            );
+        }
+    }
+
+    /// Categorical perturbation should produce different values with high sigma.
+    #[test]
+    fn perturb_categorical_changes() {
+        let space = ConfigSpace::new().push(HyperParam::Categorical {
+            name: "color",
+            n_choices: 5,
+        });
+
+        let mut sampler = ConfigSampler::new(space, 99);
+        let base = HyperConfig::new(vec![2.0]); // start at index 2
+
+        let mut saw_different = false;
+        for _ in 0..100 {
+            let perturbed = sampler.perturb(&base, 1.0); // sigma=1.0 → always change
+            let v = perturbed.get(0);
+            assert!(
+                (0.0..=4.0).contains(&v),
+                "categorical should be in [0, 4], got {v}"
+            );
+            if (v - 2.0).abs() > 0.5 {
+                saw_different = true;
+            }
+        }
+        assert!(
+            saw_different,
+            "with sigma=1.0, categorical should sometimes change from index 2"
         );
     }
 
