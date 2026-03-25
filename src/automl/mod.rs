@@ -54,4 +54,16 @@ pub trait ModelFactory: Send + Sync {
 
     /// Human-readable name for this model type (e.g., "SGBT", "ESN").
     fn name(&self) -> &str;
+
+    /// Minimum samples a new model needs before its metrics are meaningful.
+    ///
+    /// Candidates that have seen fewer than `warmup_hint()` samples are
+    /// protected from elimination during tournament rounds. This prevents
+    /// neural architectures with warmup phases (ESN, Mamba, SpikeNet) from
+    /// being prematurely killed by models that start predicting immediately.
+    ///
+    /// The default is 0 (no warmup protection).
+    fn warmup_hint(&self) -> usize {
+        0
+    }
 }

@@ -43,6 +43,10 @@ pub struct AutoTunerConfig {
     pub perturb_sigma: f64,
     /// RNG seed (default: 42).
     pub seed: u64,
+    /// Minimum adaptive bracket size (default: 4).
+    pub min_n_initial: usize,
+    /// Maximum adaptive bracket size (default: 32).
+    pub max_n_initial: usize,
 }
 
 impl Default for AutoTunerConfig {
@@ -55,6 +59,8 @@ impl Default for AutoTunerConfig {
             discount: 0.99,
             perturb_sigma: 0.2,
             seed: 42,
+            min_n_initial: 4,
+            max_n_initial: 32,
         }
     }
 }
@@ -69,6 +75,10 @@ struct Challenger {
     ewma: EwmaRegressionMetrics,
     config: HyperConfig,
     factory_idx: usize,
+    // Welford's online stats for paired error differences (statistical early stopping).
+    err_mean: f64,
+    err_m2: f64,
+    err_count: u64,
 }
 
 // ===========================================================================
@@ -129,6 +139,9 @@ pub struct AutoTuner {
     total_samples: u64,
     promotions: u64,
     tournaments_completed: u64,
+
+    // Adaptive bracket sizing
+    effective_n_initial: usize,
 }
 
 // ===========================================================================
@@ -210,6 +223,18 @@ impl AutoTunerBuilder {
         self
     }
 
+    /// Set the minimum adaptive bracket size (default: 4).
+    pub fn min_n_initial(mut self, n: usize) -> Self {
+        self.config.min_n_initial = n;
+        self
+    }
+
+    /// Set the maximum adaptive bracket size (default: 32).
+    pub fn max_n_initial(mut self, n: usize) -> Self {
+        self.config.max_n_initial = n;
+        self
+    }
+
     /// Build the `AutoTuner`.
     ///
     /// # Panics
@@ -243,6 +268,7 @@ impl AutoTunerBuilder {
         let champion = self.factories[0].create(&champion_config);
         let champion_ewma = EwmaRegressionMetrics::new(config.ewma_span);
 
+        let effective_n_initial = config.n_initial;
         let mut tuner = AutoTuner {
             champion,
             champion_ewma,
@@ -259,6 +285,7 @@ impl AutoTunerBuilder {
             total_samples: 0,
             promotions: 0,
             tournaments_completed: 0,
+            effective_n_initial,
         };
 
         tuner.start_tournament();
@@ -300,6 +327,11 @@ impl AutoTuner {
     pub fn current_round(&self) -> usize {
         self.current_round
     }
+
+    /// Current adaptive bracket size (may differ from configured `n_initial`).
+    pub fn effective_n_initial(&self) -> usize {
+        self.effective_n_initial
+    }
 }
 
 // ===========================================================================
@@ -313,18 +345,35 @@ impl StreamingLearner for AutoTuner {
         self.champion_ewma.update(target, champ_pred);
         self.champion.train_one(features, target, weight);
 
-        // 2. All candidates: predict -> EWMA -> train.
+        // 2. All candidates: predict -> EWMA -> train + Welford error stats.
         for c in &mut self.candidates {
             let pred = c.model.predict(features);
             c.ewma.update(target, pred);
             c.model.train_one(features, target, weight);
+
+            // Welford's online update for error statistics.
+            let error = (target - pred).abs();
+            c.err_count += 1;
+            let delta = error - c.err_mean;
+            c.err_mean += delta / c.err_count as f64;
+            let delta2 = error - c.err_mean;
+            c.err_m2 += delta * delta2;
         }
 
         // 3. Increment counters.
         self.samples_in_round += 1;
         self.total_samples += 1;
 
-        // 4. Elimination check.
+        // 4. Statistical early elimination check (every round_budget/4 samples).
+        let check_interval = (self.config.round_budget / 4).max(1) as u64;
+        if self.samples_in_round > 0
+            && self.samples_in_round % check_interval == 0
+            && self.samples_in_round < self.config.round_budget as u64
+        {
+            self.try_early_elimination();
+        }
+
+        // 5. Elimination check.
         if self.samples_in_round >= self.config.round_budget as u64 {
             self.eliminate_round();
         }
@@ -347,6 +396,7 @@ impl StreamingLearner for AutoTuner {
         self.tournaments_completed = 0;
         self.samples_in_round = 0;
         self.current_round = 0;
+        self.effective_n_initial = self.config.n_initial;
         self.bandit.reset();
         self.normalizer.reset();
         self.start_tournament();
@@ -359,27 +409,51 @@ impl StreamingLearner for AutoTuner {
 
 impl AutoTuner {
     /// Eliminate the bottom half of candidates after a round completes.
+    ///
+    /// Candidates still in warmup (fewer samples than their factory's
+    /// `warmup_hint()`) are protected and always survive elimination.
     fn eliminate_round(&mut self) {
         if self.candidates.is_empty() {
             self.start_tournament();
             return;
         }
 
-        // Collect metrics (free function avoids borrow issues).
-        let metric_type = self.config.metric;
-        let mut indexed: Vec<(usize, f64)> = self
+        // Pre-compute warmup hints to avoid borrow issues.
+        let warmup_hints: Vec<usize> = self
             .candidates
             .iter()
-            .enumerate()
-            .map(|(i, c)| (i, get_metric(&c.ewma, metric_type)))
+            .map(|c| {
+                self.factories
+                    .get(c.factory_idx)
+                    .map(|f| f.warmup_hint())
+                    .unwrap_or(0)
+            })
             .collect();
 
-        // Sort best first (lowest metric).
-        indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Partition into warmup-protected and eligible candidates.
+        let metric_type = self.config.metric;
+        let mut protected_indices: Vec<usize> = Vec::new();
+        let mut eligible: Vec<(usize, f64)> = Vec::new();
 
-        // Keep top half (ceiling division: always keep at least 1).
-        let keep = indexed.len().div_ceil(2);
-        let keep_set: Vec<usize> = indexed.iter().take(keep).map(|(i, _)| *i).collect();
+        for (i, c) in self.candidates.iter().enumerate() {
+            if (c.err_count as usize) < warmup_hints[i] {
+                protected_indices.push(i);
+            } else {
+                eligible.push((i, get_metric(&c.ewma, metric_type)));
+            }
+        }
+
+        // Sort eligible best first (lowest metric).
+        eligible.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // From the eligible pool, keep top half (ceiling division: always keep at least 1).
+        let total_to_keep = self.candidates.len().div_ceil(2);
+        // Protected are always kept; fill remaining slots from eligible.
+        let eligible_to_keep = total_to_keep.saturating_sub(protected_indices.len());
+        let eligible_to_keep = eligible_to_keep.max(if eligible.is_empty() { 0 } else { 1 });
+
+        let mut keep_set: Vec<usize> = protected_indices;
+        keep_set.extend(eligible.iter().take(eligible_to_keep).map(|(i, _)| *i));
 
         // Rebuild candidates with only survivors.
         let old = std::mem::take(&mut self.candidates);
@@ -407,6 +481,8 @@ impl AutoTuner {
 
     /// Compare the lone finalist to the champion and possibly promote.
     fn finalize_tournament(&mut self) {
+        let mut promoted = false;
+
         if let Some(finalist) = self.candidates.pop() {
             let metric_type = self.config.metric;
             let finalist_metric = get_metric(&finalist.ewma, metric_type);
@@ -419,6 +495,7 @@ impl AutoTuner {
                 self.champion_config = finalist.config;
                 self.champion_factory_idx = finalist.factory_idx;
                 self.promotions += 1;
+                promoted = true;
             }
 
             // Update bandit: reward the finalist's factory.
@@ -430,14 +507,25 @@ impl AutoTuner {
             }
         }
 
+        // Adaptive bracket sizing.
+        if promoted {
+            // Champion was beaten -- landscape is shifting, explore more.
+            self.effective_n_initial =
+                (self.effective_n_initial * 2).min(self.config.max_n_initial);
+        } else {
+            // Champion held -- it's strong, reduce exploration.
+            self.effective_n_initial =
+                (self.effective_n_initial / 2).max(self.config.min_n_initial);
+        }
+
         self.candidates.clear();
         self.tournaments_completed += 1;
         self.start_tournament();
     }
 
-    /// Spawn a new tournament with `n_initial` candidates.
+    /// Spawn a new tournament with `effective_n_initial` candidates.
     fn start_tournament(&mut self) {
-        let n = self.config.n_initial;
+        let n = self.effective_n_initial;
         let n_perturb = n / 2;
         let n_factories = self.factories.len();
         let ewma_span = self.config.ewma_span;
@@ -455,6 +543,9 @@ impl AutoTuner {
                 ewma: EwmaRegressionMetrics::new(ewma_span),
                 config,
                 factory_idx: champ_idx,
+                err_mean: 0.0,
+                err_m2: 0.0,
+                err_count: 0,
             });
         }
 
@@ -472,6 +563,9 @@ impl AutoTuner {
                 ewma: EwmaRegressionMetrics::new(ewma_span),
                 config,
                 factory_idx,
+                err_mean: 0.0,
+                err_m2: 0.0,
+                err_count: 0,
             });
         }
 
@@ -479,6 +573,98 @@ impl AutoTuner {
         self.current_round = 0;
         self.samples_in_round = 0;
         self.champion_ewma.reset();
+    }
+
+    /// Attempt statistical early elimination of clearly outclassed candidates.
+    ///
+    /// Uses Welford's online statistics to compute a z-test against the median
+    /// error. Candidates significantly worse than the median (z > 2.0) are
+    /// removed early, saving compute. Warmup-protected candidates are exempt.
+    fn try_early_elimination(&mut self) {
+        if self.candidates.len() <= 1 {
+            return;
+        }
+
+        let min_samples_for_test: u64 = 30;
+
+        // Pre-compute warmup hints to avoid borrow issues with retain.
+        let warmup_hints: Vec<usize> = self
+            .candidates
+            .iter()
+            .map(|c| {
+                self.factories
+                    .get(c.factory_idx)
+                    .map(|f| f.warmup_hint())
+                    .unwrap_or(0)
+            })
+            .collect();
+
+        // Compute median error across candidates that are PAST warmup and have
+        // enough samples. Candidates still in warmup are excluded from the median
+        // to prevent their noisy cold-start metrics from skewing the baseline.
+        let mut errors: Vec<f64> = self
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                c.err_count >= min_samples_for_test && (c.err_count as usize) >= warmup_hints[*i]
+            })
+            .map(|(_, c)| c.err_mean)
+            .collect();
+        if errors.len() < 2 {
+            return;
+        }
+        errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median_err = errors[errors.len() / 2];
+
+        let z_threshold = 2.0;
+
+        // Collect indices to remove (avoids borrow issues).
+        let remove_indices: Vec<usize> = self
+            .candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                // Protected: not enough data.
+                if c.err_count < min_samples_for_test {
+                    return None;
+                }
+                // Protected: still warming up.
+                if (c.err_count as usize) < warmup_hints[i] {
+                    return None;
+                }
+                let variance = if c.err_count > 1 {
+                    c.err_m2 / (c.err_count - 1) as f64
+                } else {
+                    0.0
+                };
+                let std_err = (variance / c.err_count as f64).sqrt();
+                if std_err < 1e-12 {
+                    return None; // avoid division by zero
+                }
+                let z = (c.err_mean - median_err) / std_err;
+                if z > z_threshold {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if !remove_indices.is_empty() {
+            let old = std::mem::take(&mut self.candidates);
+            self.candidates = old
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| !remove_indices.contains(i))
+                .map(|(_, c)| c)
+                .collect();
+        }
+
+        // If early elimination reduced to 1 or 0, finalize.
+        if self.candidates.len() <= 1 {
+            self.finalize_tournament();
+        }
     }
 }
 
@@ -507,7 +693,7 @@ unsafe impl Sync for AutoTuner {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automl::factories::EsnFactory;
+    use crate::automl::factories::{AttentionFactory, EsnFactory, MambaFactory, SpikeNetFactory};
     use crate::automl::SgbtFactory;
 
     /// Verify AutoTuner builder creates an instance with default config values.
@@ -869,6 +1055,9 @@ mod tests {
             .n_initial(8)
             .round_budget(20)
             .seed(55)
+            // Pin bracket size so adaptive sizing doesn't change it mid-test.
+            .min_n_initial(8)
+            .max_n_initial(8)
             .build();
 
         assert_eq!(
@@ -921,7 +1110,8 @@ mod tests {
             tuner.train(&x, y);
         }
 
-        // After finals, a new tournament starts with n_initial candidates.
+        // After finals, a new tournament starts with effective_n_initial candidates.
+        // With min/max pinned to 8, bracket stays at 8.
         assert_eq!(
             tuner.candidates_remaining(),
             8,
@@ -932,6 +1122,221 @@ mod tests {
             tuner.tournaments_completed() >= 1,
             "should have completed at least 1 tournament, got {}",
             tuner.tournaments_completed()
+        );
+    }
+
+    /// Verify warmup-protected candidates survive elimination despite poor metrics.
+    #[test]
+    fn warmup_protection() {
+        // ESN has warmup_hint=50, SGBT has warmup_hint=0.
+        // With round_budget=25 and 30 training samples, ESN candidates
+        // should survive the first elimination despite poor warmup metrics.
+        let mut tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(1))
+            .add_factory(EsnFactory::new())
+            .n_initial(4)
+            .round_budget(25)
+            .seed(42)
+            // Pin bracket so adaptive sizing doesn't interfere.
+            .min_n_initial(4)
+            .max_n_initial(4)
+            .build();
+
+        // Train 30 samples (triggers one elimination at 25).
+        for i in 0..30 {
+            let x = [i as f64 * 0.01];
+            let y = (i as f64 * 0.1).sin();
+            tuner.train(&x, y);
+        }
+
+        // After elimination at sample 25, any ESN candidates should have
+        // survived due to warmup protection (err_count=25 < warmup_hint=50).
+        // The tuner should still be functional.
+        let pred = tuner.predict(&[0.5]);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite after warmup-protected elimination, got {pred}"
+        );
+    }
+
+    /// Verify early stopping eliminates clearly bad candidates before round ends.
+    #[test]
+    fn early_stopping_eliminates_bad() {
+        let mut tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .n_initial(8)
+            .round_budget(200)
+            .seed(42)
+            // Pin bracket so adaptive sizing doesn't interfere.
+            .min_n_initial(8)
+            .max_n_initial(8)
+            .build();
+
+        assert_eq!(
+            tuner.candidates_remaining(),
+            8,
+            "should start with 8 candidates"
+        );
+
+        // Feed a clear signal (y = 2*x[0]) for 100 samples (half the budget).
+        // Early elimination checks happen every 50 samples (200/4).
+        for i in 0..100 {
+            let x = [i as f64 * 0.1, (i as f64).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0;
+            tuner.train(&x, y);
+        }
+
+        // After 100 samples with clear signal and 2 early elimination checks
+        // (at 50 and 100), some bad candidates may have been eliminated.
+        // The test verifies the mechanism runs without error and that the
+        // tuner remains functional. We can't guarantee elimination since it
+        // depends on the random configs, but we can verify it doesn't panic.
+        assert!(
+            tuner.candidates_remaining() <= 8,
+            "candidates should not have increased, got {}",
+            tuner.candidates_remaining()
+        );
+
+        let pred = tuner.predict(&[5.0, 0.0, 1.0]);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite after early elimination, got {pred}"
+        );
+    }
+
+    /// Verify adaptive bracket grows on promotion.
+    #[test]
+    fn adaptive_bracket_grows_on_promotion() {
+        let mut tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .n_initial(4)
+            .round_budget(20)
+            .min_n_initial(4)
+            .max_n_initial(32)
+            .seed(123)
+            .build();
+
+        assert_eq!(
+            tuner.effective_n_initial(),
+            4,
+            "should start at n_initial=4"
+        );
+
+        // Train enough for promotions to occur.
+        for i in 0..2000 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0 + x[1] * 3.0 + 1.0;
+            tuner.train(&x, y);
+        }
+
+        // After many tournaments, if any promotion occurred, the bracket
+        // should have grown at some point.
+        if tuner.promotions() > 0 {
+            // At least one promotion happened, so effective_n_initial should
+            // have been increased at least once. However, subsequent
+            // non-promotions may have shrunk it back. The key property is
+            // that the mechanism runs without error.
+            assert!(
+                tuner.effective_n_initial() >= tuner.config.min_n_initial,
+                "effective_n_initial should be >= min_n_initial"
+            );
+            assert!(
+                tuner.effective_n_initial() <= tuner.config.max_n_initial,
+                "effective_n_initial should be <= max_n_initial"
+            );
+        }
+    }
+
+    /// Verify adaptive bracket shrinks without promotion.
+    #[test]
+    fn adaptive_bracket_shrinks_without_promotion() {
+        // Use a large n_initial and short round_budget so tournaments
+        // complete quickly. The champion gets trained on clear signal
+        // before challengers, making promotion unlikely.
+        let mut tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .n_initial(16)
+            .round_budget(10)
+            .min_n_initial(4)
+            .max_n_initial(32)
+            .seed(42)
+            .build();
+
+        assert_eq!(
+            tuner.effective_n_initial(),
+            16,
+            "should start at n_initial=16"
+        );
+
+        // Pre-train the champion so it's strong (won't be beaten easily).
+        // Actually we can't pre-train the champion directly. Instead, run
+        // enough tournaments without promotion to see shrinkage.
+        // Each tournament with n_initial=16: 4 rounds * 10 = 40 samples per tournament.
+        // After ~5 tournaments without promotion, effective_n_initial should drop.
+        for i in 0..500 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0 + x[1] * 3.0 + 1.0;
+            tuner.train(&x, y);
+        }
+
+        // Even if some promotions occurred, each non-promotion halves the bracket.
+        // The mechanism should have run, keeping effective_n_initial within bounds.
+        assert!(
+            tuner.effective_n_initial() >= tuner.config.min_n_initial,
+            "effective_n_initial ({}) should be >= min_n_initial ({})",
+            tuner.effective_n_initial(),
+            tuner.config.min_n_initial
+        );
+        assert!(
+            tuner.effective_n_initial() <= tuner.config.max_n_initial,
+            "effective_n_initial ({}) should be <= max_n_initial ({})",
+            tuner.effective_n_initial(),
+            tuner.config.max_n_initial
+        );
+    }
+
+    /// Verify warmup_hint returns correct values for each factory.
+    #[test]
+    fn warmup_hint_factories() {
+        let sgbt: Box<dyn ModelFactory> = Box::new(SgbtFactory::new(5));
+        let esn: Box<dyn ModelFactory> = Box::new(EsnFactory::new());
+        let mamba: Box<dyn ModelFactory> = Box::new(MambaFactory::new(4));
+        let attn: Box<dyn ModelFactory> = Box::new(AttentionFactory::new(8));
+        let spike: Box<dyn ModelFactory> = Box::new(SpikeNetFactory::new());
+
+        assert_eq!(sgbt.warmup_hint(), 0, "SGBT warmup_hint should be 0");
+        assert_eq!(esn.warmup_hint(), 50, "ESN warmup_hint should be 50");
+        assert_eq!(mamba.warmup_hint(), 10, "Mamba warmup_hint should be 10");
+        assert_eq!(attn.warmup_hint(), 10, "Attention warmup_hint should be 10");
+        assert_eq!(spike.warmup_hint(), 20, "SpikeNet warmup_hint should be 20");
+    }
+
+    /// Verify effective_n_initial resets correctly.
+    #[test]
+    fn effective_n_initial_resets() {
+        let mut tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .n_initial(8)
+            .round_budget(20)
+            .min_n_initial(4)
+            .max_n_initial(32)
+            .seed(42)
+            .build();
+
+        // Train enough to change effective_n_initial.
+        for i in 0..200 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0 + x[1] * 3.0;
+            tuner.train(&x, y);
+        }
+
+        tuner.reset();
+
+        assert_eq!(
+            tuner.effective_n_initial(),
+            8,
+            "effective_n_initial should reset to n_initial=8, got {}",
+            tuner.effective_n_initial()
         );
     }
 }

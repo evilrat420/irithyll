@@ -154,6 +154,10 @@ impl Default for EsnFactory {
 }
 
 impl ModelFactory for EsnFactory {
+    fn warmup_hint(&self) -> usize {
+        50
+    }
+
     fn config_space(&self) -> ConfigSpace {
         ConfigSpace::new()
             .push(HyperParam::Int {
@@ -236,6 +240,10 @@ impl MambaFactory {
 }
 
 impl ModelFactory for MambaFactory {
+    fn warmup_hint(&self) -> usize {
+        10
+    }
+
     fn config_space(&self) -> ConfigSpace {
         ConfigSpace::new()
             .push(HyperParam::Int {
@@ -314,6 +322,10 @@ impl AttentionFactory {
 }
 
 impl ModelFactory for AttentionFactory {
+    fn warmup_hint(&self) -> usize {
+        10
+    }
+
     fn config_space(&self) -> ConfigSpace {
         ConfigSpace::new()
             .push(HyperParam::Categorical {
@@ -396,6 +408,10 @@ impl Default for SpikeNetFactory {
 }
 
 impl ModelFactory for SpikeNetFactory {
+    fn warmup_hint(&self) -> usize {
+        20
+    }
+
     fn config_space(&self) -> ConfigSpace {
         ConfigSpace::new()
             .push(HyperParam::Int {
