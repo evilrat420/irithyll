@@ -129,6 +129,34 @@ let pred = tuner.predict(&[0.5; 5]);
 
 Based on Wu et al. (2021) ChaCha, Qi et al. (2023) Discounted Thompson Sampling.
 
+## Neural Mixture of Experts
+
+v9.6 introduces polymorphic MoE where each expert can be **any** `StreamingLearner` -- mix ESN, Mamba, SpikeNet, SGBT, and attention models in one ensemble.
+
+| Component | Description |
+|-----------|-------------|
+| [`NeuralMoE`](https://docs.rs/irithyll/latest/irithyll/moe/struct.NeuralMoE.html) | Polymorphic MoE with top-k sparse routing. Implements `StreamingLearner`. |
+| Linear softmax router | Learned online via SGD on cross-entropy against best expert. |
+| Load balancing | Per-expert routing bias prevents collapse (DeepSeek-v3 style). |
+| Dead expert reset | EWMA utilization tracking; experts below threshold are auto-reset. |
+
+```rust
+use irithyll::{sgbt, esn, spikenet, moe::NeuralMoE, StreamingLearner};
+
+let mut moe = NeuralMoE::builder()
+    .expert(sgbt(50, 0.01))
+    .expert(sgbt(100, 0.005))
+    .expert_with_warmup(esn(50, 0.9), 50)
+    .expert_with_warmup(spikenet(32), 20)
+    .top_k(2)
+    .build();
+
+moe.train(&[1.0, 2.0, 3.0], 4.0);
+let pred = moe.predict(&[1.0, 2.0, 3.0]);
+```
+
+Based on Jacobs et al. (1991), Shazeer et al. (2017), Wang et al. (2024), Aspis et al. (2025).
+
 ## Quick Start
 
 ```sh
@@ -423,6 +451,7 @@ irithyll/                 Workspace root
     metrics/              Online regression/classification metrics, conformal intervals, EWMA
     anomaly/              Half-space trees for streaming anomaly detection
     automl/               Champion-challenger racing, config space, model factories, reward normalization
+    moe/                  Neural Mixture of Experts (polymorphic experts, top-k routing, load balancing)
     reservoir/            NG-RC (time-delay polynomial) and ESN (cycle reservoir) + preprocessors
     ssm/                  StreamingMamba (selective SSM) + MambaPreprocessor
     snn/                  SpikeNet (f64 wrapper), SpikePreprocessor
@@ -582,6 +611,14 @@ The MSRV is **1.75**. This is checked in CI and will only be raised in minor ver
 > Wu, Q., Iyer, C., & Wang, C. (2021). *ChaCha for online AutoML.* ICML 2021.
 
 > Qi, Y., et al. (2023). *Discounted Thompson Sampling for non-stationary bandits.* arXiv preprint arXiv:2305.10718.
+
+> Jacobs, R. A., Jordan, M. I., Nowlan, S. J., & Hinton, G. E. (1991). *Adaptive mixtures of local experts.* Neural Computation, 3(1), 79-87.
+
+> Shazeer, N., et al. (2017). *Outrageously large neural networks: The sparsely-gated mixture-of-experts layer.* ICLR 2017.
+
+> Wang, B., et al. (2024). *Auxiliary-loss-free load balancing strategy for mixture-of-experts.* arXiv preprint arXiv:2408.15664.
+
+> Aspis, M., et al. (2025). *DriftMoE: Mixture of experts for streaming classification with concept drift.* ECMLPKDD 2025.
 
 ## License
 

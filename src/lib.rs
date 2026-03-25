@@ -89,6 +89,7 @@ pub mod ensemble;
 pub mod histogram;
 pub mod loss;
 pub mod metrics;
+pub mod moe;
 pub mod stream;
 pub mod tree;
 
@@ -231,6 +232,9 @@ pub use attention::{
     AttentionPreprocessor, StreamingAttentionConfig, StreamingAttentionConfigBuilder,
     StreamingAttentionModel,
 };
+
+// Re-exports -- neural moe
+pub use moe::{NeuralMoE, NeuralMoEBuilder, NeuralMoEConfig};
 
 // Re-exports -- automl
 pub use automl::{AttentionFactory, EsnFactory, MambaFactory, SgbtFactory, SpikeNetFactory};
