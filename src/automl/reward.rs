@@ -170,21 +170,21 @@ mod tests {
         // Very large metric (much worse than baseline).
         let reward_bad = norm.normalize(1000.0);
         assert!(
-            reward_bad >= 0.0 && reward_bad <= 1.0,
+            (0.0..=1.0).contains(&reward_bad),
             "reward should be in [0, 1], got {reward_bad}"
         );
 
         // Very small metric (much better than baseline).
         let reward_good = norm.normalize(0.001);
         assert!(
-            reward_good >= 0.0 && reward_good <= 1.0,
+            (0.0..=1.0).contains(&reward_good),
             "reward should be in [0, 1], got {reward_good}"
         );
 
         // Negative metric value.
         let reward_neg = norm.normalize(-5.0);
         assert!(
-            reward_neg >= 0.0 && reward_neg <= 1.0,
+            (0.0..=1.0).contains(&reward_neg),
             "reward should be in [0, 1] even for negative metric, got {reward_neg}"
         );
     }
