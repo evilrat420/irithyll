@@ -102,7 +102,23 @@ Three families of neural architectures, all implementing `StreamingLearner` -- t
 | [`SpikeNet`](https://docs.rs/irithyll/latest/irithyll/snn/struct.SpikeNet.html) | LIF neurons with e-prop online learning rule. Delta spike encoding for continuous features. Based on Bellec et al. 2020 (*Nature Communications*), Neftci et al. 2019. | O(N_hidden^2) |
 | [`SpikeNetFixed`](https://docs.rs/irithyll/latest/irithyll/irithyll_core/snn/struct.SpikeNetFixed.html) | Full `no_std` training in Q1.14 integer arithmetic. 64 neurons fits in 22KB (Cortex-M0+ 32KB SRAM). Lives in `irithyll-core`. | O(N_hidden^2) |
 
+### Test-Time Training (TTT)
+
+| Model | Description | Per-Sample Cost |
+|-------|-------------|-----------------|
+| [`StreamingTTT`](https://docs.rs/irithyll/latest/irithyll/ttt/struct.StreamingTTT.html) | Hidden state IS a linear model updated by gradient descent on self-supervised reconstruction every step. Titans-style weight decay (forgetting) and momentum for non-stationary streaming. First streaming TTT in any library. Based on Sun et al. 2024, Behrouz et al. 2025. | O(d\_state^2) |
+
 All neural models also have preprocessor variants (`ESNPreprocessor`, `MambaPreprocessor`, `SpikePreprocessor`) that implement `StreamingPreprocessor` for pipeline composition.
+
+## Principled Streaming Adaptation
+
+Three mechanisms for principled streaming adaptation in gradient boosted ensembles:
+
+| Feature | Description |
+|---------|-------------|
+| `honest_sigma` | Tree contribution variance — instant epistemic uncertainty from ensemble disagreement. Zero hyperparameters, reacts in one sample. |
+| `adaptive_mts` | Sigma-modulated tree replacement speed. High uncertainty → faster cycling. Low uncertainty → more accumulation. |
+| `proactive_prune` | Percentile-based worst-tree replacement. Maintains plasticity by preventing dead-wood accumulation (Dohare+2024 Nature). |
 
 ## Streaming AutoML
 
@@ -452,6 +468,7 @@ irithyll/                 Workspace root
     anomaly/              Half-space trees for streaming anomaly detection
     automl/               Champion-challenger racing, config space, model factories, reward normalization
     moe/                  Neural Mixture of Experts (polymorphic experts, top-k routing, load balancing)
+    ttt/                  Test-Time Training layers (fast weights, self-supervised reconstruction, Titans)
     reservoir/            NG-RC (time-delay polynomial) and ESN (cycle reservoir) + preprocessors
     ssm/                  StreamingMamba (selective SSM) + MambaPreprocessor
     snn/                  SpikeNet (f64 wrapper), SpikePreprocessor
@@ -619,6 +636,12 @@ The MSRV is **1.75**. This is checked in CI and will only be raised in minor ver
 > Wang, B., et al. (2024). *Auxiliary-loss-free load balancing strategy for mixture-of-experts.* arXiv preprint arXiv:2408.15664.
 
 > Aspis, M., et al. (2025). *DriftMoE: Mixture of experts for streaming classification with concept drift.* ECMLPKDD 2025.
+
+> Sun, Y., et al. (2024). *Learning to (Learn at Test Time): RNNs with expressive hidden states.* ICML 2025.
+
+> Behrouz, A., Zhong, P., & Mirrokni, V. (2025). *Titans: Learning to memorize at test time.* arXiv preprint arXiv:2501.00663.
+
+> Dohare, S., et al. (2024). *Loss of plasticity in deep continual learning.* Nature, 632, 768-774.
 
 ## License
 

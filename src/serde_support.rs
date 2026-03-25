@@ -101,7 +101,7 @@ pub struct TreeSnapshot {
     pub n_features: Option<usize>,
     pub samples_seen: u64,
     pub rng_state: u64,
-    /// Categorical split bitmasks (v5+). `None` entries are continuous splits.
+    /// Categorical split bitmasks. `None` entries are continuous splits.
     #[serde(default)]
     pub categorical_mask: Vec<Option<u64>>,
 }
@@ -136,16 +136,16 @@ pub struct ModelState {
     pub samples_seen: u64,
     pub rng_state: u64,
     pub steps: Vec<StepSnapshot>,
-    /// Rolling mean absolute error for error-weighted sample importance (v6+).
+    /// Rolling mean absolute error for error-weighted sample importance.
     #[serde(default)]
     pub rolling_mean_error: f64,
-    /// Per-step EWMA of contribution magnitude for quality pruning (v6+).
+    /// Per-step EWMA of contribution magnitude for quality pruning.
     #[serde(default)]
     pub contribution_ewma: Vec<f64>,
-    /// Per-step consecutive low-contribution count for quality pruning (v6+).
+    /// Per-step consecutive low-contribution count for quality pruning.
     #[serde(default)]
     pub low_contrib_count: Vec<u64>,
-    /// Rolling contribution sigma for adaptive_mts (v9.7+).
+    /// Rolling contribution sigma for adaptive_mts.
     #[serde(default)]
     pub rolling_contribution_sigma: f64,
 }
