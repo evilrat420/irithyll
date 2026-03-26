@@ -335,6 +335,10 @@ pub struct HoeffdingTree {
     /// Accumulated split gains per feature for importance tracking.
     /// Indexed by feature index; grows lazily when n_features is learned.
     split_gains: Vec<f64>,
+
+    /// Per-node auto-bandwidth for soft routing, indexed by `NodeId.0`.
+    /// Recomputed after every structural change (split).
+    node_bandwidths: Vec<f64>,
 }
 
 impl HoeffdingTree {
@@ -383,6 +387,7 @@ impl HoeffdingTree {
             feature_mask_bits: Vec::new(),
             rng_state: seed,
             split_gains: Vec::new(),
+            node_bandwidths: Vec::new(),
         }
     }
 
@@ -439,6 +444,7 @@ impl HoeffdingTree {
                 feature_mask_bits: Vec::new(),
                 rng_state,
                 split_gains: vec![0.0; n_features.unwrap_or(0)],
+                node_bandwidths: Vec::new(),
             };
         };
 
@@ -463,6 +469,7 @@ impl HoeffdingTree {
             feature_mask_bits: Vec::new(),
             rng_state,
             split_gains: vec![0.0; nf],
+            node_bandwidths: Vec::new(),
         }
     }
 
@@ -762,6 +769,100 @@ impl HoeffdingTree {
         }
 
         thresholds
+    }
+
+    /// Compute per-node bandwidth from nearest neighbor thresholds on the same feature.
+    fn compute_node_bandwidth(&self, node: NodeId, all_thresholds: &[Vec<f64>]) -> f64 {
+        let feat_idx = self.arena.get_feature_idx(node) as usize;
+        let threshold = self.arena.get_threshold(node);
+
+        let thresholds = if feat_idx < all_thresholds.len() {
+            &all_thresholds[feat_idx]
+        } else {
+            return f64::INFINITY;
+        };
+
+        // Find nearest neighbors (thresholds are sorted)
+        let below = thresholds.iter().rev().find(|&&t| t < threshold - 1e-15);
+        let above = thresholds.iter().find(|&&t| t > threshold + 1e-15);
+
+        match (below, above) {
+            (Some(&b), Some(&a)) => (threshold - b).min(a - threshold),
+            (Some(&b), None) => threshold - b,
+            (None, Some(&a)) => a - threshold,
+            (None, None) => f64::INFINITY,
+        }
+    }
+
+    /// Recompute all node bandwidths. Call after structural changes.
+    pub fn recompute_bandwidths(&mut self) {
+        let n = self.arena.n_nodes();
+        self.node_bandwidths.resize(n, f64::INFINITY);
+
+        // Collect and sort thresholds once
+        let mut all_thresholds = self.collect_split_thresholds_per_feature();
+        for v in &mut all_thresholds {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(core::cmp::Ordering::Equal));
+        }
+
+        for i in 0..n {
+            let nid = NodeId(i as u32);
+            if !self.arena.is_leaf(nid) {
+                self.node_bandwidths[i] = self.compute_node_bandwidth(nid, &all_thresholds);
+            } else {
+                self.node_bandwidths[i] = f64::INFINITY;
+            }
+        }
+    }
+
+    /// Predict using per-node auto-bandwidth soft routing.
+    /// Every prediction is a continuous weighted blend — no step discontinuities.
+    pub fn predict_soft_routed(&self, features: &[f64]) -> f64 {
+        self.predict_soft_recursive(self.root, features)
+    }
+
+    fn predict_soft_recursive(&self, node: NodeId, features: &[f64]) -> f64 {
+        if self.arena.is_leaf(node) {
+            return self.leaf_prediction(node, features);
+        }
+
+        let feat_idx = self.arena.get_feature_idx(node) as usize;
+        let left = self.arena.get_left(node);
+        let right = self.arena.get_right(node);
+
+        // Categorical: hard routing
+        if let Some(mask) = self.arena.get_categorical_mask(node) {
+            let cat_val = features[feat_idx] as u64;
+            return if cat_val < 64 && (mask >> cat_val) & 1 == 1 {
+                self.predict_soft_recursive(left, features)
+            } else {
+                self.predict_soft_recursive(right, features)
+            };
+        }
+
+        let threshold = self.arena.get_threshold(node);
+        let margin = self
+            .node_bandwidths
+            .get(node.0 as usize)
+            .copied()
+            .unwrap_or(f64::INFINITY);
+
+        let left_pred = self.predict_soft_recursive(left, features);
+        let right_pred = self.predict_soft_recursive(right, features);
+
+        // Non-finite or zero margin: sigmoid fallback
+        if !margin.is_finite() || margin <= 0.0 {
+            let dist = features[feat_idx] - threshold;
+            let scale = math::abs(threshold) * 0.01 + 1e-10;
+            let z = (-dist / scale).clamp(-500.0, 500.0);
+            let t = 1.0 / (1.0 + math::exp(z));
+            return (1.0 - t) * left_pred + t * right_pred;
+        }
+
+        // Linear soft routing: always blend
+        let dist = features[feat_idx] - threshold;
+        let t = ((dist + margin) / (2.0 * margin)).clamp(0.0, 1.0);
+        (1.0 - t) * left_pred + t * right_pred
     }
 
     /// Recursive sigmoid-blended prediction traversal.
@@ -1355,6 +1456,9 @@ impl HoeffdingTree {
             self.leaf_states[right_id.0 as usize] = Some(rs);
         }
 
+        // Recompute per-node bandwidths after structural change.
+        self.recompute_bandwidths();
+
         true
     }
 }
@@ -1558,6 +1662,7 @@ impl StreamingTree for HoeffdingTree {
         self.feature_mask_bits.clear();
         self.rng_state = self.config.seed;
         self.split_gains.iter_mut().for_each(|g| *g = 0.0);
+        self.node_bandwidths.clear();
     }
 
     fn split_gains(&self) -> &[f64] {
@@ -1595,6 +1700,7 @@ impl Clone for HoeffdingTree {
             feature_mask_bits: self.feature_mask_bits.clone(),
             rng_state: self.rng_state,
             split_gains: self.split_gains.clone(),
+            node_bandwidths: self.node_bandwidths.clone(),
         }
     }
 }
@@ -2671,5 +2777,180 @@ mod tests {
             max_leaves,
             n_leaves
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Soft routing tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn soft_routed_prediction_finite() {
+        let config = TreeConfig::new().grace_period(20).max_depth(4).n_bins(16);
+        let mut tree = HoeffdingTree::new(config);
+        let mut rng: u64 = 42;
+
+        // Train until splits happen
+        for _ in 0..2000 {
+            let x = test_rand_f64(&mut rng) * 10.0;
+            let y = x * 2.0 + 1.0;
+            let feat = [x, x * 0.5];
+            let pred = tree.predict(&feat);
+            tree.train_one(&feat, pred - y, 1.0);
+        }
+
+        // Verify soft-routed prediction is finite
+        for i in 0..20 {
+            let x = i as f64 * 0.5;
+            let pred = tree.predict_soft_routed(&[x, x * 0.5]);
+            assert!(
+                pred.is_finite(),
+                "soft-routed prediction should be finite at x={}, got {}",
+                x,
+                pred
+            );
+        }
+    }
+
+    #[test]
+    fn soft_routed_smoother_than_hard() {
+        let config = TreeConfig::new()
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(32)
+            .delta(1e-2);
+        let mut tree = HoeffdingTree::new(config);
+        let mut rng: u64 = 123;
+
+        // Train on y = sin(x) with enough data for splits
+        for _ in 0..5000 {
+            let x = test_rand_f64(&mut rng) * 6.283; // 0..2pi
+            let y = math::sin(x);
+            let feat = [x];
+            let pred = tree.predict(&feat);
+            tree.train_one(&feat, pred - y, 1.0);
+        }
+
+        // Ensure we actually have splits
+        if tree.arena().n_nodes() < 3 {
+            return; // Tree didn't split -- can't test smoothness
+        }
+
+        // Sweep and compute total variation for both methods
+        let n_points = 100;
+        let hard_preds: Vec<f64> = (0..n_points)
+            .map(|i| {
+                let x = i as f64 * 6.283 / n_points as f64;
+                tree.predict(&[x])
+            })
+            .collect();
+        let soft_preds: Vec<f64> = (0..n_points)
+            .map(|i| {
+                let x = i as f64 * 6.283 / n_points as f64;
+                tree.predict_soft_routed(&[x])
+            })
+            .collect();
+
+        let hard_tv: f64 = hard_preds.windows(2).map(|w| math::abs(w[1] - w[0])).sum();
+        let soft_tv: f64 = soft_preds.windows(2).map(|w| math::abs(w[1] - w[0])).sum();
+
+        assert!(
+            soft_tv <= hard_tv + 1e-10,
+            "soft routing should have <= total variation than hard: soft_tv={}, hard_tv={}",
+            soft_tv,
+            hard_tv
+        );
+    }
+
+    #[test]
+    fn node_bandwidths_computed_after_splits() {
+        let config = TreeConfig::new().grace_period(20).max_depth(4).n_bins(16);
+        let mut tree = HoeffdingTree::new(config);
+        let mut rng: u64 = 999;
+
+        // Train until splits happen
+        for _ in 0..3000 {
+            let x = test_rand_f64(&mut rng) * 10.0;
+            let y = x * x;
+            let feat = [x];
+            let pred = tree.predict(&feat);
+            tree.train_one(&feat, pred - y, 1.0);
+        }
+
+        if tree.arena().n_nodes() < 3 {
+            return; // No splits -- can't test bandwidths
+        }
+
+        // Verify node_bandwidths is populated
+        assert!(
+            !tree.node_bandwidths.is_empty(),
+            "node_bandwidths should be non-empty after splits"
+        );
+
+        // Verify internal nodes have finite positive bandwidths
+        let mut found_finite = false;
+        for i in 0..tree.arena().n_nodes() {
+            let nid = NodeId(i as u32);
+            if !tree.arena().is_leaf(nid) {
+                let bw = tree.node_bandwidths[i];
+                assert!(
+                    bw > 0.0,
+                    "bandwidth for internal node {} should be > 0, got {}",
+                    i,
+                    bw
+                );
+                if bw.is_finite() {
+                    found_finite = true;
+                }
+            }
+        }
+        assert!(
+            found_finite,
+            "at least one internal node should have a finite bandwidth"
+        );
+    }
+
+    #[test]
+    fn soft_routed_agrees_at_training_points() {
+        let config = TreeConfig::new().grace_period(20).max_depth(3).n_bins(16);
+        let mut tree = HoeffdingTree::new(config);
+
+        // Train on simple data
+        let training_data: Vec<(f64, f64)> = (0..500)
+            .map(|i| {
+                let x = i as f64 * 0.02;
+                let y = x * 3.0 + 1.0;
+                (x, y)
+            })
+            .collect();
+
+        for &(x, y) in &training_data {
+            let feat = [x];
+            let pred = tree.predict(&feat);
+            tree.train_one(&feat, pred - y, 1.0);
+        }
+
+        // At training points far from boundaries, hard and soft should be similar
+        let mut total_diff = 0.0;
+        let mut count = 0;
+        for &(x, _) in &training_data {
+            let feat = [x];
+            let hard = tree.predict(&feat);
+            let soft = tree.predict_soft_routed(&feat);
+            if hard.is_finite() && soft.is_finite() {
+                total_diff += math::abs(hard - soft);
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            let mean_diff = total_diff / count as f64;
+            // Soft routing is a blend, so predictions will differ somewhat,
+            // but the mean difference should be bounded.
+            assert!(
+                mean_diff < 5.0,
+                "mean difference between hard and soft should be reasonable, got {}",
+                mean_diff
+            );
+        }
     }
 }

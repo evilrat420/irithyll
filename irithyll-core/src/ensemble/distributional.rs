@@ -911,6 +911,42 @@ impl DistributionalSGBT {
         }
     }
 
+    /// Predict using per-node auto-bandwidth soft routing.
+    ///
+    /// Every prediction is a continuous weighted blend instead of a
+    /// piecewise-constant step function. No training changes.
+    pub fn predict_soft_routed(&self, features: &[f64]) -> GaussianPrediction {
+        // Location chain with soft routing
+        let mut mu = self.location_base;
+        for step in &self.location_steps {
+            mu += self.config.learning_rate * step.predict_soft_routed(features);
+        }
+
+        // Scale chain
+        let (sigma, log_sigma) = match self.scale_mode {
+            ScaleMode::Empirical => {
+                let s = crate::math::sqrt(self.ewma_sq_err).max(1e-8);
+                (s, crate::math::ln(s))
+            }
+            ScaleMode::TreeChain => {
+                let mut ls = self.scale_base;
+                for step in &self.scale_steps {
+                    ls += self.config.learning_rate * step.predict_soft_routed(features);
+                }
+                (crate::math::exp(ls).max(1e-8), ls)
+            }
+        };
+
+        let honest_sigma = self.compute_honest_sigma(features);
+
+        GaussianPrediction {
+            mu,
+            sigma,
+            log_sigma,
+            honest_sigma,
+        }
+    }
+
     /// Predict with σ-ratio diagnostic exposed.
     ///
     /// Returns `(mu, sigma, sigma_ratio)` where `sigma_ratio` is
@@ -2580,6 +2616,50 @@ mod tests {
         assert!(
             pred.honest_sigma.abs() < 1e-15,
             "honest_sigma should be 0 with 1 step, got {}",
+            pred.honest_sigma
+        );
+    }
+
+    #[test]
+    fn distributional_soft_routed_prediction() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(20)
+            .max_depth(4)
+            .n_bins(16)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        // Train 200 samples
+        for i in 0..200 {
+            let x = i as f64 * 0.05;
+            let y = x * 2.0 + 1.0;
+            model.train_one(&(vec![x, x * 0.3], y));
+        }
+
+        // Verify soft-routed prediction returns finite values
+        let pred = model.predict_soft_routed(&[1.0, 0.3]);
+        assert!(
+            pred.mu.is_finite(),
+            "soft-routed mu should be finite, got {}",
+            pred.mu
+        );
+        assert!(
+            pred.sigma.is_finite() && pred.sigma > 0.0,
+            "soft-routed sigma should be finite and positive, got {}",
+            pred.sigma
+        );
+        assert!(
+            pred.log_sigma.is_finite(),
+            "soft-routed log_sigma should be finite, got {}",
+            pred.log_sigma
+        );
+        assert!(
+            pred.honest_sigma.is_finite(),
+            "soft-routed honest_sigma should be finite, got {}",
             pred.honest_sigma
         );
     }

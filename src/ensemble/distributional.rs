@@ -947,6 +947,42 @@ impl DistributionalSGBT {
         }
     }
 
+    /// Predict using per-node auto-bandwidth soft routing.
+    ///
+    /// Every prediction is a continuous weighted blend instead of a
+    /// piecewise-constant step function. No training changes.
+    pub fn predict_soft_routed(&self, features: &[f64]) -> GaussianPrediction {
+        // Location chain with soft routing
+        let mut mu = self.location_base;
+        for step in &self.location_steps {
+            mu += self.config.learning_rate * step.predict_soft_routed(features);
+        }
+
+        // Scale chain
+        let (sigma, log_sigma) = match self.scale_mode {
+            ScaleMode::Empirical => {
+                let s = self.ewma_sq_err.sqrt().max(1e-8);
+                (s, s.ln())
+            }
+            ScaleMode::TreeChain => {
+                let mut ls = self.scale_base;
+                for step in &self.scale_steps {
+                    ls += self.config.learning_rate * step.predict_soft_routed(features);
+                }
+                (ls.exp().max(1e-8), ls)
+            }
+        };
+
+        let honest_sigma = self.compute_honest_sigma(features);
+
+        GaussianPrediction {
+            mu,
+            sigma,
+            log_sigma,
+            honest_sigma,
+        }
+    }
+
     /// Predict with σ-ratio diagnostic exposed.
     ///
     /// Returns `(mu, sigma, sigma_ratio)` where `sigma_ratio` is

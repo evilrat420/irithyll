@@ -321,6 +321,12 @@ impl TreeSlot {
             .predict_sibling_interpolated(features, bandwidths)
     }
 
+    /// Predict using per-node auto-bandwidth soft routing.
+    #[inline]
+    pub fn predict_soft_routed(&self, features: &[f64]) -> f64 {
+        self.active.predict_soft_routed(features)
+    }
+
     /// Predict with graduated active-shadow blending.
     ///
     /// When `shadow_warmup > 0`, blends the active tree's prediction with the

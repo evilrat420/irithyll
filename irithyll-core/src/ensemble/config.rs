@@ -467,6 +467,15 @@ pub struct SGBTConfig {
     /// `0` (default) disables the packed cache.
     #[cfg_attr(feature = "serde", serde(default))]
     pub packed_refresh_interval: u64,
+
+    /// Enable per-node auto-bandwidth soft routing at prediction time.
+    ///
+    /// When `true`, predictions are continuous weighted blends instead of
+    /// piecewise-constant step functions. No training changes.
+    ///
+    /// Default: `false`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub soft_routing: bool,
 }
 
 #[cfg(feature = "serde")]
@@ -524,6 +533,7 @@ impl Default for SGBTConfig {
             shadow_warmup: None,
             leaf_model_type: LeafModelType::default(),
             packed_refresh_interval: 0,
+            soft_routing: false,
         }
     }
 }
@@ -785,6 +795,12 @@ impl SGBTConfigBuilder {
     /// - [`TreeChain`](ScaleMode::TreeChain): dual-chain NGBoost with scale tree ensemble.
     pub fn scale_mode(mut self, mode: ScaleMode) -> Self {
         self.config.scale_mode = mode;
+        self
+    }
+
+    /// Enable per-node auto-bandwidth soft routing.
+    pub fn soft_routing(mut self, enabled: bool) -> Self {
+        self.config.soft_routing = enabled;
         self
     }
 

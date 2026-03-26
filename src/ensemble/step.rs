@@ -170,6 +170,12 @@ impl BoostingStep {
         self.slot.predict_sibling_interpolated(features, bandwidths)
     }
 
+    /// Predict using per-node auto-bandwidth soft routing.
+    #[inline]
+    pub fn predict_soft_routed(&self, features: &[f64]) -> f64 {
+        self.slot.predict_soft_routed(features)
+    }
+
     /// Predict with graduated active-shadow blending.
     #[inline]
     pub fn predict_graduated(&self, features: &[f64]) -> f64 {
