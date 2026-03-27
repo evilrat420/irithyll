@@ -585,6 +585,11 @@ impl Factory {
                 low: 0.3,
                 high: 1.0,
                 log_scale: false,
+            })
+            .push(HyperParam::Int {
+                name: "grace_period",
+                low: 3,
+                high: 200,
             });
 
         Self {
@@ -635,6 +640,11 @@ impl Factory {
                 low: 0.3,
                 high: 1.0,
                 log_scale: false,
+            })
+            .push(HyperParam::Int {
+                name: "grace_period",
+                low: 3,
+                high: 200,
             });
 
         Self {
@@ -857,6 +867,7 @@ impl ModelFactory for Factory {
                 let n_bins = config.get(3) as usize;
                 let lambda = config.get(4);
                 let feature_subsample_rate = config.get(5);
+                let grace_period = config.get(6) as usize;
 
                 let sgbt_config = SGBTConfig::builder()
                     .learning_rate(learning_rate)
@@ -865,6 +876,7 @@ impl ModelFactory for Factory {
                     .n_bins(n_bins)
                     .lambda(lambda)
                     .feature_subsample_rate(feature_subsample_rate)
+                    .grace_period(grace_period)
                     .build()
                     .expect("Factory::create(Sgbt): invalid config from search space");
 
@@ -877,6 +889,7 @@ impl ModelFactory for Factory {
                 let n_bins = config.get(3) as usize;
                 let lambda = config.get(4);
                 let feature_subsample_rate = config.get(5);
+                let grace_period = config.get(6) as usize;
 
                 let sgbt_config = SGBTConfig::builder()
                     .learning_rate(learning_rate)
@@ -885,6 +898,7 @@ impl ModelFactory for Factory {
                     .n_bins(n_bins)
                     .lambda(lambda)
                     .feature_subsample_rate(feature_subsample_rate)
+                    .grace_period(grace_period)
                     .build()
                     .expect("Factory::create(Distributional): invalid config from search space");
 
