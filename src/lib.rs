@@ -241,7 +241,10 @@ pub use attention::{
 pub use moe::{NeuralMoE, NeuralMoEBuilder, NeuralMoEConfig};
 
 // Re-exports -- automl
-pub use automl::{AttentionFactory, EsnFactory, MambaFactory, SgbtFactory, SpikeNetFactory};
+#[allow(deprecated)]
+pub use automl::{
+    Algorithm, AttentionFactory, EsnFactory, Factory, MambaFactory, SgbtFactory, SpikeNetFactory,
+};
 pub use automl::{AutoMetric, AutoTuner, AutoTunerBuilder, AutoTunerConfig, ModelFactory};
 pub use automl::{ConfigSampler, ConfigSpace, HyperConfig, HyperParam, RewardNormalizer};
 
@@ -700,9 +703,9 @@ pub fn streaming_attention(
 /// For full control, use [`AutoTuner::builder()`].
 ///
 /// ```no_run
-/// use irithyll::{auto_tune, automl::SgbtFactory, StreamingLearner};
+/// use irithyll::{auto_tune, automl::Factory, StreamingLearner};
 ///
-/// let mut tuner = auto_tune(SgbtFactory::new(5));
+/// let mut tuner = auto_tune(Factory::sgbt(5));
 /// tuner.train(&[1.0, 2.0, 3.0, 4.0, 5.0], 10.0);
 /// let pred = tuner.predict(&[1.0, 2.0, 3.0, 4.0, 5.0]);
 /// ```

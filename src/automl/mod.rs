@@ -25,7 +25,10 @@ mod reward;
 
 pub use auto_tuner::{AutoTuner, AutoTunerBuilder, AutoTunerConfig};
 pub use config_space::{ConfigSampler, ConfigSpace, HyperConfig, HyperParam};
-pub use factories::{AttentionFactory, EsnFactory, MambaFactory, SgbtFactory, SpikeNetFactory};
+#[allow(deprecated)]
+pub use factories::{
+    Algorithm, AttentionFactory, EsnFactory, Factory, MambaFactory, SgbtFactory, SpikeNetFactory,
+};
 pub use reward::RewardNormalizer;
 
 /// Metric to optimize during auto-tuning.
@@ -65,5 +68,17 @@ pub trait ModelFactory: Send + Sync {
     /// The default is 0 (no warmup protection).
     fn warmup_hint(&self) -> usize {
         0
+    }
+
+    /// Approximate model complexity (effective parameter count).
+    ///
+    /// Used for complexity-adjusted elimination: models with higher complexity
+    /// are penalized more when evaluation data is scarce. This naturally
+    /// favors simpler models on sparse data and lets complex models prove
+    /// themselves when data is abundant.
+    ///
+    /// The default is 100 (moderate complexity).
+    fn complexity_hint(&self) -> usize {
+        100
     }
 }

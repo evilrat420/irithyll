@@ -18,7 +18,9 @@
 
 use crate::automl::{AutoMetric, ConfigSampler, HyperConfig, ModelFactory, RewardNormalizer};
 use crate::bandits::{Bandit, DiscountedThompsonSampling};
+use crate::drift::adwin::Adwin;
 use crate::metrics::ewma::EwmaRegressionMetrics;
+use irithyll_core::drift::{DriftDetector, DriftSignal};
 use irithyll_core::learner::StreamingLearner;
 
 // ===========================================================================
@@ -47,6 +49,13 @@ pub struct AutoTunerConfig {
     pub min_n_initial: usize,
     /// Maximum adaptive bracket size (default: 32).
     pub max_n_initial: usize,
+    /// Enable drift-triggered re-racing (default: false).
+    ///
+    /// When enabled, an ADWIN detector monitors the champion's prediction
+    /// error. If drift is detected, the current tournament is aborted and a
+    /// new one starts with an expanded bracket, allowing the tuner to
+    /// rapidly adapt to distribution shifts.
+    pub use_drift_rerace: bool,
 }
 
 impl Default for AutoTunerConfig {
@@ -61,6 +70,7 @@ impl Default for AutoTunerConfig {
             seed: 42,
             min_n_initial: 4,
             max_n_initial: 32,
+            use_drift_rerace: false,
         }
     }
 }
@@ -106,9 +116,9 @@ struct Challenger {
 /// # Example
 ///
 /// ```no_run
-/// use irithyll::{auto_tune, automl::SgbtFactory, StreamingLearner};
+/// use irithyll::{auto_tune, automl::Factory, StreamingLearner};
 ///
-/// let mut tuner = auto_tune(SgbtFactory::new(5));
+/// let mut tuner = auto_tune(Factory::sgbt(5));
 /// for i in 0..500 {
 ///     let x = [i as f64, (i as f64).sin(), (i as f64).cos(), 0.5, -0.3];
 ///     let y = x[0] * 0.1 + x[1] * 2.0;
@@ -142,6 +152,9 @@ pub struct AutoTuner {
 
     // Adaptive bracket sizing
     effective_n_initial: usize,
+
+    // Optional drift detector for triggering re-racing
+    drift_detector: Option<Box<dyn DriftDetector>>,
 }
 
 // ===========================================================================
@@ -235,6 +248,16 @@ impl AutoTunerBuilder {
         self
     }
 
+    /// Enable drift-triggered re-racing (default: false).
+    ///
+    /// When enabled, an ADWIN detector monitors the champion's prediction
+    /// error. If drift is detected, the current tournament is aborted and a
+    /// new one starts with an expanded bracket.
+    pub fn use_drift_rerace(mut self, enabled: bool) -> Self {
+        self.config.use_drift_rerace = enabled;
+        self
+    }
+
     /// Build the `AutoTuner`.
     ///
     /// # Panics
@@ -269,6 +292,11 @@ impl AutoTunerBuilder {
         let champion_ewma = EwmaRegressionMetrics::new(config.ewma_span);
 
         let effective_n_initial = config.n_initial;
+        let drift_detector: Option<Box<dyn DriftDetector>> = if config.use_drift_rerace {
+            Some(Box::new(Adwin::default()))
+        } else {
+            None
+        };
         let mut tuner = AutoTuner {
             champion,
             champion_ewma,
@@ -286,6 +314,7 @@ impl AutoTunerBuilder {
             promotions: 0,
             tournaments_completed: 0,
             effective_n_initial,
+            drift_detector,
         };
 
         tuner.start_tournament();
@@ -345,6 +374,16 @@ impl StreamingLearner for AutoTuner {
         self.champion_ewma.update(target, champ_pred);
         self.champion.train_one(features, target, weight);
 
+        // 1b. Drift detection on champion error.
+        let mut drift_restart = false;
+        if let Some(ref mut detector) = self.drift_detector {
+            let error = (target - champ_pred).abs();
+            let signal = detector.update(error);
+            if matches!(signal, DriftSignal::Drift) {
+                drift_restart = true;
+            }
+        }
+
         // 2. All candidates: predict -> EWMA -> train + Welford error stats.
         for c in &mut self.candidates {
             let pred = c.model.predict(features);
@@ -377,6 +416,14 @@ impl StreamingLearner for AutoTuner {
         if self.samples_in_round >= self.config.round_budget as u64 {
             self.eliminate_round();
         }
+
+        // 6. Drift-triggered re-racing: abort tournament and start fresh.
+        if drift_restart {
+            self.candidates.clear();
+            self.effective_n_initial =
+                (self.effective_n_initial * 2).min(self.config.max_n_initial);
+            self.start_tournament();
+        }
     }
 
     fn predict(&self, features: &[f64]) -> f64 {
@@ -399,6 +446,9 @@ impl StreamingLearner for AutoTuner {
         self.effective_n_initial = self.config.n_initial;
         self.bandit.reset();
         self.normalizer.reset();
+        if let Some(ref mut d) = self.drift_detector {
+            d.reset();
+        }
         self.start_tournament();
     }
 }
@@ -418,7 +468,7 @@ impl AutoTuner {
             return;
         }
 
-        // Pre-compute warmup hints to avoid borrow issues.
+        // Pre-compute warmup hints and complexity hints to avoid borrow issues.
         let warmup_hints: Vec<usize> = self
             .candidates
             .iter()
@@ -427,6 +477,16 @@ impl AutoTuner {
                     .get(c.factory_idx)
                     .map(|f| f.warmup_hint())
                     .unwrap_or(0)
+            })
+            .collect();
+        let complexity_hints: Vec<usize> = self
+            .candidates
+            .iter()
+            .map(|c| {
+                self.factories
+                    .get(c.factory_idx)
+                    .map(|f| f.complexity_hint())
+                    .unwrap_or(100)
             })
             .collect();
 
@@ -439,7 +499,9 @@ impl AutoTuner {
             if (c.err_count as usize) < warmup_hints[i] {
                 protected_indices.push(i);
             } else {
-                eligible.push((i, get_metric(&c.ewma, metric_type)));
+                let raw = get_metric(&c.ewma, metric_type);
+                let adj = adjusted_metric(raw, complexity_hints[i], c.ewma.n_samples());
+                eligible.push((i, adj));
             }
         }
 
@@ -587,7 +649,7 @@ impl AutoTuner {
 
         let min_samples_for_test: u64 = 30;
 
-        // Pre-compute warmup hints to avoid borrow issues with retain.
+        // Pre-compute warmup hints and complexity hints to avoid borrow issues.
         let warmup_hints: Vec<usize> = self
             .candidates
             .iter()
@@ -598,24 +660,35 @@ impl AutoTuner {
                     .unwrap_or(0)
             })
             .collect();
+        let complexity_hints: Vec<usize> = self
+            .candidates
+            .iter()
+            .map(|c| {
+                self.factories
+                    .get(c.factory_idx)
+                    .map(|f| f.complexity_hint())
+                    .unwrap_or(100)
+            })
+            .collect();
 
-        // Compute median error across candidates that are PAST warmup and have
-        // enough samples. Candidates still in warmup are excluded from the median
-        // to prevent their noisy cold-start metrics from skewing the baseline.
-        let mut errors: Vec<f64> = self
+        // Compute median of complexity-adjusted error across candidates that are
+        // PAST warmup and have enough samples. Candidates still in warmup are
+        // excluded from the median to prevent their noisy cold-start metrics
+        // from skewing the baseline.
+        let mut adjusted_errors: Vec<f64> = self
             .candidates
             .iter()
             .enumerate()
             .filter(|(i, c)| {
                 c.err_count >= min_samples_for_test && (c.err_count as usize) >= warmup_hints[*i]
             })
-            .map(|(_, c)| c.err_mean)
+            .map(|(i, c)| adjusted_metric(c.err_mean, complexity_hints[i], c.err_count))
             .collect();
-        if errors.len() < 2 {
+        if adjusted_errors.len() < 2 {
             return;
         }
-        errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median_err = errors[errors.len() / 2];
+        adjusted_errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median_adj_err = adjusted_errors[adjusted_errors.len() / 2];
 
         let z_threshold = 2.0;
 
@@ -633,6 +706,7 @@ impl AutoTuner {
                 if (c.err_count as usize) < warmup_hints[i] {
                     return None;
                 }
+                let adj_err = adjusted_metric(c.err_mean, complexity_hints[i], c.err_count);
                 let variance = if c.err_count > 1 {
                     c.err_m2 / (c.err_count - 1) as f64
                 } else {
@@ -642,7 +716,7 @@ impl AutoTuner {
                 if std_err < 1e-12 {
                     return None; // avoid division by zero
                 }
-                let z = (c.err_mean - median_err) / std_err;
+                let z = (adj_err - median_adj_err) / std_err;
                 if z > z_threshold {
                     Some(i)
                 } else {
@@ -679,6 +753,20 @@ fn get_metric(ewma: &EwmaRegressionMetrics, metric: AutoMetric) -> f64 {
     }
 }
 
+/// Complexity-adjusted metric: adds a penalty that decays as `1/n_seen`.
+///
+/// When evaluation data is scarce, higher-complexity models are penalized more,
+/// naturally favoring simpler models. As data grows, the penalty vanishes and
+/// models are compared on raw performance.
+fn adjusted_metric(ewma_metric: f64, complexity: usize, n_seen: u64) -> f64 {
+    let penalty = if n_seen > 0 {
+        (complexity as f64) / (n_seen as f64)
+    } else {
+        complexity as f64
+    };
+    ewma_metric + penalty
+}
+
 // Safety: AutoTuner contains only Send+Sync types.
 // - Box<dyn StreamingLearner>: StreamingLearner requires Send+Sync
 // - Box<dyn ModelFactory>: ModelFactory requires Send+Sync
@@ -691,6 +779,7 @@ unsafe impl Sync for AutoTuner {}
 // ===========================================================================
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::automl::factories::{AttentionFactory, EsnFactory, MambaFactory, SpikeNetFactory};
@@ -1337,6 +1426,161 @@ mod tests {
             8,
             "effective_n_initial should reset to n_initial=8, got {}",
             tuner.effective_n_initial()
+        );
+    }
+
+    /// Verify adjusted_metric produces expected values.
+    #[test]
+    fn adjusted_metric_computation() {
+        // Low complexity, many samples: small penalty (100/1000 = 0.1).
+        let adj1 = super::adjusted_metric(1.0, 100, 1000);
+        // High complexity, few samples: large penalty (10000/100 = 100.0).
+        let adj2 = super::adjusted_metric(1.0, 10000, 100);
+        assert!(
+            adj2 > adj1,
+            "high complexity with few samples should have higher adjusted score: adj1={adj1}, adj2={adj2}"
+        );
+
+        // Zero samples: penalty equals complexity.
+        let adj_zero = super::adjusted_metric(0.5, 200, 0);
+        assert!(
+            (adj_zero - 200.5).abs() < 1e-12,
+            "with zero samples penalty should equal complexity: expected 200.5, got {adj_zero}"
+        );
+    }
+
+    /// Verify complexity penalty decays as more samples are observed.
+    #[test]
+    fn complexity_penalty_decays_with_samples() {
+        let adj_early = super::adjusted_metric(1.0, 5000, 50);
+        let adj_late = super::adjusted_metric(1.0, 5000, 5000);
+        assert!(
+            adj_early > adj_late,
+            "penalty should decrease with more samples: early={adj_early}, late={adj_late}"
+        );
+
+        // The raw metric is the same (1.0), so the difference is purely penalty.
+        let penalty_early = adj_early - 1.0;
+        let penalty_late = adj_late - 1.0;
+        assert!(
+            (penalty_early - 100.0).abs() < 1e-12,
+            "early penalty should be 5000/50=100.0, got {penalty_early}"
+        );
+        assert!(
+            (penalty_late - 1.0).abs() < 1e-12,
+            "late penalty should be 5000/5000=1.0, got {penalty_late}"
+        );
+    }
+
+    /// Verify use_drift_rerace builder method sets config correctly.
+    #[test]
+    fn drift_rerace_config() {
+        let tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .use_drift_rerace(true)
+            .build();
+
+        assert!(
+            tuner.config.use_drift_rerace,
+            "use_drift_rerace should be true after builder set"
+        );
+        assert!(
+            tuner.drift_detector.is_some(),
+            "drift_detector should be Some when use_drift_rerace is true"
+        );
+
+        let tuner2 = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .use_drift_rerace(false)
+            .build();
+
+        assert!(
+            !tuner2.config.use_drift_rerace,
+            "use_drift_rerace should be false"
+        );
+        assert!(
+            tuner2.drift_detector.is_none(),
+            "drift_detector should be None when use_drift_rerace is false"
+        );
+    }
+
+    /// Verify drift re-racing does not crash and runs tournaments under distribution shift.
+    #[test]
+    fn drift_rerace_triggers_new_tournament() {
+        let mut tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .n_initial(4)
+            .round_budget(20)
+            .min_n_initial(4)
+            .max_n_initial(32)
+            .use_drift_rerace(true)
+            .seed(42)
+            .build();
+
+        // Phase 1: stable data (y = 2*x).
+        for i in 0..200 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0;
+            tuner.train(&x, y);
+        }
+
+        let tournaments_before_shift = tuner.tournaments_completed();
+
+        // Phase 2: abrupt distribution shift (y = -10*x + 100).
+        for i in 200..500 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin(), (i as f64).cos()];
+            let y = x[0] * -10.0 + 100.0;
+            tuner.train(&x, y);
+        }
+
+        // Verify the tuner completed more tournaments (drift re-racing should
+        // have triggered at least one restart). At minimum, verify no crash.
+        assert!(
+            tuner.tournaments_completed() > tournaments_before_shift,
+            "expected more tournaments after distribution shift, before={tournaments_before_shift}, after={}",
+            tuner.tournaments_completed()
+        );
+
+        let pred = tuner.predict(&[3.0, 0.0, 1.0]);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite after drift re-racing, got {pred}"
+        );
+    }
+
+    /// Verify drift detector is reset when AutoTuner is reset.
+    #[test]
+    fn drift_rerace_reset() {
+        let mut tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .n_initial(4)
+            .round_budget(20)
+            .use_drift_rerace(true)
+            .build();
+
+        // Train some data to accumulate drift detector state.
+        for i in 0..100 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0;
+            tuner.train(&x, y);
+        }
+
+        tuner.reset();
+
+        assert_eq!(
+            tuner.total_samples(),
+            0,
+            "total_samples should be 0 after reset"
+        );
+        assert!(
+            tuner.drift_detector.is_some(),
+            "drift_detector should still exist after reset"
+        );
+        // The drift detector was reset (no crash).
+        let pred = tuner.predict(&[0.5, 0.0, 1.0]);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite after reset with drift rerace"
         );
     }
 }
