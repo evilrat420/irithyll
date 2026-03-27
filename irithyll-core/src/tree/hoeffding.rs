@@ -2823,7 +2823,7 @@ mod tests {
 
         // Train on y = sin(x) with enough data for splits
         for _ in 0..5000 {
-            let x = test_rand_f64(&mut rng) * 6.283; // 0..2pi
+            let x = test_rand_f64(&mut rng) * core::f64::consts::TAU; // 0..2pi
             let y = math::sin(x);
             let feat = [x];
             let pred = tree.predict(&feat);
@@ -2839,13 +2839,13 @@ mod tests {
         let n_points = 100;
         let hard_preds: Vec<f64> = (0..n_points)
             .map(|i| {
-                let x = i as f64 * 6.283 / n_points as f64;
+                let x = i as f64 * core::f64::consts::TAU / n_points as f64;
                 tree.predict(&[x])
             })
             .collect();
         let soft_preds: Vec<f64> = (0..n_points)
             .map(|i| {
-                let x = i as f64 * 6.283 / n_points as f64;
+                let x = i as f64 * core::f64::consts::TAU / n_points as f64;
                 tree.predict_soft_routed(&[x])
             })
             .collect();
