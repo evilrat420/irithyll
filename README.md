@@ -126,24 +126,32 @@ Online hyperparameter optimization via champion-challenger tournament racing -- 
 
 | Component | Description |
 |-----------|-------------|
-| [`AutoTuner`](https://docs.rs/irithyll/latest/irithyll/automl/struct.AutoTuner.html) | Top-level orchestrator (implements `StreamingLearner`). Champion always predicts; challengers race in parallel. |
-| [`ModelFactory`](https://docs.rs/irithyll/latest/irithyll/automl/trait.ModelFactory.html) | Trait for creating model instances from hyperparameter configs. Built-in factories for SGBT, ESN, Mamba, Attention, SpikeNet. |
-| [`ConfigSpace`](https://docs.rs/irithyll/latest/irithyll/automl/struct.ConfigSpace.html) | Hyperparameter search space with float (linear/log), integer, and categorical params. |
-| [`DiscountedThompsonSampling`](https://docs.rs/irithyll/latest/irithyll/bandits/struct.DiscountedThompsonSampling.html) | Non-stationary bandit with exponential forgetting for config-space exploration. |
+| [`AutoTuner`](https://docs.rs/irithyll/latest/irithyll/automl/struct.AutoTuner.html) | Tournament successive halving with champion-challenger racing. Implements `StreamingLearner`. |
+| [`Factory`](https://docs.rs/irithyll/latest/irithyll/automl/struct.Factory.html) | Unified model factory. `Factory::sgbt()`, `Factory::esn()`, `Factory::distributional()`, `Factory::mamba()`, `Factory::attention()`, `Factory::spike_net()`. |
+| Complexity-adjusted elimination | MDL-inspired penalty: `score = error + complexity/n_seen`. Favors simple models on sparse data, relaxes with evidence. |
+| Drift-triggered re-racing | ADWIN detects champion error drift, aborts tournament, starts fresh with expanded bracket. |
+| Warmup-aware racing | Neural models with cold-start phases are protected from premature elimination. |
+| Statistical early stopping | Welford z-test kills clearly-bad candidates before round budget expires. |
 
 ```rust
-use irithyll::{auto_tune, automl::SgbtFactory, StreamingLearner};
+use irithyll::{auto_tune, automl::Factory, StreamingLearner};
 
-// One-liner: auto-tune SGBT hyperparameters online
-let mut tuner = auto_tune(SgbtFactory::new(5));
-for i in 0..1000 {
-    let x = [i as f64 * 0.01; 5];
-    tuner.train(&x, x[0].sin());
-}
-let pred = tuner.predict(&[0.5; 5]);
+// One-liner: auto-tune SGBT
+let mut tuner = auto_tune(Factory::sgbt(5));
+
+// Multi-factory: race trees vs neural architectures
+let mut tuner = AutoTuner::builder()
+    .add_factory(Factory::sgbt(5))
+    .add_factory(Factory::esn())
+    .add_factory(Factory::mamba(5))
+    .use_drift_rerace(true)
+    .build();
+
+tuner.train(&[1.0, 2.0, 3.0, 4.0, 5.0], 10.0);
+let pred = tuner.predict(&[1.0, 2.0, 3.0, 4.0, 5.0]);
 ```
 
-Based on Wu et al. (2021) ChaCha, Qi et al. (2023) Discounted Thompson Sampling.
+Based on Wu et al. (2021) ChaCha, Qi et al. (2023) Discounted TS, Yamanishi (2018) MDL.
 
 ## Neural Mixture of Experts
 
