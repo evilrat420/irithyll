@@ -20,6 +20,7 @@ pub mod adaptive;
 pub mod adaptive_forest;
 pub mod bagged;
 pub mod config;
+pub mod diagnostics;
 pub mod distributional;
 pub mod lr_schedule;
 pub mod moe;
@@ -971,6 +972,43 @@ impl<L: Loss> SGBT<L> {
         self.rng_state = self.config.seed;
         self.auto_bandwidths.clear();
         self.last_replacement_sum = 0;
+    }
+
+    // -------------------------------------------------------------------
+    // Diagnostics
+    // -------------------------------------------------------------------
+
+    /// Full ensemble diagnostics with per-tree contributions for a given input.
+    ///
+    /// Computes tree structure metrics, feature importance (split-count based),
+    /// per-tree contributions (`lr * tree.predict(features)`), and replacement
+    /// counts across all boosting steps.
+    pub fn diagnostics(
+        &self,
+        features: &[f64],
+    ) -> crate::ensemble::diagnostics::EnsembleDiagnostics {
+        crate::ensemble::diagnostics::build_ensemble_diagnostics(
+            &self.steps,
+            self.base_prediction,
+            self.config.learning_rate,
+            self.samples_seen,
+            Some(features),
+        )
+    }
+
+    /// Ensemble diagnostics without per-tree contributions.
+    ///
+    /// Same as [`diagnostics()`](Self::diagnostics) but all `contribution`
+    /// fields are set to 0.0. Use when you only need structure/importance
+    /// and don't have a feature vector handy.
+    pub fn diagnostics_overview(&self) -> crate::ensemble::diagnostics::EnsembleDiagnostics {
+        crate::ensemble::diagnostics::build_ensemble_diagnostics(
+            &self.steps,
+            self.base_prediction,
+            self.config.learning_rate,
+            self.samples_seen,
+            None,
+        )
     }
 
     /// Serialize the model into a [`ModelState`](crate::serde_support::ModelState).

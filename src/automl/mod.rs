@@ -23,7 +23,9 @@ mod config_space;
 mod factories;
 mod reward;
 
-pub use auto_tuner::{AutoTuner, AutoTunerBuilder, AutoTunerConfig};
+pub use auto_tuner::{
+    AutoTuner, AutoTunerBuilder, AutoTunerConfig, AutoTunerSnapshot, CandidateSnapshot,
+};
 pub use config_space::{ConfigSampler, ConfigSpace, HyperConfig, HyperParam};
 #[allow(deprecated)]
 pub use factories::{

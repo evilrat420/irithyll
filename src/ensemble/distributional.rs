@@ -1496,6 +1496,60 @@ impl DistributionalSGBT {
         }
     }
 
+    /// Ensemble-level diagnostics (location + optional scale) with per-tree
+    /// contributions for a given input.
+    ///
+    /// Returns [`DistributionalDiagnostics`](crate::ensemble::diagnostics::DistributionalDiagnostics)
+    /// containing location ensemble diagnostics, optional scale diagnostics
+    /// (when in `TreeChain` mode), current `honest_sigma`, and the rolling
+    /// `honest_sigma` baseline.
+    pub fn ensemble_diagnostics(
+        &self,
+        features: &[f64],
+    ) -> crate::ensemble::diagnostics::DistributionalDiagnostics {
+        use crate::ensemble::config::ScaleMode;
+        use crate::ensemble::diagnostics::build_ensemble_diagnostics;
+
+        let location = build_ensemble_diagnostics(
+            &self.location_steps,
+            self.location_base,
+            self.config.learning_rate,
+            self.samples_seen,
+            Some(features),
+        );
+
+        let scale = match self.scale_mode {
+            ScaleMode::TreeChain => Some(build_ensemble_diagnostics(
+                &self.scale_steps,
+                self.scale_base,
+                self.config.learning_rate,
+                self.samples_seen,
+                Some(features),
+            )),
+            ScaleMode::Empirical => None,
+        };
+
+        let honest_sigma = self.compute_honest_sigma(features);
+
+        // Compute effective_mts if adaptive_mts is configured
+        let effective_mts = self.config.adaptive_mts.map(|(base_mts, k)| {
+            let sigma_ratio = if self.rolling_honest_sigma_mean > 1e-12 {
+                honest_sigma / self.rolling_honest_sigma_mean
+            } else {
+                1.0
+            };
+            (base_mts as f64 / (1.0 + k * sigma_ratio)).max(100.0) as u64
+        });
+
+        crate::ensemble::diagnostics::DistributionalDiagnostics {
+            location,
+            scale,
+            honest_sigma,
+            rolling_honest_sigma_mean: self.rolling_honest_sigma_mean,
+            effective_mts,
+        }
+    }
+
     /// Per-tree contribution to the final prediction.
     ///
     /// Returns two vectors: location contributions and scale contributions.

@@ -139,6 +139,7 @@ pub use ensemble::moe_distributional::MoEDistributionalSGBT;
 pub use ensemble::multi_target::MultiTargetSGBT;
 pub use ensemble::multiclass::MulticlassSGBT;
 pub use ensemble::quantile_regressor::QuantileRegressorSGBT;
+pub use ensemble::diagnostics::{DistributionalDiagnostics, EnsembleDiagnostics, TreeDiagnostics};
 pub use ensemble::{DynSGBT, SGBT};
 pub use error::{ConfigError, IrithyllError};
 pub use histogram::{BinnerKind, BinningStrategy};

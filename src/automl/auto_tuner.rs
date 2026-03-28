@@ -24,6 +24,90 @@ use irithyll_core::drift::{DriftDetector, DriftSignal};
 use irithyll_core::learner::StreamingLearner;
 
 // ===========================================================================
+// Diagnostic snapshots
+// ===========================================================================
+
+/// Snapshot of the AutoTuner's current state for diagnostics.
+#[derive(Debug, Clone)]
+pub struct AutoTunerSnapshot {
+    /// Name of the champion's model factory.
+    pub champion_factory: String,
+    /// Champion's current EWMA metric value.
+    pub champion_metric: f64,
+    /// Samples the champion has trained on.
+    pub champion_samples: u64,
+
+    /// Current tournament candidates.
+    pub candidates: Vec<CandidateSnapshot>,
+
+    /// Current tournament round (0-indexed).
+    pub current_round: usize,
+    /// Samples processed in current round.
+    pub samples_in_round: u64,
+    /// Current adaptive bracket size.
+    pub effective_n_initial: usize,
+
+    /// Total tournaments completed.
+    pub tournaments_completed: u64,
+    /// Total champion promotions.
+    pub promotions: u64,
+    /// Total samples processed.
+    pub total_samples: u64,
+
+    /// Registered factory names.
+    pub factory_names: Vec<String>,
+}
+
+/// Snapshot of a single tournament candidate.
+#[derive(Debug, Clone)]
+pub struct CandidateSnapshot {
+    /// Factory name that produced this candidate.
+    pub factory_name: String,
+    /// Current EWMA metric value.
+    pub metric: f64,
+    /// Samples this candidate has trained on.
+    pub samples_trained: u64,
+    /// Whether this candidate is still in warmup.
+    pub in_warmup: bool,
+}
+
+impl std::fmt::Display for AutoTunerSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "=== AutoTuner Snapshot ===")?;
+        writeln!(
+            f,
+            "Champion: {} (metric: {:.6}, samples: {})",
+            self.champion_factory, self.champion_metric, self.champion_samples
+        )?;
+        writeln!(
+            f,
+            "Tournament: round {}, {}/{} candidates, {} samples in round",
+            self.current_round,
+            self.candidates.len(),
+            self.effective_n_initial,
+            self.samples_in_round
+        )?;
+        writeln!(
+            f,
+            "History: {} tournaments, {} promotions, {} total samples",
+            self.tournaments_completed, self.promotions, self.total_samples
+        )?;
+        if !self.candidates.is_empty() {
+            writeln!(f, "Candidates:")?;
+            for (i, c) in self.candidates.iter().enumerate() {
+                let warmup_tag = if c.in_warmup { " [warmup]" } else { "" };
+                writeln!(
+                    f,
+                    "  [{i}] {} metric={:.6} samples={}{warmup_tag}",
+                    c.factory_name, c.metric, c.samples_trained
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+// ===========================================================================
 // AutoTunerConfig
 // ===========================================================================
 
@@ -360,6 +444,62 @@ impl AutoTuner {
     /// Current adaptive bracket size (may differ from configured `n_initial`).
     pub fn effective_n_initial(&self) -> usize {
         self.effective_n_initial
+    }
+
+    /// Take a diagnostic snapshot of the current state.
+    ///
+    /// Returns a complete picture of the champion, all candidates,
+    /// tournament progress, and historical statistics.
+    pub fn snapshot(&self) -> AutoTunerSnapshot {
+        let metric_type = self.config.metric;
+
+        let champion_metric = get_metric(&self.champion_ewma, metric_type);
+        let champion_factory = self
+            .factories
+            .get(self.champion_factory_idx)
+            .map(|f| f.name().to_string())
+            .unwrap_or_default();
+
+        let candidates: Vec<CandidateSnapshot> = self
+            .candidates
+            .iter()
+            .map(|c| {
+                let factory_name = self
+                    .factories
+                    .get(c.factory_idx)
+                    .map(|f| f.name().to_string())
+                    .unwrap_or_default();
+                let warmup_hint = self
+                    .factories
+                    .get(c.factory_idx)
+                    .map(|f| f.warmup_hint())
+                    .unwrap_or(0);
+                CandidateSnapshot {
+                    factory_name,
+                    metric: get_metric(&c.ewma, metric_type),
+                    samples_trained: c.ewma.n_samples(),
+                    in_warmup: (c.ewma.n_samples() as usize) < warmup_hint,
+                }
+            })
+            .collect();
+
+        AutoTunerSnapshot {
+            champion_factory,
+            champion_metric,
+            champion_samples: self.champion.n_samples_seen(),
+            candidates,
+            current_round: self.current_round,
+            samples_in_round: self.samples_in_round,
+            effective_n_initial: self.effective_n_initial,
+            tournaments_completed: self.tournaments_completed,
+            promotions: self.promotions,
+            total_samples: self.total_samples,
+            factory_names: self
+                .factories
+                .iter()
+                .map(|f| f.name().to_string())
+                .collect(),
+        }
     }
 }
 
@@ -1581,6 +1721,132 @@ mod tests {
         assert!(
             pred.is_finite(),
             "prediction should be finite after reset with drift rerace"
+        );
+    }
+
+    /// Verify snapshot captures state correctly after training.
+    #[test]
+    fn snapshot_after_training() {
+        let mut tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(5))
+            .round_budget(50)
+            .build();
+
+        for i in 0..200 {
+            let x = [i as f64, (i as f64) * 0.5, (i as f64) * 0.1, 1.0, -1.0];
+            let y = x[0] * 0.3 + x[1] * 0.7 + 2.0;
+            tuner.train(&x, y);
+        }
+
+        let snap = tuner.snapshot();
+        assert!(
+            !snap.champion_factory.is_empty(),
+            "champion_factory should be non-empty, got {:?}",
+            snap.champion_factory
+        );
+        assert_eq!(
+            snap.total_samples, 200,
+            "total_samples should be 200, got {}",
+            snap.total_samples
+        );
+        assert_eq!(
+            snap.champion_samples, 200,
+            "champion_samples should be 200, got {}",
+            snap.champion_samples
+        );
+        assert!(
+            !snap.factory_names.is_empty(),
+            "factory_names should be non-empty"
+        );
+    }
+
+    /// Verify snapshot shows candidates during an active tournament.
+    #[test]
+    fn snapshot_shows_candidates() {
+        let tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .n_initial(4)
+            .round_budget(100)
+            .build();
+
+        let snap = tuner.snapshot();
+        assert!(
+            !snap.candidates.is_empty(),
+            "candidates should be non-empty immediately after build, got {}",
+            snap.candidates.len()
+        );
+        assert_eq!(
+            snap.candidates.len(),
+            4,
+            "should have 4 candidates (n_initial=4), got {}",
+            snap.candidates.len()
+        );
+        for c in &snap.candidates {
+            assert!(
+                !c.factory_name.is_empty(),
+                "candidate factory_name should be non-empty"
+            );
+        }
+    }
+
+    /// Verify Display impl produces non-empty output without panicking.
+    #[test]
+    fn snapshot_display() {
+        let mut tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .n_initial(4)
+            .round_budget(50)
+            .build();
+
+        for i in 0..50 {
+            let x = [i as f64 * 0.1, (i as f64).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0 + x[1];
+            tuner.train(&x, y);
+        }
+
+        let snap = tuner.snapshot();
+        let display = format!("{snap}");
+        assert!(!display.is_empty(), "Display output should be non-empty");
+        assert!(
+            display.contains("AutoTuner Snapshot"),
+            "Display output should contain header, got: {display}"
+        );
+        assert!(
+            display.contains("Champion:"),
+            "Display output should contain Champion line"
+        );
+    }
+
+    /// Verify snapshot promotions field matches tuner.promotions().
+    #[test]
+    fn snapshot_tracks_promotions() {
+        let mut tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .n_initial(4)
+            .round_budget(20)
+            .seed(123)
+            .build();
+
+        for i in 0..1000 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0 + x[1] * 3.0 + 1.0;
+            tuner.train(&x, y);
+        }
+
+        let snap = tuner.snapshot();
+        assert_eq!(
+            snap.promotions,
+            tuner.promotions(),
+            "snapshot promotions ({}) should match tuner.promotions() ({})",
+            snap.promotions,
+            tuner.promotions()
+        );
+        assert_eq!(
+            snap.tournaments_completed,
+            tuner.tournaments_completed(),
+            "snapshot tournaments_completed ({}) should match tuner.tournaments_completed() ({})",
+            snap.tournaments_completed,
+            tuner.tournaments_completed()
         );
     }
 }
