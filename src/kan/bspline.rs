@@ -264,7 +264,7 @@ mod tests {
             let (span, bases) = evaluate_basis(x, &grid, g, k);
             assert!(span >= k, "span {} below k={} at x={}", span, k, x);
             assert!(
-                span <= g + k - 1,
+                span < g + k,
                 "span {} above g+k-1={} at x={}",
                 span,
                 g + k - 1,
