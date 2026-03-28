@@ -196,12 +196,7 @@ impl KANLayer {
     /// Sparse update: only `k+1` coefficients per edge are touched per step.
     /// Gradients are clipped to `[-1e3, 1e3]` for numerical stability in
     /// multi-layer stacks.
-    pub fn backward(
-        &mut self,
-        input: &[f64],
-        output_grad: &[f64],
-        lr: f64,
-    ) -> Vec<f64> {
+    pub fn backward(&mut self, input: &[f64], output_grad: &[f64], lr: f64) -> Vec<f64> {
         debug_assert_eq!(input.len(), self.n_in, "input length mismatch");
         debug_assert_eq!(output_grad.len(), self.n_out, "output_grad length mismatch");
 
@@ -231,9 +226,7 @@ impl KANLayer {
                 // Compute spline_val and spline_deriv for gradient computation
                 let mut spline_val = 0.0;
                 let mut spline_deriv = 0.0;
-                for (b, (&basis_val, &deriv_val)) in
-                    bases.iter().zip(derivs.iter()).enumerate()
-                {
+                for (b, (&basis_val, &deriv_val)) in bases.iter().zip(derivs.iter()).enumerate() {
                     let coeff_idx = basis_start + b;
                     if coeff_idx < self.n_coeffs {
                         let c = self.coefficients[coeff_base + coeff_idx];
@@ -262,8 +255,7 @@ impl KANLayer {
 
                 // --- Input gradient ---
                 // dφ/dx = w_b * SiLU'(x) + w_s * Σ c_g * B'_g(x)
-                let dphi_dx =
-                    self.w_b[edge] * silu_derivative(x) + self.w_s[edge] * spline_deriv;
+                let dphi_dx = self.w_b[edge] * silu_derivative(x) + self.w_s[edge] * spline_deriv;
                 input_grad[i] += delta_j * dphi_dx;
             }
         }
@@ -343,12 +335,7 @@ mod tests {
         let input = vec![0.1, -0.5, 0.3, 0.8];
         let output = layer.forward(&input);
         for (idx, &val) in output.iter().enumerate() {
-            assert!(
-                val.is_finite(),
-                "output[{}] is not finite: {}",
-                idx,
-                val
-            );
+            assert!(val.is_finite(), "output[{}] is not finite: {}", idx, val);
         }
     }
 
@@ -409,10 +396,7 @@ mod tests {
             k + 1
         );
         // Should also have changed at least some
-        assert!(
-            changed > 0,
-            "no coefficients changed — sparsity check moot"
-        );
+        assert!(changed > 0, "no coefficients changed — sparsity check moot");
     }
 
     #[test]
