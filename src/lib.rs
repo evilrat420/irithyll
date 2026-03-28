@@ -87,6 +87,7 @@ pub mod sample;
 pub mod drift;
 pub mod ensemble;
 pub mod histogram;
+pub mod kan;
 pub mod loss;
 pub mod metrics;
 pub mod moe;
@@ -230,6 +231,9 @@ pub use snn::{SpikeNet, SpikeNetConfig, SpikeNetConfigBuilder, SpikePreprocessor
 
 // Re-exports -- test-time training
 pub use ttt::{StreamingTTT, TTTConfig, TTTConfigBuilder};
+
+// Re-exports -- Kolmogorov-Arnold Networks
+pub use kan::{KANConfig, KANConfigBuilder, StreamingKAN};
 
 // Re-exports -- streaming linear attention
 pub use attention::{
@@ -663,6 +667,25 @@ pub fn streaming_ttt(d_model: usize, eta: f64) -> ttt::StreamingTTT {
             .eta(eta)
             .build()
             .expect("streaming_ttt() factory: invalid parameters"),
+    )
+}
+
+/// Create a streaming KAN with the given layer sizes and learning rate.
+///
+/// ```no_run
+/// use irithyll::{streaming_kan, StreamingLearner};
+///
+/// let mut model = streaming_kan(&[3, 10, 1], 0.01);
+/// model.train(&[1.0, 2.0, 3.0], 4.0);
+/// let pred = model.predict(&[1.0, 2.0, 3.0]);
+/// ```
+pub fn streaming_kan(layer_sizes: &[usize], lr: f64) -> kan::StreamingKAN {
+    kan::StreamingKAN::new(
+        kan::KANConfig::builder()
+            .layer_sizes(layer_sizes.to_vec())
+            .lr(lr)
+            .build()
+            .expect("streaming_kan() factory: invalid layer sizes"),
     )
 }
 
