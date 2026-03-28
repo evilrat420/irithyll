@@ -262,13 +262,7 @@ mod tests {
         let boundary_points = [-1.0, 1.0, -2.0, 2.0, -1.0001, 1.0001];
         for &x in &boundary_points {
             let (span, bases) = evaluate_basis(x, &grid, g, k);
-            assert!(
-                span >= k,
-                "span {} below k={} at x={}",
-                span,
-                k,
-                x
-            );
+            assert!(span >= k, "span {} below k={} at x={}", span, k, x);
             assert!(
                 span <= g + k - 1,
                 "span {} above g+k-1={} at x={}",
