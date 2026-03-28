@@ -180,6 +180,19 @@ impl StreamingLearner for StreamingAttentionModel {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for StreamingAttentionModel {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: (self.config.d_model * self.config.n_heads) as f64,
+            ..Default::default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -273,6 +273,20 @@ impl StreamingLearner for SpikeNet {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for SpikeNet {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        // Weight matrix size: n_hidden * n_hidden (recurrent) is the dominant DOF.
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: (self.config.n_hidden * self.config.n_hidden) as f64,
+            ..Default::default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

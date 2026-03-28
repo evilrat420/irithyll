@@ -279,6 +279,16 @@ impl fmt::Debug for Pipeline {
 use std::fmt;
 
 // ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for Pipeline {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

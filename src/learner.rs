@@ -219,6 +219,19 @@ impl<L: Loss> fmt::Debug for SGBTLearner<L> {
 }
 
 // ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl<L: Loss> crate::automl::DiagnosticSource for SGBTLearner<L> {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: self.inner.n_steps() as f64,
+            ..Default::default()
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

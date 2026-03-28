@@ -710,6 +710,16 @@ impl StreamingLearner for SNARIMAX {
 }
 
 // ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for SNARIMAX {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

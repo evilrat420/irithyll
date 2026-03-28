@@ -18,11 +18,16 @@
 //! - Qi et al. (2023) "Discounted Thompson Sampling" -- non-stationary bandit selection
 //! - Wilson et al. (2026) "SUHEN" IEEE TAI -- successive halving for streaming
 
+pub mod auto_builder;
 mod auto_tuner;
 mod config_space;
 mod factories;
 mod reward;
 
+pub use auto_builder::{
+    ConfigBounds, ConfigDiagnostics, DiagnosticAdaptor, FeasibleRegion, RaceResults,
+    SmoothAdjustments, StructuralChange, WelfordRace, WelfordStats,
+};
 pub use auto_tuner::{
     AutoTuner, AutoTunerBuilder, AutoTunerConfig, AutoTunerSnapshot, CandidateSnapshot,
 };
@@ -42,6 +47,16 @@ pub enum AutoMetric {
     MSE,
     /// Root Mean Squared Error (lower is better).
     RMSE,
+}
+
+/// Trait for models that can provide diagnostic signals for the auto-builder.
+///
+/// Models implementing this trait get full auto-builder benefit:
+/// streaming config adaptation based on model internals. Models that
+/// don't implement it still get FeasibleRegion + WelfordRace.
+pub trait DiagnosticSource {
+    /// Return config diagnostics, or `None` if not supported.
+    fn config_diagnostics(&self) -> Option<auto_builder::ConfigDiagnostics>;
 }
 
 /// Factory for creating streaming learner instances from hyperparameter configurations.

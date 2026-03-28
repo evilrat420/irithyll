@@ -237,6 +237,16 @@ impl fmt::Debug for StackedEnsemble {
 }
 
 // ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for StackedEnsemble {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

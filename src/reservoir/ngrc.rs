@@ -233,6 +233,22 @@ impl fmt::Debug for NextGenRC {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for NextGenRC {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        // Effective DOF is the RLS weight dimension (polynomial feature count).
+        // Before first sample, weights are empty -- fall back to 0.
+        let dof = self.rls.weights().len() as f64;
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: dof,
+            ..Default::default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

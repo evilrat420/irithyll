@@ -422,6 +422,16 @@ impl StreamingLearner for HoltWinters {
 }
 
 // ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for HoltWinters {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

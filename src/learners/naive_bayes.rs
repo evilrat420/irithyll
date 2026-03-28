@@ -388,6 +388,16 @@ fn log_sum_exp_normalize(log_probs: &[f64]) -> Vec<f64> {
 }
 
 // ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for GaussianNB {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

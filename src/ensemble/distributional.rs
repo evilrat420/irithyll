@@ -1823,6 +1823,22 @@ impl StreamingLearner for DistributionalSGBT {
 }
 
 // ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for DistributionalSGBT {
+    fn config_diagnostics(&self) -> Option<crate::automl::auto_builder::ConfigDiagnostics> {
+        Some(crate::automl::auto_builder::ConfigDiagnostics {
+            residual_alignment: 0.0, // TODO: implement from tree residual tracking
+            regularization_sensitivity: 0.0, // TODO: from G/(H+lambda)^2 across leaves
+            depth_sufficiency: 0.0,  // TODO: from within/between leaf variance
+            effective_dof: self.n_steps() as f64, // approximate: n_steps as DOF
+            uncertainty: self.rolling_honest_sigma_mean(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2766,6 +2782,37 @@ mod tests {
             pred.sigma.is_finite() && pred.sigma > 0.0,
             "proactive_prune distributional: sigma should be finite and positive, got {}",
             pred.sigma
+        );
+    }
+
+    /// Verify DistributionalSGBT implements DiagnosticSource and returns Some.
+    #[test]
+    fn diagnostic_source_impl() {
+        use crate::automl::DiagnosticSource;
+
+        let mut model = DistributionalSGBT::new(test_config());
+
+        for i in 0..200 {
+            let x = (i as f64) * 0.1;
+            model.train_one(&(vec![x, x * 0.3], x.sin()));
+        }
+
+        let diag = model.config_diagnostics();
+        assert!(
+            diag.is_some(),
+            "config_diagnostics should return Some after training"
+        );
+        let diag = diag.unwrap();
+
+        assert!(
+            diag.effective_dof > 0.0,
+            "effective_dof should be > 0, got {}",
+            diag.effective_dof
+        );
+        assert!(
+            diag.uncertainty.is_finite(),
+            "uncertainty should be finite, got {}",
+            diag.uncertainty
         );
     }
 }

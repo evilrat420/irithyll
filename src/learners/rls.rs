@@ -749,6 +749,33 @@ impl fmt::Debug for LocallyWeightedRegression {
 }
 
 // ===========================================================================
+// DiagnosticSource impls
+// ===========================================================================
+
+impl crate::automl::DiagnosticSource for RecursiveLeastSquares {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        Some(crate::automl::ConfigDiagnostics {
+            // Dimension not known until first sample.
+            effective_dof: self.weights().len() as f64,
+            regularization_sensitivity: 1.0 - self.forgetting_factor(),
+            ..Default::default()
+        })
+    }
+}
+
+impl crate::automl::DiagnosticSource for StreamingPolynomialRegression {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        None
+    }
+}
+
+impl crate::automl::DiagnosticSource for LocallyWeightedRegression {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        None
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

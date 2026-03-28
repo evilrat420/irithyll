@@ -775,6 +775,32 @@ impl StreamingLearner for MoEDistributionalSGBT {
 }
 
 // ===========================================================================
+// DiagnosticSource impl
+// ===========================================================================
+
+impl crate::automl::DiagnosticSource for MoEDistributionalSGBT {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        let total_steps: usize = self.experts().iter().map(|e| e.n_steps()).sum();
+        let n = self.n_experts();
+        // Weighted honest_sigma: average across expert honest_sigma means.
+        let avg_honest_sigma = if n > 0 {
+            self.experts()
+                .iter()
+                .map(|e| e.rolling_honest_sigma_mean())
+                .sum::<f64>()
+                / n as f64
+        } else {
+            0.0
+        };
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: total_steps as f64,
+            uncertainty: avg_honest_sigma,
+            ..Default::default()
+        })
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

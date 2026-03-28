@@ -251,6 +251,9 @@ pub use automl::{
     Algorithm, AttentionFactory, EsnFactory, Factory, MambaFactory, SgbtFactory, SpikeNetFactory,
 };
 pub use automl::{AutoMetric, AutoTuner, AutoTunerBuilder, AutoTunerConfig, ModelFactory};
+pub use automl::{
+    ConfigDiagnostics, DiagnosticAdaptor, DiagnosticSource, FeasibleRegion, WelfordRace,
+};
 pub use automl::{ConfigSampler, ConfigSpace, HyperConfig, HyperParam, RewardNormalizer};
 
 // ---------------------------------------------------------------------------

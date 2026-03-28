@@ -223,6 +223,19 @@ impl fmt::Debug for EchoStateNetwork {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for EchoStateNetwork {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: self.config.n_reservoir as f64,
+            ..Default::default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

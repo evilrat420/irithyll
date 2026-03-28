@@ -289,6 +289,17 @@ pub fn continual(learner: impl StreamingLearner + 'static) -> ContinualLearner {
 }
 
 // ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for ContinualLearner {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        // Cannot access inner learner diagnostics through Box<dyn StreamingLearner>.
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

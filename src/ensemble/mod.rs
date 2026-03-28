@@ -1254,6 +1254,19 @@ pub(crate) fn rebuild_tree(
     )
 }
 
+// ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl<L: Loss> crate::automl::DiagnosticSource for SGBT<L> {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: self.n_steps() as f64,
+            ..Default::default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

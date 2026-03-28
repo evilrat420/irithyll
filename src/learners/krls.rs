@@ -498,6 +498,19 @@ impl fmt::Debug for KRLS {
 }
 
 // ===========================================================================
+// DiagnosticSource impl
+// ===========================================================================
+
+impl crate::automl::DiagnosticSource for KRLS {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: self.dict_size() as f64,
+            ..Default::default()
+        })
+    }
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

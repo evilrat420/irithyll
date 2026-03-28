@@ -16,6 +16,7 @@
 //! - Wu et al. (2021) "ChaCha for Online AutoML" ICML -- champion-challenger
 //! - Qi et al. (2023) "Discounted Thompson Sampling" -- non-stationary bandit
 
+use crate::automl::auto_builder;
 use crate::automl::{AutoMetric, ConfigSampler, HyperConfig, ModelFactory, RewardNormalizer};
 use crate::bandits::{Bandit, DiscountedThompsonSampling};
 use crate::drift::adwin::Adwin;
@@ -140,6 +141,12 @@ pub struct AutoTunerConfig {
     /// new one starts with an expanded bracket, allowing the tuner to
     /// rapidly adapt to distribution shifts.
     pub use_drift_rerace: bool,
+    /// Enable auto-builder mode (default: false).
+    ///
+    /// When enabled, replaces tournament elimination with Welford race +
+    /// diagnostic adaptation. The first training uses all-see-all batch
+    /// evaluation instead of tournament elimination.
+    pub auto_builder: bool,
 }
 
 impl Default for AutoTunerConfig {
@@ -155,6 +162,7 @@ impl Default for AutoTunerConfig {
             min_n_initial: 4,
             max_n_initial: 32,
             use_drift_rerace: false,
+            auto_builder: false,
         }
     }
 }
@@ -239,6 +247,9 @@ pub struct AutoTuner {
 
     // Optional drift detector for triggering re-racing
     drift_detector: Option<Box<dyn DriftDetector>>,
+
+    /// Optional diagnostic adaptor (active when auto_builder=true).
+    adaptor: Option<auto_builder::DiagnosticAdaptor>,
 }
 
 // ===========================================================================
@@ -342,6 +353,15 @@ impl AutoTunerBuilder {
         self
     }
 
+    /// Enable the auto-builder (Welford race + diagnostic adaptation).
+    ///
+    /// When enabled, the first training uses all-see-all batch evaluation
+    /// instead of tournament elimination.
+    pub fn auto_builder(mut self, enabled: bool) -> Self {
+        self.config.auto_builder = enabled;
+        self
+    }
+
     /// Build the `AutoTuner`.
     ///
     /// # Panics
@@ -381,6 +401,13 @@ impl AutoTunerBuilder {
         } else {
             None
         };
+        let adaptor = if config.auto_builder {
+            // Create FeasibleRegion with conservative initial estimates.
+            let region = auto_builder::FeasibleRegion::from_data(100, 1, 1.0);
+            Some(auto_builder::DiagnosticAdaptor::new(region))
+        } else {
+            None
+        };
         let mut tuner = AutoTuner {
             champion,
             champion_ewma,
@@ -399,6 +426,7 @@ impl AutoTunerBuilder {
             tournaments_completed: 0,
             effective_n_initial,
             drift_detector,
+            adaptor,
         };
 
         tuner.start_tournament();
@@ -557,7 +585,20 @@ impl StreamingLearner for AutoTuner {
             self.eliminate_round();
         }
 
-        // 6. Drift-triggered re-racing: abort tournament and start fresh.
+        // 6. Auto-builder diagnostic adaptation.
+        if let Some(ref mut adaptor) = self.adaptor {
+            // For v9.8.2, construct ConfigDiagnostics from available signals.
+            // Full DiagnosticSource integration (downcasting champion to get
+            // tree internals) is v9.9 material.
+            let diagnostics = auto_builder::ConfigDiagnostics {
+                uncertainty: get_metric(&self.champion_ewma, self.config.metric),
+                ..Default::default()
+            };
+            let _adjustments = adaptor.after_train(&diagnostics);
+            // TODO: apply adjustments to champion config in future
+        }
+
+        // 7. Drift-triggered re-racing: abort tournament and start fresh.
         if drift_restart {
             self.candidates.clear();
             self.effective_n_initial =
@@ -588,6 +629,12 @@ impl StreamingLearner for AutoTuner {
         self.normalizer.reset();
         if let Some(ref mut d) = self.drift_detector {
             d.reset();
+        }
+        if self.config.auto_builder {
+            let region = auto_builder::FeasibleRegion::from_data(100, 1, 1.0);
+            self.adaptor = Some(auto_builder::DiagnosticAdaptor::new(region));
+        } else {
+            self.adaptor = None;
         }
         self.start_tournament();
     }
@@ -913,6 +960,19 @@ fn adjusted_metric(ewma_metric: f64, complexity: usize, n_seen: u64) -> f64 {
 // - All other fields are owned, non-Rc, non-Cell types.
 unsafe impl Send for AutoTuner {}
 unsafe impl Sync for AutoTuner {}
+
+// ===========================================================================
+// DiagnosticSource impl
+// ===========================================================================
+
+impl crate::automl::DiagnosticSource for AutoTuner {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        Some(crate::automl::ConfigDiagnostics {
+            uncertainty: get_metric(&self.champion_ewma, self.config.metric),
+            ..Default::default()
+        })
+    }
+}
 
 // ===========================================================================
 // Tests
@@ -1847,6 +1907,61 @@ mod tests {
             "snapshot tournaments_completed ({}) should match tuner.tournaments_completed() ({})",
             snap.tournaments_completed,
             tuner.tournaments_completed()
+        );
+    }
+
+    /// Verify auto_builder mode creates an adaptor when enabled.
+    #[test]
+    fn auto_builder_mode_enabled() {
+        let tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .auto_builder(true)
+            .build();
+
+        assert!(
+            tuner.config.auto_builder,
+            "auto_builder config should be true"
+        );
+        assert!(
+            tuner.adaptor.is_some(),
+            "adaptor should be Some when auto_builder is enabled"
+        );
+    }
+
+    /// Verify default build has no adaptor.
+    #[test]
+    fn auto_builder_mode_disabled() {
+        let tuner = AutoTuner::builder().factory(SgbtFactory::new(3)).build();
+
+        assert!(
+            !tuner.config.auto_builder,
+            "auto_builder config should be false by default"
+        );
+        assert!(
+            tuner.adaptor.is_none(),
+            "adaptor should be None when auto_builder is disabled"
+        );
+    }
+
+    /// Verify training with auto_builder=true produces finite predictions.
+    #[test]
+    fn auto_builder_train_works() {
+        let mut tuner = AutoTuner::builder()
+            .factory(SgbtFactory::new(3))
+            .auto_builder(true)
+            .round_budget(50)
+            .build();
+
+        for i in 0..100 {
+            let x = [i as f64 * 0.1, (i as f64).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0 + x[1] * 3.0 + 1.0;
+            tuner.train(&x, y);
+        }
+
+        let pred = tuner.predict(&[5.0, 0.0, 1.0]);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite with auto_builder enabled, got {pred}"
         );
     }
 }

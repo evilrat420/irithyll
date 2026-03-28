@@ -405,6 +405,22 @@ impl StreamingLearner for BernoulliNB {
 }
 
 // ---------------------------------------------------------------------------
+// DiagnosticSource impls
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for MultinomialNB {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        None
+    }
+}
+
+impl crate::automl::DiagnosticSource for BernoulliNB {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

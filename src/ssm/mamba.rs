@@ -158,6 +158,21 @@ impl StreamingLearner for StreamingMamba {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for StreamingMamba {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: (self.config.d_in * self.config.n_state) as f64,
+            // Higher forgetting factor = less regularization pressure.
+            regularization_sensitivity: 1.0 - self.config.forgetting_factor,
+            ..Default::default()
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -348,6 +348,22 @@ impl std::fmt::Debug for StreamingTTT {
 }
 
 // ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for StreamingTTT {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        Some(crate::automl::ConfigDiagnostics {
+            // Fast weight matrix size: d_model * d_model per head.
+            effective_dof: (self.config.d_model * self.config.d_model) as f64,
+            // Weight decay alpha = regularization strength.
+            regularization_sensitivity: self.config.alpha,
+            ..Default::default()
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

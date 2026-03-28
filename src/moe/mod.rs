@@ -382,6 +382,20 @@ impl NeuralMoE {
 }
 
 // ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for NeuralMoE {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        // Rough approximation: ~100 DOF per expert.
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: self.n_experts() as f64 * 100.0,
+            ..Default::default()
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
