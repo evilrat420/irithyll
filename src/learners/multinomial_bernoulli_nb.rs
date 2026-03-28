@@ -41,6 +41,7 @@ use crate::learner::StreamingLearner;
 /// assert_eq!(nb.predict_class(&[4.0, 2.0, 0.0, 0.0]), 0);
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde-json", derive(serde::Serialize, serde::Deserialize))]
 pub struct MultinomialNB {
     /// Laplace smoothing parameter.
     alpha: f64,

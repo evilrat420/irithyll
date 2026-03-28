@@ -45,6 +45,10 @@ pub enum ModelType {
     Hawk,
     /// Retentive Network (simplest, fixed decay).
     RetNet,
+    /// Streaming TTT (test-time training with fast weights).
+    Ttt,
+    /// Streaming KAN (B-spline edge activations).
+    Kan,
 }
 
 impl ModelType {
@@ -62,8 +66,10 @@ impl ModelType {
             "deltanet" => Ok(ModelType::DeltaNet),
             "hawk" => Ok(ModelType::Hawk),
             "retnet" => Ok(ModelType::RetNet),
+            "ttt" => Ok(ModelType::Ttt),
+            "kan" => Ok(ModelType::Kan),
             _ => Err(eyre!(
-                "unknown model type '{}'. supported: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet, gla, deltanet, hawk, retnet",
+                "unknown model type '{}'. supported: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet, gla, deltanet, hawk, retnet, ttt, kan",
                 s
             )),
         }
@@ -99,7 +105,7 @@ pub struct TrainArgs {
     #[arg(long)]
     pub max_depth: Option<usize>,
 
-    /// Model type: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet, gla, deltanet, hawk, retnet
+    /// Model type: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet, gla, deltanet, hawk, retnet, ttt, kan
     #[arg(long, default_value = "sgbt")]
     pub model_type: String,
 
@@ -157,6 +163,8 @@ pub fn run(args: TrainArgs) -> Result<()> {
         ModelType::DeltaNet => run_deltanet(&dataset, &cli_config),
         ModelType::Hawk => run_hawk(&dataset, &cli_config),
         ModelType::RetNet => run_retnet(&dataset, &cli_config),
+        ModelType::Ttt => run_ttt(&cli_config, dataset),
+        ModelType::Kan => run_kan(&cli_config, dataset),
     }
 }
 
@@ -751,6 +759,44 @@ fn run_retnet(dataset: &Dataset, config: &CliConfig) -> Result<()> {
     );
 
     run_neural_headless(&mut model, dataset, "retnet")
+}
+
+// ---------------------------------------------------------------------------
+// TTT (Test-Time Training)
+// ---------------------------------------------------------------------------
+
+fn run_ttt(cli_config: &CliConfig, dataset: Dataset) -> Result<()> {
+    let tc = &cli_config.neural.ttt;
+    let d_model = tc.d_model.unwrap_or(32);
+    let eta = tc.eta.unwrap_or(0.01);
+
+    let mut model = irithyll::streaming_ttt(d_model, eta);
+
+    println!(
+        "Loaded {} samples, {} features (ttt, d_model={}, eta={})",
+        dataset.n_samples, dataset.n_features, d_model, eta,
+    );
+
+    run_neural_headless(&mut model, &dataset, "ttt")
+}
+
+// ---------------------------------------------------------------------------
+// KAN (Kolmogorov-Arnold Network)
+// ---------------------------------------------------------------------------
+
+fn run_kan(cli_config: &CliConfig, dataset: Dataset) -> Result<()> {
+    let kc = &cli_config.neural.kan;
+    let hidden = kc.hidden_size.unwrap_or(10);
+    let lr = kc.lr.unwrap_or(0.01);
+
+    let mut model = irithyll::streaming_kan(&[dataset.n_features, hidden, 1], lr);
+
+    println!(
+        "Loaded {} samples, {} features (kan, hidden={}, lr={})",
+        dataset.n_samples, dataset.n_features, hidden, lr,
+    );
+
+    run_neural_headless(&mut model, &dataset, "kan")
 }
 
 // ---------------------------------------------------------------------------

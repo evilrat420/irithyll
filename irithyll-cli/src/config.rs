@@ -103,6 +103,10 @@ pub struct NeuralConfig {
     pub spikenet: SpikeNetModelConfig,
     #[serde(default)]
     pub attention: AttentionModelConfig,
+    #[serde(default)]
+    pub ttt: TttModelConfig,
+    #[serde(default)]
+    pub kan: KanModelConfig,
 }
 
 /// `[neural.esn]` -- Echo State Network hyperparameters.
@@ -289,6 +293,20 @@ fn default_attention_warmup() -> usize {
 }
 fn default_attention_gamma() -> f64 {
     0.99
+}
+
+/// `[neural.ttt]` -- Streaming TTT (Test-Time Training) hyperparameters.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct TttModelConfig {
+    pub d_model: Option<usize>,
+    pub eta: Option<f64>,
+}
+
+/// `[neural.kan]` -- Streaming KAN (Kolmogorov-Arnold Network) hyperparameters.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct KanModelConfig {
+    pub hidden_size: Option<usize>,
+    pub lr: Option<f64>,
 }
 
 // Defaults

@@ -66,6 +66,7 @@ const SIGN_SEED: u64 = 0x6c62272e07bb0142; // different constant
 /// [`transform`](StreamingPreprocessor::transform) behave identically, and
 /// [`reset`](StreamingPreprocessor::reset) is a no-op.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde-json", derive(serde::Serialize, serde::Deserialize))]
 pub struct FeatureHasher {
     /// Number of output buckets (output dimensionality).
     n_buckets: usize,

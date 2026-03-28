@@ -37,6 +37,7 @@
 /// [`update`](Self::update), matching the pattern of
 /// [`IncrementalNormalizer`](crate::preprocessing::IncrementalNormalizer).
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde-json", derive(serde::Serialize, serde::Deserialize))]
 pub struct CCIPCA {
     /// Number of principal components to estimate (k).
     n_components: usize,

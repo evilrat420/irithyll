@@ -51,6 +51,7 @@
 /// From these, the centroid and radius can be recovered in O(d) time without
 /// storing individual points (Aggarwal et al., 2003).
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde-json", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClusterFeature {
     /// Number of points absorbed into this micro-cluster.
     pub n: u64,
@@ -154,6 +155,7 @@ impl ClusterFeature {
 /// Use [`CluStreamConfig::builder`] for ergonomic construction with
 /// validation.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde-json", derive(serde::Serialize, serde::Deserialize))]
 pub struct CluStreamConfig {
     /// Maximum number of micro-clusters to maintain in the online phase.
     pub max_micro_clusters: usize,
@@ -258,6 +260,7 @@ impl CluStreamConfigBuilder {
 /// assert!(cluster < cs.n_micro_clusters());
 /// ```
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde-json", derive(serde::Serialize, serde::Deserialize))]
 pub struct CluStream {
     config: CluStreamConfig,
     micro_clusters: Vec<ClusterFeature>,

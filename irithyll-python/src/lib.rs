@@ -1781,6 +1781,352 @@ impl PyConformalPID {
 }
 
 // ---------------------------------------------------------------------------
+// StreamingTTT (Test-Time Training)
+// ---------------------------------------------------------------------------
+
+/// Streaming Test-Time Training model.
+///
+/// Self-supervised online adaptation: the model updates an internal linear
+/// layer at every timestep using a self-supervised reconstruction loss,
+/// producing input-dependent predictions without stored context.
+///
+/// Example::
+///
+///     model = StreamingTTT(d_model=16, eta=0.01)
+///     model.train([1.0] * 16, 5.0)
+///     pred = model.predict([1.0] * 16)
+///
+#[pyclass(name = "StreamingTTT")]
+struct PyStreamingTTT {
+    inner: irithyll::ttt::StreamingTTT,
+}
+
+#[pymethods]
+impl PyStreamingTTT {
+    #[new]
+    #[pyo3(signature = (d_model=32, eta=0.01, alpha=0.0, momentum=0.0, warmup=10))]
+    fn new(d_model: usize, eta: f64, alpha: f64, momentum: f64, warmup: usize) -> PyResult<Self> {
+        let config = irithyll::ttt::TTTConfig::builder()
+            .d_model(d_model)
+            .eta(eta)
+            .alpha(alpha)
+            .momentum(momentum)
+            .warmup(warmup)
+            .build()
+            .map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        Ok(Self {
+            inner: irithyll::ttt::StreamingTTT::new(config),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!("StreamingTTT(samples={})", self.inner.n_samples_seen())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StreamingKAN (Kolmogorov-Arnold Network)
+// ---------------------------------------------------------------------------
+
+/// Streaming Kolmogorov-Arnold Network.
+///
+/// Replaces fixed activation functions with learnable B-spline edges.
+/// Trains online via per-sample gradient descent on spline coefficients.
+///
+/// Example::
+///
+///     model = StreamingKAN(layer_sizes=[4, 8, 1], lr=0.01)
+///     model.train([1.0, 2.0, 3.0, 4.0], 5.0)
+///     pred = model.predict([1.0, 2.0, 3.0, 4.0])
+///
+#[pyclass(name = "StreamingKAN")]
+struct PyStreamingKAN {
+    inner: irithyll::kan::StreamingKAN,
+}
+
+#[pymethods]
+impl PyStreamingKAN {
+    #[new]
+    #[pyo3(signature = (layer_sizes, lr=0.01, grid_size=5, spline_order=3))]
+    fn new(
+        layer_sizes: Vec<usize>,
+        lr: f64,
+        grid_size: usize,
+        spline_order: usize,
+    ) -> PyResult<Self> {
+        let config = irithyll::kan::KANConfig::builder()
+            .layer_sizes(layer_sizes)
+            .lr(lr)
+            .grid_size(grid_size)
+            .spline_order(spline_order)
+            .build()
+            .map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        Ok(Self {
+            inner: irithyll::kan::StreamingKAN::new(config),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Total number of learnable parameters (B-spline coefficients).
+    fn n_params(&self) -> usize {
+        self.inner.n_params()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!(
+            "StreamingKAN(params={}, samples={})",
+            self.inner.n_params(),
+            self.inner.n_samples_seen()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NeuralMoE (Neural Mixture of Experts)
+// ---------------------------------------------------------------------------
+
+/// Neural Mixture of Experts with softmax gating.
+///
+/// Routes each sample to the top-k experts via a learned gating network.
+/// Python binding creates homogeneous SGBT experts; for heterogeneous
+/// expert compositions use the Rust API directly.
+///
+/// Example::
+///
+///     model = NeuralMoE(n_experts=4, n_steps=50, top_k=2)
+///     model.train([1.0, 2.0], 3.0)
+///     pred = model.predict([1.0, 2.0])
+///     print(model.utilization())
+///
+#[pyclass(name = "NeuralMoE")]
+struct PyNeuralMoE {
+    inner: irithyll::moe::NeuralMoE,
+}
+
+#[pymethods]
+impl PyNeuralMoE {
+    /// Create a NeuralMoE with n_experts SGBT experts.
+    ///
+    /// For heterogeneous experts, use the Rust API directly.
+    #[new]
+    #[pyo3(signature = (n_experts=4, n_steps=50, learning_rate=0.01, top_k=2))]
+    fn new(n_experts: usize, n_steps: usize, learning_rate: f64, top_k: usize) -> PyResult<Self> {
+        if n_experts < 2 {
+            return Err(PyValueError::new_err(
+                "NeuralMoE requires at least 2 experts",
+            ));
+        }
+        let mut builder = irithyll::moe::NeuralMoE::builder().top_k(top_k);
+        for _ in 0..n_experts {
+            builder = builder.expert(irithyll::sgbt(n_steps, learning_rate));
+        }
+        Ok(Self {
+            inner: builder.build(),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Number of experts.
+    fn n_experts(&self) -> usize {
+        self.inner.n_experts()
+    }
+
+    /// Per-expert utilization (EWMA of routing probability).
+    fn utilization(&self) -> Vec<f64> {
+        self.inner.utilization()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!(
+            "NeuralMoE(experts={}, samples={})",
+            self.inner.n_experts(),
+            self.inner.n_samples_seen()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AutoTuner
+// ---------------------------------------------------------------------------
+
+/// Automatic hyperparameter tuner using champion-challenger tournaments.
+///
+/// Wraps a streaming learner factory, continuously racing candidate
+/// configurations against the current champion. When a challenger
+/// outperforms the champion, it is promoted.
+///
+/// Supported algorithms: ``"sgbt"``, ``"distributional"``, ``"esn"``,
+/// ``"mamba"``, ``"kan"``, ``"ttt"``, ``"spikenet"``, ``"attention"``.
+///
+/// Example::
+///
+///     tuner = AutoTuner(n_features=4, algorithm="sgbt")
+///     tuner.train([1.0, 2.0, 3.0, 4.0], 5.0)
+///     pred = tuner.predict([1.0, 2.0, 3.0, 4.0])
+///     print(tuner.promotions(), tuner.tournaments_completed())
+///
+#[pyclass(name = "AutoTuner")]
+struct PyAutoTuner {
+    inner: irithyll::automl::AutoTuner,
+}
+
+#[pymethods]
+impl PyAutoTuner {
+    /// Create an AutoTuner that auto-tunes hyperparameters for the given algorithm.
+    #[new]
+    #[pyo3(signature = (n_features, algorithm="sgbt", n_initial=8, round_budget=100))]
+    fn new(
+        n_features: usize,
+        algorithm: &str,
+        n_initial: usize,
+        round_budget: usize,
+    ) -> PyResult<Self> {
+        let factory = match algorithm {
+            "sgbt" => irithyll::automl::Factory::sgbt(n_features),
+            "distributional" => irithyll::automl::Factory::distributional(n_features),
+            "esn" => irithyll::automl::Factory::esn(),
+            "mamba" => irithyll::automl::Factory::mamba(n_features),
+            "kan" => irithyll::automl::Factory::kan(n_features),
+            "ttt" => irithyll::automl::Factory::ttt(n_features),
+            "spikenet" | "spike_net" => irithyll::automl::Factory::spike_net(),
+            "attention" => irithyll::automl::Factory::attention(n_features),
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown algorithm: {algorithm}"
+                )));
+            }
+        };
+        let tuner = irithyll::automl::AutoTuner::builder()
+            .factory(factory)
+            .n_initial(n_initial)
+            .round_budget(round_budget)
+            .build();
+        Ok(Self { inner: tuner })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Number of times a challenger was promoted to champion.
+    fn promotions(&self) -> u64 {
+        self.inner.promotions()
+    }
+
+    /// Number of tournaments fully completed.
+    fn tournaments_completed(&self) -> u64 {
+        self.inner.tournaments_completed()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!(
+            "AutoTuner(samples={}, promotions={}, tournaments={})",
+            self.inner.n_samples_seen(),
+            self.inner.promotions(),
+            self.inner.tournaments_completed()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
 
@@ -1801,5 +2147,9 @@ fn irithyll_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGLA>()?;
     m.add_class::<PyContinualLearner>()?;
     m.add_class::<PyConformalPID>()?;
+    m.add_class::<PyStreamingTTT>()?;
+    m.add_class::<PyStreamingKAN>()?;
+    m.add_class::<PyNeuralMoE>()?;
+    m.add_class::<PyAutoTuner>()?;
     Ok(())
 }

@@ -519,6 +519,10 @@ pub enum Algorithm {
     Attention,
     /// Spiking neural network (e-prop learning).
     SpikeNet,
+    /// Streaming KAN (B-spline edge activations).
+    Kan,
+    /// Streaming TTT (test-time training with fast weights).
+    Ttt,
 }
 
 /// Unified model factory for AutoML.
@@ -800,6 +804,87 @@ impl Factory {
         }
     }
 
+    /// Create a factory for streaming KAN.
+    ///
+    /// # Config Space (4 params)
+    /// | Index | Name | Type | Range |
+    /// |-------|------|------|-------|
+    /// | 0 | `hidden_size` | Int | [4, 32] |
+    /// | 1 | `grid_size` | Int | [3, 10] |
+    /// | 2 | `lr` | Float | [0.001, 0.1] log |
+    /// | 3 | `spline_order` | Int | [2, 4] |
+    pub fn kan(n_features: usize) -> Self {
+        let space = ConfigSpace::new()
+            .push(HyperParam::Int {
+                name: "hidden_size",
+                low: 4,
+                high: 32,
+            })
+            .push(HyperParam::Int {
+                name: "grid_size",
+                low: 3,
+                high: 10,
+            })
+            .push(HyperParam::Float {
+                name: "lr",
+                low: 0.001,
+                high: 0.1,
+                log_scale: true,
+            })
+            .push(HyperParam::Int {
+                name: "spline_order",
+                low: 2,
+                high: 4,
+            });
+
+        Self {
+            algorithm: Algorithm::Kan,
+            n_features,
+            space,
+            warmup: 20,
+            complexity: 2000,
+            seed: 42,
+        }
+    }
+
+    /// Create a factory for streaming TTT (test-time training).
+    ///
+    /// # Config Space (3 params)
+    /// | Index | Name | Type | Range |
+    /// |-------|------|------|-------|
+    /// | 0 | `d_model` | Int | [8, 64] |
+    /// | 1 | `eta` | Float | [0.001, 0.1] log |
+    /// | 2 | `alpha` | Float | [0.0, 0.01] linear |
+    pub fn ttt(n_features: usize) -> Self {
+        let space = ConfigSpace::new()
+            .push(HyperParam::Int {
+                name: "d_model",
+                low: 8,
+                high: 64,
+            })
+            .push(HyperParam::Float {
+                name: "eta",
+                low: 0.001,
+                high: 0.1,
+                log_scale: true,
+            })
+            .push(HyperParam::Float {
+                name: "alpha",
+                low: 0.0,
+                high: 0.01,
+                log_scale: false,
+            });
+
+        Self {
+            algorithm: Algorithm::Ttt,
+            n_features,
+            space,
+            warmup: 10,
+            complexity: 3000,
+            seed: 42,
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Builder-style overrides
     // -----------------------------------------------------------------------
@@ -847,6 +932,8 @@ impl ModelFactory for Factory {
             Algorithm::Mamba => "Mamba",
             Algorithm::Attention => "Attention",
             Algorithm::SpikeNet => "SpikeNet",
+            Algorithm::Kan => "KAN",
+            Algorithm::Ttt => "TTT",
         }
     }
 
@@ -970,6 +1057,39 @@ impl ModelFactory for Factory {
                     .expect("Factory::create(SpikeNet): invalid config from search space");
 
                 Box::new(SpikeNet::new(spike_config))
+            }
+            Algorithm::Kan => {
+                let hidden_size = config.get(0) as usize;
+                let grid_size = config.get(1) as usize;
+                let lr = config.get(2);
+                let spline_order = config.get(3) as usize;
+
+                let kan_config = crate::kan::KANConfig::builder()
+                    .layer_sizes(vec![self.n_features, hidden_size, 1])
+                    .grid_size(grid_size)
+                    .lr(lr)
+                    .spline_order(spline_order)
+                    .seed(self.seed)
+                    .build()
+                    .expect("Factory::create(Kan): invalid config");
+
+                Box::new(crate::kan::StreamingKAN::new(kan_config))
+            }
+            Algorithm::Ttt => {
+                let d_model = config.get(0) as usize;
+                let eta = config.get(1);
+                let alpha = config.get(2);
+
+                let ttt_config = crate::ttt::TTTConfig::builder()
+                    .d_model(d_model)
+                    .eta(eta)
+                    .alpha(alpha)
+                    .warmup(self.warmup)
+                    .seed(self.seed)
+                    .build()
+                    .expect("Factory::create(Ttt): invalid config");
+
+                Box::new(crate::ttt::StreamingTTT::new(ttt_config))
             }
         }
     }
@@ -1464,6 +1584,16 @@ mod tests {
             16000,
             "SpikeNet complexity should be 16000"
         );
+        assert_eq!(
+            Factory::kan(3).complexity_hint(),
+            2000,
+            "KAN complexity should be 2000"
+        );
+        assert_eq!(
+            Factory::ttt(3).complexity_hint(),
+            3000,
+            "TTT complexity should be 3000"
+        );
     }
 
     /// Each algorithm returns the expected name.
@@ -1487,6 +1617,8 @@ mod tests {
             "SpikeNet",
             "SpikeNet name mismatch"
         );
+        assert_eq!(Factory::kan(3).name(), "KAN", "KAN name mismatch");
+        assert_eq!(Factory::ttt(3).name(), "TTT", "TTT name mismatch");
     }
 
     /// Factory works as a ModelFactory inside auto_tune().
@@ -1498,6 +1630,139 @@ mod tests {
         assert!(
             pred.is_finite(),
             "auto_tune with unified Factory should produce finite prediction, got {pred}"
+        );
+    }
+
+    /// Factory::kan creates model that trains and predicts finite values.
+    #[test]
+    fn unified_factory_kan() {
+        let factory = Factory::kan(3);
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..50 {
+            let x = [i as f64 * 0.1, (i as f64).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0 + x[1] - x[2];
+            model.train(&x, y);
+        }
+        let pred = model.predict(&[0.5, 0.5_f64.sin(), 0.5_f64.cos()]);
+        assert!(
+            pred.is_finite(),
+            "unified KAN prediction should be finite, got {pred}"
+        );
+    }
+
+    /// Factory::ttt creates model that trains and predicts finite values.
+    #[test]
+    fn unified_factory_ttt() {
+        let factory = Factory::ttt(3);
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..50 {
+            let x = [i as f64 * 0.1, (i as f64).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0 + x[1] - x[2];
+            model.train(&x, y);
+        }
+        let pred = model.predict(&[0.5, 0.5_f64.sin(), 0.5_f64.cos()]);
+        assert!(
+            pred.is_finite(),
+            "unified TTT prediction should be finite, got {pred}"
+        );
+    }
+
+    /// Factory::kan works inside auto_tune().
+    #[test]
+    fn kan_in_auto_tuner() {
+        let mut tuner = crate::auto_tune(Factory::kan(3));
+        for i in 0..200 {
+            let x = [i as f64 * 0.01, (i as f64).sin(), (i as f64).cos()];
+            let y = x[0] * 3.0 + x[1];
+            tuner.train(&x, y);
+        }
+        let pred = tuner.predict(&[0.5, 0.5_f64.sin(), 0.5_f64.cos()]);
+        assert!(
+            pred.is_finite(),
+            "auto_tune with KAN should produce finite prediction, got {pred}"
+        );
+    }
+
+    /// Factory::ttt works inside auto_tune().
+    #[test]
+    fn ttt_in_auto_tuner() {
+        let mut tuner = crate::auto_tune(Factory::ttt(3));
+        for i in 0..200 {
+            let x = [i as f64 * 0.01, (i as f64).sin(), (i as f64).cos()];
+            let y = x[0] * 3.0 + x[1];
+            tuner.train(&x, y);
+        }
+        let pred = tuner.predict(&[0.5, 0.5_f64.sin(), 0.5_f64.cos()]);
+        assert!(
+            pred.is_finite(),
+            "auto_tune with TTT should produce finite prediction, got {pred}"
+        );
+    }
+
+    /// KAN expert works inside NeuralMoE.
+    #[test]
+    fn kan_in_neural_moe() {
+        use crate::kan::{KANConfig, StreamingKAN};
+        use crate::moe::NeuralMoE;
+
+        let kan = StreamingKAN::new(
+            KANConfig::builder()
+                .layer_sizes(vec![3, 8, 1])
+                .lr(0.01)
+                .build()
+                .unwrap(),
+        );
+        let kan2 = StreamingKAN::new(
+            KANConfig::builder()
+                .layer_sizes(vec![3, 12, 1])
+                .lr(0.005)
+                .build()
+                .unwrap(),
+        );
+
+        let mut moe = NeuralMoE::builder()
+            .expert_with_warmup(kan, 20)
+            .expert_with_warmup(kan2, 20)
+            .build();
+
+        for i in 0..100 {
+            let x = [i as f64 * 0.1, (i as f64).sin(), (i as f64).cos()];
+            let y = x[0] * 2.0 + x[1];
+            moe.train(&x, y);
+        }
+        let pred = moe.predict(&[0.5, 0.5_f64.sin(), 0.5_f64.cos()]);
+        assert!(
+            pred.is_finite(),
+            "NeuralMoE with KAN experts should produce finite prediction, got {pred}"
+        );
+    }
+
+    /// Multi-factory racing with SGBT + KAN + TTT.
+    #[test]
+    fn multi_factory_with_kan_ttt() {
+        let mut tuner = crate::automl::AutoTuner::builder()
+            .factory(Factory::sgbt(3))
+            .add_factory(Factory::kan(3))
+            .add_factory(Factory::ttt(3))
+            .build();
+
+        for i in 0..200 {
+            let x = [i as f64 * 0.01, (i as f64).sin(), (i as f64).cos()];
+            let y = x[0] * 3.0 + x[1];
+            tuner.train(&x, y);
+        }
+        let pred = tuner.predict(&[0.5, 0.5_f64.sin(), 0.5_f64.cos()]);
+        assert!(
+            pred.is_finite(),
+            "multi-factory racing (SGBT+KAN+TTT) should produce finite prediction, got {pred}"
         );
     }
 }
