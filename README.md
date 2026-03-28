@@ -45,8 +45,10 @@ irithyll is structured as a Cargo workspace with three crates:
 - **Concept drift adaptation** -- automatic model replacement when the data distribution shifts
 - **Confidence intervals** -- prediction uncertainty from RLS and conformal methods
 - **Production-grade** -- async streaming, SIMD acceleration, Arrow/Parquet I/O, ONNX export
-- **Neural streaming architectures** -- reservoir computing (NG-RC, ESN), state space models (Mamba), spiking neural networks (e-prop)
-- **Streaming AutoML** -- champion-challenger hyperparameter racing with bandit-guided search
+- **Neural streaming architectures** -- reservoir computing, SSMs, SNNs, TTT, KAN, streaming attention (7 modes)
+- **Neural MoE** -- polymorphic experts with top-k routing and load balancing
+- **Streaming AutoML** -- tournament racing, complexity-adjusted elimination, drift re-racing
+- **Principled adaptation** -- honest_sigma, adaptive tree replacement, proactive pruning, soft routing
 - **Pure Rust** -- zero unsafe in `irithyll`, deterministic, serializable, 2,500+ tests
 
 ## Algorithms
@@ -106,19 +108,26 @@ Three families of neural architectures, all implementing `StreamingLearner` -- t
 
 | Model | Description | Per-Sample Cost |
 |-------|-------------|-----------------|
-| [`StreamingTTT`](https://docs.rs/irithyll/latest/irithyll/ttt/struct.StreamingTTT.html) | Hidden state IS a linear model updated by gradient descent on self-supervised reconstruction every step. Titans-style weight decay (forgetting) and momentum for non-stationary streaming. First streaming TTT in any library. Based on Sun et al. 2024, Behrouz et al. 2025. | O(d\_state^2) |
+| [`StreamingTTT`](https://docs.rs/irithyll/latest/irithyll/ttt/struct.StreamingTTT.html) | Hidden state IS a linear model updated by gradient descent on self-supervised reconstruction every step. Titans-style weight decay (forgetting) and momentum for non-stationary streaming. Based on Sun et al. 2024, Behrouz et al. 2025. | O(d\_state^2) |
+
+### Kolmogorov-Arnold Networks (KAN)
+
+| Model | Description | Per-Sample Cost |
+|-------|-------------|-----------------|
+| [`StreamingKAN`](https://docs.rs/irithyll/latest/irithyll/kan/struct.StreamingKAN.html) | Learnable B-spline activations on edges. Sparse updates: only 4 coefficients per edge per sample (cubic splines). Bounded gradients prevent explosion. Based on Liu et al. 2024, Hoang et al. 2026. | O(n\_edges * 4) |
 
 All neural models also have preprocessor variants (`ESNPreprocessor`, `MambaPreprocessor`, `SpikePreprocessor`) that implement `StreamingPreprocessor` for pipeline composition.
 
 ## Principled Streaming Adaptation
 
-Three mechanisms for principled streaming adaptation in gradient boosted ensembles:
+Principled streaming adaptation in gradient boosted ensembles:
 
 | Feature | Description |
 |---------|-------------|
 | `honest_sigma` | Tree contribution variance — instant epistemic uncertainty from ensemble disagreement. Zero hyperparameters, reacts in one sample. |
 | `adaptive_mts` | Sigma-modulated tree replacement speed. High uncertainty → faster cycling. Low uncertainty → more accumulation. |
-| `proactive_prune` | Percentile-based worst-tree replacement. Maintains plasticity by preventing dead-wood accumulation (Dohare+2024 Nature). |
+| `proactive_prune` | Percentile-based worst-tree replacement. Maintains plasticity (Dohare+2024 Nature). |
+| `soft_routing` | Per-node auto-bandwidth soft decision trees. Continuous weighted blends, no step discontinuities. |
 
 ## Streaming AutoML
 
@@ -477,6 +486,7 @@ irithyll/                 Workspace root
     automl/               Champion-challenger racing, config space, model factories, reward normalization
     moe/                  Neural Mixture of Experts (polymorphic experts, top-k routing, load balancing)
     ttt/                  Test-Time Training layers (fast weights, self-supervised reconstruction, Titans)
+    kan/                  Kolmogorov-Arnold Networks (B-spline edge activations, sparse SGD)
     reservoir/            NG-RC (time-delay polynomial) and ESN (cycle reservoir) + preprocessors
     ssm/                  StreamingMamba (selective SSM) + MambaPreprocessor
     snn/                  SpikeNet (f64 wrapper), SpikePreprocessor
@@ -650,6 +660,12 @@ The MSRV is **1.75**. This is checked in CI and will only be raised in minor ver
 > Behrouz, A., Zhong, P., & Mirrokni, V. (2025). *Titans: Learning to memorize at test time.* arXiv preprint arXiv:2501.00663.
 
 > Dohare, S., et al. (2024). *Loss of plasticity in deep continual learning.* Nature, 632, 768-774.
+
+> Liu, Z., et al. (2024). *KAN: Kolmogorov-Arnold Networks.* ICLR 2025.
+
+> Hoang, T. T., et al. (2026). *Ultrafast on-chip online learning via Kolmogorov-Arnold Networks.* arXiv preprint arXiv:2602.02056.
+
+> Yamanishi, K. (2018). *Stochastic complexity for online learning with finite-state models.* IEEE TIT.
 
 ## License
 
