@@ -385,7 +385,10 @@ mod tests {
             display.contains("Ensemble Diagnostics"),
             "display should contain header"
         );
-        assert!(display.contains("Trees:"), "display should contain tree count");
+        assert!(
+            display.contains("Trees:"),
+            "display should contain tree count"
+        );
 
         // TreeDiagnostics display
         if let Some(tree) = diag.trees.first() {
