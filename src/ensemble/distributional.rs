@@ -1507,7 +1507,6 @@ impl DistributionalSGBT {
         &self,
         features: &[f64],
     ) -> crate::ensemble::diagnostics::DistributionalDiagnostics {
-        use crate::ensemble::config::ScaleMode;
         use crate::ensemble::diagnostics::build_ensemble_diagnostics;
 
         let location = build_ensemble_diagnostics(
