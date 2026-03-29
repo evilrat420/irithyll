@@ -758,6 +758,8 @@ impl crate::automl::DiagnosticSource for RecursiveLeastSquares {
             // Dimension not known until first sample.
             effective_dof: self.weights().len() as f64,
             regularization_sensitivity: 1.0 - self.forgetting_factor(),
+            // Prediction uncertainty: std dev of residuals.
+            uncertainty: self.noise_variance().sqrt(),
             ..Default::default()
         })
     }

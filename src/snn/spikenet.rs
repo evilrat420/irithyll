@@ -279,9 +279,29 @@ impl StreamingLearner for SpikeNet {
 
 impl crate::automl::DiagnosticSource for SpikeNet {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        // Membrane potential variance as uncertainty proxy: high variance in
+        // membrane states indicates the network is being driven hard / unstable.
+        let uncertainty = match &self.inner {
+            Some(net) => {
+                let membrane = net.hidden_membrane();
+                if membrane.is_empty() {
+                    0.0
+                } else {
+                    // Mean absolute membrane potential as fraction of Q14_ONE.
+                    let sum: f64 = membrane.iter().map(|&v| (v as f64).abs()).sum();
+                    let mean_abs = sum / membrane.len() as f64;
+                    mean_abs / irithyll_core::snn::lif::Q14_ONE as f64
+                }
+            }
+            None => 0.0, // Not yet initialized.
+        };
+
         // Weight matrix size: n_hidden * n_hidden (recurrent) is the dominant DOF.
         Some(crate::automl::ConfigDiagnostics {
             effective_dof: (self.config.n_hidden * self.config.n_hidden) as f64,
+            // Learning rate controls update magnitude.
+            regularization_sensitivity: self.config.eta,
+            uncertainty,
             ..Default::default()
         })
     }

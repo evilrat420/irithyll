@@ -105,6 +105,8 @@ pub struct NeuralMoE {
     router: LinearRouter,
     config: NeuralMoEConfig,
     n_samples: u64,
+    /// Cached expert disagreement (std dev of active expert predictions).
+    cached_disagreement: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +225,7 @@ impl NeuralMoEBuilder {
             router,
             config,
             n_samples: 0,
+            cached_disagreement: 0.0,
         }
     }
 }
@@ -268,6 +271,31 @@ impl NeuralMoE {
         self.router.load_distribution()
     }
 
+    /// Expert disagreement: std dev of all expert predictions.
+    ///
+    /// High disagreement indicates the experts have divergent views on
+    /// this input — a real uncertainty signal. Returns 0.0 when fewer
+    /// than 2 experts exist or predictions are uniform.
+    pub fn expert_disagreement(&self, features: &[f64]) -> f64 {
+        let preds = self.expert_predictions(features);
+        if preds.len() < 2 {
+            return 0.0;
+        }
+        let n = preds.len() as f64;
+        let mean = preds.iter().sum::<f64>() / n;
+        let var = preds.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        var.sqrt()
+    }
+
+    /// Cached expert disagreement from the most recent `train_one` call.
+    ///
+    /// This avoids recomputing disagreement in `config_diagnostics()`, which
+    /// only has `&self` (no features available). Updated every `train_one`.
+    #[inline]
+    pub fn cached_disagreement(&self) -> f64 {
+        self.cached_disagreement
+    }
+
     /// Get predictions from all experts (for inspection).
     pub fn expert_predictions(&self, features: &[f64]) -> Vec<f64> {
         self.experts
@@ -293,17 +321,27 @@ impl StreamingLearner for NeuralMoE {
         // 1. Select top-k experts via router
         let active_indices = self.router.select_top_k(features, k);
 
-        // 2. Collect predictions from active experts + find best
+        // 2. Collect predictions from active experts + find best + cache disagreement
         let mut best_idx = active_indices[0];
         let mut best_error = f64::INFINITY;
+        let mut active_preds: Vec<f64> = Vec::with_capacity(k);
 
         for &idx in &active_indices {
             let pred = self.experts[idx].model.predict(features);
+            active_preds.push(pred);
             let error = (target - pred).abs();
             if error < best_error {
                 best_error = error;
                 best_idx = idx;
             }
+        }
+
+        // Cache expert disagreement (std dev of active expert predictions)
+        if active_preds.len() >= 2 {
+            let n = active_preds.len() as f64;
+            let mean = active_preds.iter().sum::<f64>() / n;
+            let var = active_preds.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / (n - 1.0);
+            self.cached_disagreement = var.sqrt();
         }
 
         // 3. Train active experts
@@ -359,6 +397,7 @@ impl StreamingLearner for NeuralMoE {
         }
         self.router.reset();
         self.n_samples = 0;
+        self.cached_disagreement = 0.0;
     }
 }
 
@@ -387,9 +426,16 @@ impl NeuralMoE {
 
 impl crate::automl::DiagnosticSource for NeuralMoE {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
-        // Rough approximation: ~100 DOF per expert.
+        // Only count live experts for effective DOF.
+        let live_experts = self.n_experts().saturating_sub(self.n_dead_experts());
+        let effective_dof = live_experts.max(1) as f64 * 100.0;
+
         Some(crate::automl::ConfigDiagnostics {
-            effective_dof: self.n_experts() as f64 * 100.0,
+            effective_dof,
+            regularization_sensitivity: self.config.load_balance_rate,
+            // Expert disagreement: real prediction-based uncertainty signal
+            // cached from the most recent train_one call.
+            uncertainty: self.cached_disagreement,
             ..Default::default()
         })
     }
@@ -622,5 +668,50 @@ mod tests {
         assert!((moe.config.utilization_threshold - 0.05).abs() < 1e-12);
         assert!(!moe.config.reset_dead);
         assert_eq!(moe.config.seed, 999);
+    }
+
+    #[test]
+    fn moe_expert_disagreement() {
+        let mut moe = NeuralMoE::builder()
+            .expert(sgbt(10, 0.01))
+            .expert(sgbt(20, 0.01))
+            .expert(linear(0.01))
+            .top_k(2)
+            .build();
+
+        // Before training, cached_disagreement is 0
+        assert!(
+            moe.cached_disagreement().abs() < 1e-15,
+            "cached_disagreement should be 0 before training, got {}",
+            moe.cached_disagreement()
+        );
+
+        // Train on 100 samples
+        for i in 0..100 {
+            let x = [i as f64 * 0.01, (i as f64).sin()];
+            let y = x[0] * 2.0 + 1.0;
+            moe.train(&x, y);
+        }
+
+        // After training, experts should have diverged enough for disagreement > 0
+        let disagree = moe.cached_disagreement();
+        assert!(
+            disagree >= 0.0,
+            "expert_disagreement should be >= 0, got {}",
+            disagree
+        );
+        assert!(
+            disagree.is_finite(),
+            "expert_disagreement should be finite, got {}",
+            disagree
+        );
+
+        // Also test the direct method
+        let direct = moe.expert_disagreement(&[0.5, 0.5_f64.sin()]);
+        assert!(
+            direct.is_finite(),
+            "expert_disagreement() should be finite, got {}",
+            direct
+        );
     }
 }

@@ -224,10 +224,8 @@ impl<L: Loss> fmt::Debug for SGBTLearner<L> {
 
 impl<L: Loss> crate::automl::DiagnosticSource for SGBTLearner<L> {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
-        Some(crate::automl::ConfigDiagnostics {
-            effective_dof: self.inner.n_steps() as f64,
-            ..Default::default()
-        })
+        // Forward to the inner SGBT's diagnostics (which has the real signals).
+        self.inner.config_diagnostics()
     }
 }
 

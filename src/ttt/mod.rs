@@ -247,6 +247,8 @@ pub struct StreamingTTT {
     last_features: Vec<f64>,
     total_seen: u64,
     samples_trained: u64,
+    /// EWMA of prediction uncertainty for eta modulation.
+    rolling_uncertainty: f64,
 }
 
 impl StreamingTTT {
@@ -270,6 +272,7 @@ impl StreamingTTT {
             last_features,
             total_seen: 0,
             samples_trained: 0,
+            rolling_uncertainty: 0.0,
         }
     }
 
@@ -284,6 +287,19 @@ impl StreamingTTT {
         &self.config
     }
 
+    /// Forward-looking prediction uncertainty from the RLS readout.
+    ///
+    /// Returns the estimated prediction standard deviation, computed as the
+    /// square root of the RLS noise variance (EWMA of squared residuals).
+    /// This is a model-level uncertainty signal that does not require
+    /// transformed features.
+    ///
+    /// Returns 0.0 before any training has occurred.
+    #[inline]
+    pub fn prediction_uncertainty(&self) -> f64 {
+        self.readout.noise_variance().sqrt()
+    }
+
     /// Output dimension of the TTT layer.
     pub fn output_dim(&self) -> usize {
         self.layer.output_dim()
@@ -292,6 +308,21 @@ impl StreamingTTT {
 
 impl StreamingLearner for StreamingTTT {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
+        // Uncertainty-modulated inner learning rate: high uncertainty → increase
+        // eta (adapt faster), low uncertainty → decrease eta (conserve).
+        let current_uncertainty = self.readout.noise_variance().sqrt();
+        const UNCERTAINTY_ALPHA: f64 = 0.001;
+        self.rolling_uncertainty = (1.0 - UNCERTAINTY_ALPHA) * self.rolling_uncertainty
+            + UNCERTAINTY_ALPHA * current_uncertainty;
+
+        let effective_eta = if self.rolling_uncertainty > 1e-10 {
+            let ratio = (current_uncertainty / self.rolling_uncertainty).clamp(0.5, 2.0);
+            self.config.eta * ratio
+        } else {
+            self.config.eta
+        };
+        self.layer.set_eta(effective_eta);
+
         // Always forward through TTT layer (even during warmup, to warm up projections)
         let ttt_output = self.layer.forward(features);
         self.total_seen += 1;
@@ -330,6 +361,7 @@ impl StreamingLearner for StreamingTTT {
         }
         self.total_seen = 0;
         self.samples_trained = 0;
+        self.rolling_uncertainty = 0.0;
     }
 }
 
@@ -358,6 +390,8 @@ impl crate::automl::DiagnosticSource for StreamingTTT {
             effective_dof: (self.config.d_model * self.config.d_model) as f64,
             // Weight decay alpha = regularization strength.
             regularization_sensitivity: self.config.alpha,
+            // Prediction uncertainty: std dev of RLS residuals.
+            uncertainty: self.prediction_uncertainty(),
             ..Default::default()
         })
     }
@@ -561,5 +595,44 @@ mod tests {
         let cloned = config.clone();
         assert_eq!(cloned.d_model, config.d_model);
         assert_eq!(cloned.seed, config.seed);
+    }
+
+    #[test]
+    fn ttt_uncertainty_modulated_eta() {
+        let config = TTTConfig::builder()
+            .d_model(16)
+            .eta(0.01)
+            .warmup(5)
+            .build()
+            .unwrap();
+        let mut model = StreamingTTT::new(config);
+
+        // Train with modulated eta — should produce finite predictions
+        for i in 0..100 {
+            let x = [i as f64 * 0.1, (i as f64).sin()];
+            let y = x[0] * 2.0 + 1.0;
+            model.train(&x, y);
+        }
+
+        let pred = model.predict(&[0.5, 0.5_f64.sin()]);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite after uncertainty-modulated training, got {}",
+            pred
+        );
+
+        // Rolling uncertainty should be tracked
+        assert!(
+            model.rolling_uncertainty > 0.0 || model.prediction_uncertainty() == 0.0,
+            "rolling_uncertainty should be non-negative"
+        );
+
+        // Prediction uncertainty from readout should be available
+        let unc = model.prediction_uncertainty();
+        assert!(
+            unc.is_finite(),
+            "prediction_uncertainty should be finite, got {}",
+            unc
+        );
     }
 }

@@ -143,6 +143,19 @@ impl EchoStateNetwork {
         self.total_seen
     }
 
+    /// Forward-looking prediction uncertainty from the RLS readout.
+    ///
+    /// Returns the estimated prediction standard deviation, computed as the
+    /// square root of the RLS noise variance (EWMA of squared residuals).
+    /// This is a model-level uncertainty signal that does not require
+    /// transformed features.
+    ///
+    /// Returns 0.0 before any training has occurred.
+    #[inline]
+    pub fn prediction_uncertainty(&self) -> f64 {
+        self.rls.noise_variance().sqrt()
+    }
+
     /// Access the current reservoir state.
     pub fn reservoir_state(&self) -> &[f64] {
         self.reservoir.state()
@@ -231,6 +244,9 @@ impl crate::automl::DiagnosticSource for EchoStateNetwork {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         Some(crate::automl::ConfigDiagnostics {
             effective_dof: self.config.n_reservoir as f64,
+            regularization_sensitivity: 1.0 - self.config.forgetting_factor,
+            // Prediction uncertainty: std dev of RLS residuals.
+            uncertainty: self.prediction_uncertainty(),
             ..Default::default()
         })
     }
@@ -449,5 +465,42 @@ mod tests {
             .filter(|&&s| s.abs() > 1e-15)
             .count();
         assert!(nonzero > 0, "reservoir state should be nonzero after input",);
+    }
+
+    #[test]
+    fn esn_prediction_uncertainty() {
+        let config = ESNConfig::builder()
+            .n_reservoir(50)
+            .warmup(10)
+            .build()
+            .unwrap();
+        let mut esn = EchoStateNetwork::new(config);
+
+        // Before training, uncertainty is 0.0
+        assert!(
+            esn.prediction_uncertainty().abs() < 1e-15,
+            "uncertainty should be 0.0 before training, got {}",
+            esn.prediction_uncertainty()
+        );
+
+        // Train on 100 samples
+        for i in 0..100 {
+            let t = i as f64 * 0.1;
+            let x = t.sin();
+            let target = (t + 0.1).sin();
+            esn.train(&[x], target);
+        }
+
+        let unc = esn.prediction_uncertainty();
+        assert!(
+            unc > 0.0,
+            "prediction_uncertainty should be > 0 after training, got {}",
+            unc
+        );
+        assert!(
+            unc.is_finite(),
+            "prediction_uncertainty should be finite, got {}",
+            unc
+        );
     }
 }

@@ -124,6 +124,19 @@ impl StreamingAttentionModel {
         self.n_samples >= self.config.warmup as u64
     }
 
+    /// Forward-looking prediction uncertainty from the RLS readout.
+    ///
+    /// Returns the estimated prediction standard deviation, computed as the
+    /// square root of the RLS noise variance (EWMA of squared residuals).
+    /// This is a model-level uncertainty signal that does not require
+    /// transformed features.
+    ///
+    /// Returns 0.0 before any training has occurred.
+    #[inline]
+    pub fn prediction_uncertainty(&self) -> f64 {
+        self.readout.noise_variance().sqrt()
+    }
+
     /// Get the cached attention output features from the last training step.
     pub fn last_features(&self) -> &[f64] {
         &self.last_features
@@ -188,6 +201,9 @@ impl crate::automl::DiagnosticSource for StreamingAttentionModel {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         Some(crate::automl::ConfigDiagnostics {
             effective_dof: (self.config.d_model * self.config.n_heads) as f64,
+            regularization_sensitivity: 1.0 - self.config.forgetting_factor,
+            // Prediction uncertainty: std dev of RLS residuals.
+            uncertainty: self.prediction_uncertainty(),
             ..Default::default()
         })
     }

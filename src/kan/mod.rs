@@ -246,6 +246,8 @@ pub struct StreamingKAN {
     last_output: f64,
     n_samples: u64,
     rng_state: u64,
+    /// EWMA of squared prediction error for uncertainty-modulated learning.
+    rolling_loss: f64,
 }
 
 impl StreamingKAN {
@@ -272,6 +274,7 @@ impl StreamingKAN {
             last_output: 0.0,
             n_samples: 0,
             rng_state: rng,
+            rolling_loss: 0.0,
         }
     }
 
@@ -343,15 +346,30 @@ impl StreamingLearner for StreamingKAN {
         // 3. Compute output error (MSE loss: L = (pred - target)^2)
         let prediction = current[0];
         let error = prediction - target;
-        let lr = self.config.lr * weight;
+        let sq_error = error * error;
 
-        // 4. Backward through layers (reverse order)
+        // 4. Update rolling loss and compute uncertainty-modulated LR.
+        //    High error relative to baseline → increase lr (adapt faster).
+        //    Low error → decrease lr (conserve).
+        const LOSS_ALPHA: f64 = 0.001;
+        self.rolling_loss = (1.0 - LOSS_ALPHA) * self.rolling_loss + LOSS_ALPHA * sq_error;
+
+        let effective_lr = if self.rolling_loss > 1e-10 {
+            let ratio = (sq_error / self.rolling_loss).clamp(0.5, 2.0);
+            self.config.lr * ratio
+        } else {
+            self.config.lr
+        };
+
+        let lr = effective_lr * weight;
+
+        // 5. Backward through layers (reverse order)
         let mut grad = vec![2.0 * error]; // dL/d_output for MSE
         for i in (0..self.layers.len()).rev() {
             grad = self.layers[i].backward(&activations[i], &grad, lr);
         }
 
-        // 5. Cache output for predict()
+        // 6. Cache output for predict()
         self.last_output = prediction;
         self.n_samples += 1;
     }
@@ -381,6 +399,7 @@ impl StreamingLearner for StreamingKAN {
         self.input_count = 0;
         self.last_output = 0.0;
         self.n_samples = 0;
+        self.rolling_loss = 0.0;
     }
 }
 
@@ -405,6 +424,10 @@ impl crate::automl::DiagnosticSource for StreamingKAN {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         Some(crate::automl::ConfigDiagnostics {
             effective_dof: self.n_params() as f64,
+            // Learning rate as regularization sensitivity.
+            regularization_sensitivity: self.config.lr,
+            // Prediction uncertainty: RMSE from EWMA of squared errors.
+            uncertainty: self.rolling_loss.sqrt(),
             ..Default::default()
         })
     }
@@ -681,5 +704,50 @@ mod tests {
             .unwrap();
         let model = StreamingKAN::new(config);
         assert_eq!(model.predict(&[1.0, 2.0]), 0.0);
+    }
+
+    #[test]
+    fn kan_uncertainty_modulated_lr() {
+        let config = KANConfig::builder()
+            .layer_sizes(vec![2, 10, 1])
+            .lr(0.01)
+            .build()
+            .unwrap();
+        let mut model = StreamingKAN::new(config);
+
+        // rolling_loss starts at 0
+        assert!(
+            model.rolling_loss.abs() < 1e-15,
+            "rolling_loss should start at 0, got {}",
+            model.rolling_loss
+        );
+
+        // Train on 100 samples
+        for i in 0..100 {
+            let t = i as f64 * 0.05;
+            let x = [t.sin(), t.cos()];
+            let y = 0.5 * x[0] + 0.3 * x[1];
+            model.train(&x, y);
+        }
+
+        // rolling_loss should be tracked and > 0 after training
+        assert!(
+            model.rolling_loss > 0.0,
+            "rolling_loss should be > 0 after training, got {}",
+            model.rolling_loss
+        );
+        assert!(
+            model.rolling_loss.is_finite(),
+            "rolling_loss should be finite, got {}",
+            model.rolling_loss
+        );
+
+        // Predictions should still be finite
+        let pred = model.predict(&[0.5, 0.3]);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite after uncertainty-modulated training, got {}",
+            pred
+        );
     }
 }

@@ -503,8 +503,12 @@ impl fmt::Debug for KRLS {
 
 impl crate::automl::DiagnosticSource for KRLS {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        let budget = self.budget().max(1) as f64;
         Some(crate::automl::ConfigDiagnostics {
             effective_dof: self.dict_size() as f64,
+            regularization_sensitivity: 1.0 - self.forgetting_factor(),
+            // Dictionary utilization: 1.0 = full, model capacity maxed out.
+            uncertainty: self.dict_size() as f64 / budget,
             ..Default::default()
         })
     }

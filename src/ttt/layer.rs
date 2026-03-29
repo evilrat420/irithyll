@@ -210,6 +210,15 @@ impl TTTLayer {
         self.d_state
     }
 
+    /// Set the inner learning rate for fast weight updates.
+    ///
+    /// Used by [`StreamingTTT`](super::StreamingTTT) to dynamically modulate
+    /// eta based on prediction uncertainty.
+    #[inline]
+    pub fn set_eta(&mut self, eta: f64) {
+        self.eta = eta;
+    }
+
     /// Full reset including projections (returns to uninitialized state).
     pub fn reset_full(&mut self) {
         self.w_fast.fill(0.0);

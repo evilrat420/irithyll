@@ -102,6 +102,19 @@ impl StreamingMamba {
         self.ssm.state()
     }
 
+    /// Forward-looking prediction uncertainty from the RLS readout.
+    ///
+    /// Returns the estimated prediction standard deviation, computed as the
+    /// square root of the RLS noise variance (EWMA of squared residuals).
+    /// This is a model-level uncertainty signal that does not require
+    /// transformed features.
+    ///
+    /// Returns 0.0 before any training has occurred.
+    #[inline]
+    pub fn prediction_uncertainty(&self) -> f64 {
+        self.readout.noise_variance().sqrt()
+    }
+
     /// Get the cached SSM output features from the last training step.
     pub fn last_features(&self) -> &[f64] {
         &self.last_features
@@ -168,6 +181,8 @@ impl crate::automl::DiagnosticSource for StreamingMamba {
             effective_dof: (self.config.d_in * self.config.n_state) as f64,
             // Higher forgetting factor = less regularization pressure.
             regularization_sensitivity: 1.0 - self.config.forgetting_factor,
+            // Prediction uncertainty: std dev of RLS residuals.
+            uncertainty: self.prediction_uncertainty(),
             ..Default::default()
         })
     }
@@ -396,6 +411,39 @@ mod tests {
             "zero-weight training should have less effect: zero_w={}, unit_w={}",
             pred_zero_weight,
             pred_unit_weight
+        );
+    }
+
+    #[test]
+    fn mamba_prediction_uncertainty() {
+        let config = MambaConfig::builder().d_in(2).n_state(8).build().unwrap();
+        let mut model = StreamingMamba::new(config);
+
+        // Before training, uncertainty is 0.0
+        assert!(
+            model.prediction_uncertainty().abs() < 1e-15,
+            "uncertainty should be 0.0 before training, got {}",
+            model.prediction_uncertainty()
+        );
+
+        // Train on 100 samples
+        for i in 0..100 {
+            let t = i as f64 * 0.1;
+            let x = [t.sin(), t.cos()];
+            let y = 0.7 * x[0] + 0.3 * x[1];
+            model.train(&x, y);
+        }
+
+        let unc = model.prediction_uncertainty();
+        assert!(
+            unc > 0.0,
+            "prediction_uncertainty should be > 0 after training, got {}",
+            unc
+        );
+        assert!(
+            unc.is_finite(),
+            "prediction_uncertainty should be finite, got {}",
+            unc
         );
     }
 }

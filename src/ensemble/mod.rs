@@ -118,6 +118,19 @@ pub struct SGBT<L: Loss = SquaredLoss> {
     /// EWMA of contribution variance (sigma) across trees for adaptive_mts.
     /// Used as the denominator when computing sigma_ratio for tree lifetime modulation.
     rolling_contribution_sigma: f64,
+    // -----------------------------------------------------------------------
+    // Diagnostic cache (updated during train_one)
+    // -----------------------------------------------------------------------
+    /// Previous per-tree contributions for residual alignment (cosine similarity).
+    prev_contributions: Vec<f64>,
+    /// Cached cosine similarity of consecutive tree contribution vectors.
+    cached_residual_alignment: f64,
+    /// Cached mean |G|/(H+λ)² across all leaves.
+    cached_reg_sensitivity: f64,
+    /// Cached F-statistic (between-leaf / within-leaf variance).
+    cached_depth_sufficiency: f64,
+    /// Cached trace(H/(H+λ)) across all leaves.
+    cached_effective_dof: f64,
 }
 
 impl<L: Loss + Clone> Clone for SGBT<L> {
@@ -138,6 +151,11 @@ impl<L: Loss + Clone> Clone for SGBT<L> {
             auto_bandwidths: self.auto_bandwidths.clone(),
             last_replacement_sum: self.last_replacement_sum,
             rolling_contribution_sigma: self.rolling_contribution_sigma,
+            prev_contributions: self.prev_contributions.clone(),
+            cached_residual_alignment: self.cached_residual_alignment,
+            cached_reg_sensitivity: self.cached_reg_sensitivity,
+            cached_depth_sufficiency: self.cached_depth_sufficiency,
+            cached_effective_dof: self.cached_effective_dof,
         }
     }
 }
@@ -248,6 +266,11 @@ impl<L: Loss> SGBT<L> {
             auto_bandwidths: Vec::new(),
             last_replacement_sum: 0,
             rolling_contribution_sigma: 0.0,
+            prev_contributions: Vec::new(),
+            cached_residual_alignment: 0.0,
+            cached_reg_sensitivity: 0.0,
+            cached_depth_sufficiency: 0.0,
+            cached_effective_dof: 0.0,
         }
     }
 
@@ -388,8 +411,103 @@ impl<L: Loss> SGBT<L> {
             }
         }
 
+        // Update diagnostic cache for config_diagnostics() signals
+        self.update_diagnostic_cache(features);
+
         // Refresh auto-bandwidths when trees have been replaced or not yet computed.
         self.refresh_bandwidths();
+    }
+
+    /// Update cached diagnostic signals from tree internals.
+    ///
+    /// Computes four signals used by the auto-builder:
+    /// - **residual_alignment**: cosine similarity of consecutive tree contributions
+    /// - **regularization_sensitivity**: mean |G|/(H+λ)² across leaves
+    /// - **depth_sufficiency**: F-statistic (between-leaf / within-leaf variance)
+    /// - **effective_dof**: trace(H/(H+λ)) across all leaves
+    fn update_diagnostic_cache(&mut self, features: &[f64]) {
+        use crate::tree::node::NodeId;
+
+        let lambda = self.config.lambda;
+        let lr = self.config.learning_rate;
+        let n_steps = self.steps.len();
+
+        // 1. Residual alignment: cosine similarity of consecutive contribution vectors
+        let mut contributions = Vec::with_capacity(n_steps);
+        for step in &self.steps {
+            contributions.push(lr * step.predict(features));
+        }
+
+        if !self.prev_contributions.is_empty()
+            && self.prev_contributions.len() == contributions.len()
+        {
+            let dot: f64 = contributions
+                .iter()
+                .zip(&self.prev_contributions)
+                .map(|(a, b)| a * b)
+                .sum();
+            let norm_curr: f64 = contributions.iter().map(|x| x * x).sum::<f64>().sqrt();
+            let norm_prev: f64 = self
+                .prev_contributions
+                .iter()
+                .map(|x| x * x)
+                .sum::<f64>()
+                .sqrt();
+            self.cached_residual_alignment = if norm_curr > 1e-15 && norm_prev > 1e-15 {
+                dot / (norm_curr * norm_prev)
+            } else {
+                0.0
+            };
+        }
+        self.prev_contributions = contributions;
+
+        // 2-4. Leaf traversal for reg_sensitivity, depth_sufficiency, effective_dof
+        let mut total_sensitivity = 0.0;
+        let mut total_dof = 0.0;
+        let mut leaf_weights: Vec<f64> = Vec::new();
+        let mut leaf_within_vars: Vec<f64> = Vec::new();
+        let mut n_leaves_total: u64 = 0;
+
+        for step in &self.steps {
+            let tree = step.slot().active_tree();
+            let arena = tree.arena();
+
+            for node_idx in 0..arena.n_nodes() {
+                let nid = NodeId(node_idx as u32);
+                if arena.is_leaf(nid) {
+                    if let Some((g, h)) = tree.leaf_grad_hess(nid) {
+                        let denom = h + lambda;
+                        if denom.abs() > 1e-15 {
+                            // Reg sensitivity: |G| / (H+λ)²
+                            total_sensitivity += g.abs() / (denom * denom);
+                            // Effective DOF: H / (H+λ)
+                            total_dof += h / denom;
+                            // Leaf weight: w* = -G/(H+λ)
+                            leaf_weights.push(-g / denom);
+                            // Within-leaf variance: 1/(H+λ)
+                            leaf_within_vars.push(1.0 / denom);
+                            n_leaves_total += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if n_leaves_total > 0 {
+            let n = n_leaves_total as f64;
+            self.cached_reg_sensitivity = total_sensitivity / n;
+            self.cached_effective_dof = total_dof;
+
+            // Depth sufficiency: F = between_var / within_var
+            let mean_weight = leaf_weights.iter().sum::<f64>() / n;
+            let between_var = leaf_weights
+                .iter()
+                .map(|w| (w - mean_weight).powi(2))
+                .sum::<f64>()
+                / (n - 1.0).max(1.0);
+            let within_var = leaf_within_vars.iter().sum::<f64>() / n;
+            self.cached_depth_sufficiency = between_var / within_var.max(1e-15);
+        }
     }
 
     /// Train on a batch of observations.
@@ -696,6 +814,20 @@ impl<L: Loss> SGBT<L> {
         self.samples_seen
     }
 
+    /// Current tree contribution standard deviation (honest uncertainty).
+    ///
+    /// This is the EWMA of per-sample contribution sigma across trees,
+    /// computed from the `adaptive_mts` machinery. Reflects how much
+    /// individual trees disagree — higher values indicate more model
+    /// uncertainty / regime change.
+    ///
+    /// Returns 0.0 if `adaptive_mts` is not enabled or the model has
+    /// not yet been trained.
+    #[inline]
+    pub fn contribution_sigma(&self) -> f64 {
+        self.rolling_contribution_sigma
+    }
+
     /// The current base prediction.
     pub fn base_prediction(&self) -> f64 {
         self.base_prediction
@@ -972,6 +1104,12 @@ impl<L: Loss> SGBT<L> {
         self.rng_state = self.config.seed;
         self.auto_bandwidths.clear();
         self.last_replacement_sum = 0;
+        self.prev_contributions.clear();
+        self.rolling_contribution_sigma = 0.0;
+        self.cached_residual_alignment = 0.0;
+        self.cached_reg_sensitivity = 0.0;
+        self.cached_depth_sufficiency = 0.0;
+        self.cached_effective_dof = 0.0;
     }
 
     // -------------------------------------------------------------------
@@ -1188,6 +1326,11 @@ impl SGBT<Box<dyn Loss>> {
             auto_bandwidths: Vec::new(),
             last_replacement_sum: 0,
             rolling_contribution_sigma: state.rolling_contribution_sigma,
+            prev_contributions: Vec::new(),
+            cached_residual_alignment: 0.0,
+            cached_reg_sensitivity: 0.0,
+            cached_depth_sufficiency: 0.0,
+            cached_effective_dof: 0.0,
         }
     }
 }
@@ -1261,8 +1404,11 @@ pub(crate) fn rebuild_tree(
 impl<L: Loss> crate::automl::DiagnosticSource for SGBT<L> {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         Some(crate::automl::ConfigDiagnostics {
-            effective_dof: self.n_steps() as f64,
-            ..Default::default()
+            residual_alignment: self.cached_residual_alignment,
+            regularization_sensitivity: self.cached_reg_sensitivity,
+            depth_sufficiency: self.cached_depth_sufficiency,
+            effective_dof: self.cached_effective_dof,
+            uncertainty: self.rolling_contribution_sigma,
         })
     }
 }
@@ -2356,6 +2502,150 @@ mod tests {
             pred.is_finite(),
             "proactive_prune base SGBT: prediction should be finite, got {}",
             pred
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Diagnostic signal tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn sgbt_diagnostic_signals_populated() {
+        use crate::automl::DiagnosticSource;
+
+        let mut model = SGBT::new(default_config());
+
+        for i in 0..500 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + 1.0));
+        }
+
+        let diag = model
+            .config_diagnostics()
+            .expect("should return Some diagnostics");
+
+        assert!(
+            diag.residual_alignment != 0.0,
+            "residual_alignment should be non-zero, got {}",
+            diag.residual_alignment
+        );
+        assert!(
+            diag.regularization_sensitivity != 0.0,
+            "regularization_sensitivity should be non-zero, got {}",
+            diag.regularization_sensitivity
+        );
+        assert!(
+            diag.depth_sufficiency != 0.0,
+            "depth_sufficiency should be non-zero, got {}",
+            diag.depth_sufficiency
+        );
+        assert!(
+            diag.effective_dof > 0.0,
+            "effective_dof should be positive, got {}",
+            diag.effective_dof
+        );
+    }
+
+    #[test]
+    fn sgbt_residual_alignment_range() {
+        use crate::automl::DiagnosticSource;
+
+        let mut model = SGBT::new(default_config());
+
+        for i in 0..500 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + 1.0));
+        }
+
+        let diag = model
+            .config_diagnostics()
+            .expect("should return Some diagnostics");
+
+        assert!(
+            diag.residual_alignment >= -1.0 && diag.residual_alignment <= 1.0,
+            "residual_alignment should be in [-1, 1], got {}",
+            diag.residual_alignment
+        );
+    }
+
+    #[test]
+    fn sgbt_effective_dof_positive() {
+        use crate::automl::DiagnosticSource;
+
+        let mut model = SGBT::new(default_config());
+
+        for i in 0..500 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + 1.0));
+        }
+
+        let diag = model
+            .config_diagnostics()
+            .expect("should return Some diagnostics");
+
+        assert!(
+            diag.effective_dof > 0.0,
+            "effective_dof should be positive after training, got {}",
+            diag.effective_dof
+        );
+    }
+
+    #[test]
+    fn sgbt_depth_sufficiency_positive() {
+        use crate::automl::DiagnosticSource;
+
+        let mut model = SGBT::new(default_config());
+
+        for i in 0..500 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + 1.0));
+        }
+
+        let diag = model
+            .config_diagnostics()
+            .expect("should return Some diagnostics");
+
+        assert!(
+            diag.depth_sufficiency > 0.0,
+            "depth_sufficiency should be positive after training, got {}",
+            diag.depth_sufficiency
+        );
+    }
+
+    #[test]
+    fn sgbt_contribution_sigma_exposed() {
+        let config = SGBTConfig::builder()
+            .n_steps(10)
+            .learning_rate(0.1)
+            .grace_period(5)
+            .adaptive_mts(500, 1.0)
+            .build()
+            .unwrap();
+        let mut model = SGBT::new(config);
+
+        // Before training, contribution_sigma is 0
+        assert!(
+            model.contribution_sigma().abs() < 1e-15,
+            "contribution_sigma should be 0 before training, got {}",
+            model.contribution_sigma()
+        );
+
+        // Train on 200 samples so trees grow and contribute
+        for i in 0..200 {
+            let x = i as f64 * 0.05;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + 1.0));
+        }
+
+        let sigma = model.contribution_sigma();
+        assert!(
+            sigma > 0.0,
+            "contribution_sigma should be > 0 after training with adaptive_mts, got {}",
+            sigma
+        );
+        assert!(
+            sigma.is_finite(),
+            "contribution_sigma should be finite, got {}",
+            sigma
         );
     }
 }

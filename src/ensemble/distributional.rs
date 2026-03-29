@@ -268,6 +268,19 @@ pub struct DistributionalSGBT {
     samples_since_refresh: u64,
     /// How often to refresh the packed cache (0 = disabled).
     packed_refresh_interval: u64,
+    // -----------------------------------------------------------------------
+    // Diagnostic cache (updated during train_one)
+    // -----------------------------------------------------------------------
+    /// Previous per-tree contributions for residual alignment (cosine similarity).
+    prev_contributions: Vec<f64>,
+    /// Cached cosine similarity of consecutive tree contribution vectors.
+    cached_residual_alignment: f64,
+    /// Cached mean |G|/(H+λ)² across all leaves.
+    cached_reg_sensitivity: f64,
+    /// Cached F-statistic (between-leaf / within-leaf variance).
+    cached_depth_sufficiency: f64,
+    /// Cached trace(H/(H+λ)) across all leaves.
+    cached_effective_dof: f64,
 }
 
 impl Clone for DistributionalSGBT {
@@ -299,6 +312,11 @@ impl Clone for DistributionalSGBT {
             packed_cache: self.packed_cache.clone(),
             samples_since_refresh: self.samples_since_refresh,
             packed_refresh_interval: self.packed_refresh_interval,
+            prev_contributions: self.prev_contributions.clone(),
+            cached_residual_alignment: self.cached_residual_alignment,
+            cached_reg_sensitivity: self.cached_reg_sensitivity,
+            cached_depth_sufficiency: self.cached_depth_sufficiency,
+            cached_effective_dof: self.cached_effective_dof,
         }
     }
 }
@@ -419,6 +437,11 @@ impl DistributionalSGBT {
             packed_cache: None,
             samples_since_refresh: 0,
             packed_refresh_interval,
+            prev_contributions: Vec::new(),
+            cached_residual_alignment: 0.0,
+            cached_reg_sensitivity: 0.0,
+            cached_depth_sufficiency: 0.0,
+            cached_effective_dof: 0.0,
         }
     }
 
@@ -530,8 +553,103 @@ impl DistributionalSGBT {
             }
         }
 
+        // Update diagnostic cache for config_diagnostics() signals
+        self.update_diagnostic_cache(features);
+
         // Refresh auto-bandwidths when trees have been replaced
         self.refresh_bandwidths();
+    }
+
+    /// Update cached diagnostic signals from tree internals.
+    ///
+    /// Computes four signals used by the auto-builder:
+    /// - **residual_alignment**: cosine similarity of consecutive tree contributions
+    /// - **regularization_sensitivity**: mean |G|/(H+λ)² across leaves
+    /// - **depth_sufficiency**: F-statistic (between-leaf / within-leaf variance)
+    /// - **effective_dof**: trace(H/(H+λ)) across all leaves
+    fn update_diagnostic_cache(&mut self, features: &[f64]) {
+        use crate::tree::node::NodeId;
+
+        let lambda = self.config.lambda;
+        let lr = self.config.learning_rate;
+        let n_steps = self.location_steps.len();
+
+        // 1. Residual alignment: cosine similarity of consecutive contribution vectors
+        let mut contributions = Vec::with_capacity(n_steps);
+        for step in &self.location_steps {
+            contributions.push(lr * step.predict(features));
+        }
+
+        if !self.prev_contributions.is_empty()
+            && self.prev_contributions.len() == contributions.len()
+        {
+            let dot: f64 = contributions
+                .iter()
+                .zip(&self.prev_contributions)
+                .map(|(a, b)| a * b)
+                .sum();
+            let norm_curr: f64 = contributions.iter().map(|x| x * x).sum::<f64>().sqrt();
+            let norm_prev: f64 = self
+                .prev_contributions
+                .iter()
+                .map(|x| x * x)
+                .sum::<f64>()
+                .sqrt();
+            self.cached_residual_alignment = if norm_curr > 1e-15 && norm_prev > 1e-15 {
+                dot / (norm_curr * norm_prev)
+            } else {
+                0.0
+            };
+        }
+        self.prev_contributions = contributions;
+
+        // 2-4. Leaf traversal for reg_sensitivity, depth_sufficiency, effective_dof
+        let mut total_sensitivity = 0.0;
+        let mut total_dof = 0.0;
+        let mut leaf_weights: Vec<f64> = Vec::new();
+        let mut leaf_within_vars: Vec<f64> = Vec::new();
+        let mut n_leaves_total: u64 = 0;
+
+        for step in &self.location_steps {
+            let tree = step.slot().active_tree();
+            let arena = tree.arena();
+
+            for node_idx in 0..arena.n_nodes() {
+                let nid = NodeId(node_idx as u32);
+                if arena.is_leaf(nid) {
+                    if let Some((g, h)) = tree.leaf_grad_hess(nid) {
+                        let denom = h + lambda;
+                        if denom.abs() > 1e-15 {
+                            // Reg sensitivity: |G| / (H+λ)²
+                            total_sensitivity += g.abs() / (denom * denom);
+                            // Effective DOF: H / (H+λ)
+                            total_dof += h / denom;
+                            // Leaf weight: w* = -G/(H+λ)
+                            leaf_weights.push(-g / denom);
+                            // Within-leaf variance: 1/(H+λ)
+                            leaf_within_vars.push(1.0 / denom);
+                            n_leaves_total += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if n_leaves_total > 0 {
+            let n = n_leaves_total as f64;
+            self.cached_reg_sensitivity = total_sensitivity / n;
+            self.cached_effective_dof = total_dof;
+
+            // Depth sufficiency: F = between_var / within_var
+            let mean_weight = leaf_weights.iter().sum::<f64>() / n;
+            let between_var = leaf_weights
+                .iter()
+                .map(|w| (w - mean_weight).powi(2))
+                .sum::<f64>()
+                / (n - 1.0).max(1.0);
+            let within_var = leaf_within_vars.iter().sum::<f64>() / n;
+            self.cached_depth_sufficiency = between_var / within_var.max(1e-15);
+        }
     }
 
     /// Empirical-σ training: location trees only, σ from EWMA of squared errors.
@@ -1295,6 +1413,11 @@ impl DistributionalSGBT {
         self.rolling_honest_sigma_mean = 0.0;
         self.packed_cache = None;
         self.samples_since_refresh = 0;
+        self.prev_contributions.clear();
+        self.cached_residual_alignment = 0.0;
+        self.cached_reg_sensitivity = 0.0;
+        self.cached_depth_sufficiency = 0.0;
+        self.cached_effective_dof = 0.0;
     }
 
     /// Total samples trained.
@@ -1791,6 +1914,11 @@ impl DistributionalSGBT {
             packed_cache: None,
             samples_since_refresh: 0,
             packed_refresh_interval,
+            prev_contributions: Vec::new(),
+            cached_residual_alignment: 0.0,
+            cached_reg_sensitivity: 0.0,
+            cached_depth_sufficiency: 0.0,
+            cached_effective_dof: 0.0,
         }
     }
 }
@@ -1829,10 +1957,10 @@ impl StreamingLearner for DistributionalSGBT {
 impl crate::automl::DiagnosticSource for DistributionalSGBT {
     fn config_diagnostics(&self) -> Option<crate::automl::auto_builder::ConfigDiagnostics> {
         Some(crate::automl::auto_builder::ConfigDiagnostics {
-            residual_alignment: 0.0, // TODO: implement from tree residual tracking
-            regularization_sensitivity: 0.0, // TODO: from G/(H+lambda)^2 across leaves
-            depth_sufficiency: 0.0,  // TODO: from within/between leaf variance
-            effective_dof: self.n_steps() as f64, // approximate: n_steps as DOF
+            residual_alignment: self.cached_residual_alignment,
+            regularization_sensitivity: self.cached_reg_sensitivity,
+            depth_sufficiency: self.cached_depth_sufficiency,
+            effective_dof: self.cached_effective_dof,
             uncertainty: self.rolling_honest_sigma_mean(),
         })
     }
@@ -2813,6 +2941,116 @@ mod tests {
             diag.uncertainty.is_finite(),
             "uncertainty should be finite, got {}",
             diag.uncertainty
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Diagnostic signal tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn diagnostic_signals_populated() {
+        use crate::automl::DiagnosticSource;
+        let mut model = DistributionalSGBT::new(test_config());
+
+        // Train enough samples for meaningful diagnostics
+        for i in 0..500 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + 1.0));
+        }
+
+        let diag = model
+            .config_diagnostics()
+            .expect("should return Some diagnostics");
+
+        // After 500 samples all signals should be populated (non-zero)
+        assert!(
+            diag.residual_alignment != 0.0,
+            "residual_alignment should be non-zero, got {}",
+            diag.residual_alignment
+        );
+        assert!(
+            diag.regularization_sensitivity != 0.0,
+            "regularization_sensitivity should be non-zero, got {}",
+            diag.regularization_sensitivity
+        );
+        assert!(
+            diag.depth_sufficiency != 0.0,
+            "depth_sufficiency should be non-zero, got {}",
+            diag.depth_sufficiency
+        );
+        assert!(
+            diag.effective_dof != 0.0,
+            "effective_dof should be non-zero, got {}",
+            diag.effective_dof
+        );
+        assert!(
+            diag.uncertainty.is_finite(),
+            "uncertainty should be finite, got {}",
+            diag.uncertainty
+        );
+    }
+
+    #[test]
+    fn residual_alignment_range() {
+        use crate::automl::DiagnosticSource;
+        let mut model = DistributionalSGBT::new(test_config());
+
+        for i in 0..500 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + 1.0));
+        }
+
+        let diag = model
+            .config_diagnostics()
+            .expect("should return Some diagnostics");
+
+        assert!(
+            diag.residual_alignment >= -1.0 && diag.residual_alignment <= 1.0,
+            "residual_alignment should be in [-1, 1], got {}",
+            diag.residual_alignment
+        );
+    }
+
+    #[test]
+    fn effective_dof_positive() {
+        use crate::automl::DiagnosticSource;
+        let mut model = DistributionalSGBT::new(test_config());
+
+        for i in 0..500 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + 1.0));
+        }
+
+        let diag = model
+            .config_diagnostics()
+            .expect("should return Some diagnostics");
+
+        assert!(
+            diag.effective_dof > 0.0,
+            "effective_dof should be positive after training, got {}",
+            diag.effective_dof
+        );
+    }
+
+    #[test]
+    fn depth_sufficiency_positive() {
+        use crate::automl::DiagnosticSource;
+        let mut model = DistributionalSGBT::new(test_config());
+
+        for i in 0..500 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x, x * 0.5], x * 2.0 + 1.0));
+        }
+
+        let diag = model
+            .config_diagnostics()
+            .expect("should return Some diagnostics");
+
+        assert!(
+            diag.depth_sufficiency > 0.0,
+            "depth_sufficiency should be positive after training, got {}",
+            diag.depth_sufficiency
         );
     }
 }
