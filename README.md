@@ -304,7 +304,7 @@ let config = SGBTConfig::builder()
     .n_bins(64)
     .lambda(1.0)
     .grace_period(200)
-    .feature_names(vec!["price".into(), "volume".into()])
+    .feature_names(vec!["temperature".into(), "humidity".into()])
     .build()
     .expect("valid config");
 

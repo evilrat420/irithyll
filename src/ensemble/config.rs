@@ -1730,12 +1730,12 @@ mod tests {
     #[test]
     fn feature_names_accepted() {
         let cfg = SGBTConfig::builder()
-            .feature_names(vec!["price".into(), "volume".into(), "spread".into()])
+            .feature_names(vec!["temperature".into(), "humidity".into(), "pressure".into()])
             .build()
             .unwrap();
         assert_eq!(
             cfg.feature_names.as_ref().unwrap(),
-            &["price", "volume", "spread"]
+            &["temperature", "humidity", "pressure"]
         );
     }
 
@@ -1745,7 +1745,7 @@ mod tests {
     #[test]
     fn feature_names_rejects_duplicates() {
         let result = SGBTConfig::builder()
-            .feature_names(vec!["price".into(), "volume".into(), "price".into()])
+            .feature_names(vec!["temperature".into(), "humidity".into(), "temperature".into()])
             .build();
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());

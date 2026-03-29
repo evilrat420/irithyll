@@ -1095,7 +1095,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via `explain_named()` when `feature_names` are configured.
 - **StreamingShap** -- online running-mean |SHAP| tracker for real-time feature
   importance monitoring without storing past predictions.
-- **Named features** -- `SGBTConfig::builder().feature_names(vec!["price", "volume"])`
+- **Named features** -- `SGBTConfig::builder().feature_names(vec!["temperature", "humidity"])`
   enables `named_feature_importances()` and `explain_named()`. Duplicate names are
   rejected at build time.
 - **Multi-target regression** -- `MultiTargetSGBT` wraps T independent `SGBT<L>` models,
