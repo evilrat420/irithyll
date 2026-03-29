@@ -106,7 +106,7 @@ pub trait StreamingLearner: Send + Sync {
     ///
     /// Returns `[residual_alignment, reg_sensitivity, depth_sufficiency,
     /// effective_dof, uncertainty]`. These five signals drive the
-    /// [`DiagnosticAdaptor`] in the auto-builder pipeline.
+    /// diagnostic adaptor in the auto-builder pipeline.
     ///
     /// Default: all zeros (model does not provide diagnostics). Models with
     /// internal diagnostic caches (e.g. SGBT, DistributionalSGBT) override
