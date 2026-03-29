@@ -35,6 +35,18 @@ required-features = ["embedded-bench"]
 name = "cortex_m_hello"
 required-features = ["embedded-bench"]
 
+[[example]]
+name = "cortex_m_drift"
+required-features = ["embedded-bench"]
+
+[[example]]
+name = "cortex_m_stress"
+required-features = ["embedded-bench"]
+
+[[example]]
+name = "cortex_m_validation"
+required-features = ["embedded-bench"]
+
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("_serde_support", "_stacked_tests_disabled", "_packed_cache_tests_disabled"))'] }
 

@@ -106,3 +106,7 @@ harness = false
 [[bench]]
 name = "real_dataset_bench"
 harness = false
+
+[[bench]]
+name = "real_world_bench"
+harness = false

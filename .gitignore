@@ -9,3 +9,4 @@ marketing/
 SNN_RESEARCH.md
 SSM_RESEARCH.md
 research/
+tests/private_autobuilder.rs
