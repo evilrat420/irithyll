@@ -5,6 +5,224 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.8.3] - 2026-03-29
+
+### Added
+
+- **Adaptive config on `StreamingLearner` trait** — three new default methods:
+  - `diagnostics_array()` — raw `[f64; 5]` diagnostic signals (residual alignment,
+    regularization sensitivity, depth sufficiency, effective DOF, uncertainty).
+    Overridden with real values in 17 models.
+  - `adjust_config(lr_multiplier, lambda_delta)` — smooth runtime config mutation.
+    Implemented for SGBT, DistributionalSGBT, TTT, KAN, RLS, KRLS, Linear, Mondrian.
+  - `apply_structural_change(depth_delta, steps_delta)` — queued structural changes
+    at tree replacement boundaries.
+  - `replacement_count()` — total internal model replacements for boundary detection.
+- `set_lambda()`, `set_max_depth()`, `set_n_steps()` on SGBT and DistributionalSGBT.
+- `total_replacements()` on SGBT and DistributionalSGBT.
+- **AutoTuner fully wired**: `after_train()` adjustments applied to champion config,
+  `at_replacement()` structural changes applied at replacement boundaries,
+  champion `diagnostics_array()` feeds full 5-signal diagnostics to adaptor.
+- CITATION.cff, RESPONSIBLE_USE.md, CONTRIBUTING.md added to repository.
+
+### Fixed
+
+- Uncertainty: all models return real computed values (no more 0.0 stubs).
+  SGBT uses `rolling_contribution_sigma`, neural models use RLS noise variance
+  or model-specific signals.
+- Uncertainty-modulated learning rate for TTT (`eta`) and KAN (`lr`).
+
+### Changed
+
+- irithyll-core `StreamingLearner` trait now has 4 additional default methods
+  (non-breaking: all return no-op/zero defaults).
+
+## [9.8.2] - 2026-03-28
+
+### Added
+
+- **Auto-builder engine** (`automl::auto_builder`):
+  - `FeasibleRegion` — SRM-inspired complexity budget from data characteristics.
+  - `WelfordRace` — all-see-all racing with center + perturbation candidates.
+  - `DiagnosticAdaptor` — streams smooth LR/lambda adjustments and structural changes
+    from model diagnostic signals.
+  - `ConfigDiagnostics` — 5-signal struct (residual alignment, regularization sensitivity,
+    depth sufficiency, effective DOF, uncertainty).
+- **`DiagnosticSource` trait** — model-agnostic diagnostic extraction. Implemented for
+  all 30+ models (SGBT, DistributionalSGBT, ESN, Mamba, SpikeNet, TTT, KAN, MoE,
+  KRLS, RLS, Linear, Mondrian, Pipeline, ContinualLearner, and more).
+- **SGBT diagnostic cache** — `update_diagnostic_cache()` computes 4 real signals
+  from tree G/H leaf traversal every `train_one()`.
+- Comprehensive diagnostics module (`ensemble::diagnostics`) with `TreeDiagnostics`,
+  `EnsembleDiagnostics`, `DistributionalDiagnostics`, and `Display` impls.
+
+## [9.8.1] - 2026-03-27
+
+### Added
+
+- KAN and TTT integrated into AutoML `Factory` (Algorithm::Kan, Algorithm::Ttt).
+- Python bindings for `StreamingTTT`, `StreamingKAN`, `NeuralMoE`, `AutoTuner`.
+- CLI support for `ttt` and `kan` model types in `irithyll train`.
+- Example programs: `kan_regression.rs`, `neural_moe.rs`.
+- `grace_period` added as 7th hyperparameter in SGBT/Distributional search spaces.
+
+## [9.8.0] - 2026-03-27
+
+### Added
+
+- **Streaming Kolmogorov-Arnold Networks** (`kan`):
+  - `StreamingKAN` — B-spline edge activations with De Boor's algorithm.
+  - `KANConfig` builder with `n_in`, `n_out`, `hidden_sizes`, `spline_order`,
+    `grid_size`, `lr`, `w_b`, `w_s` parameters.
+  - `KANLayer` — per-edge cubic B-spline coefficients, sparse gradient updates
+    (only 4 coefficients update per edge per sample).
+  - Welford input normalization, rolling loss for LR modulation.
+  - Implements `StreamingLearner` and `DiagnosticSource`.
+
+## [9.7.2] - 2026-03-26
+
+### Added
+
+- **Unified `Factory`** struct with `Algorithm` enum (8 variants: Sgbt, Distributional,
+  Esn, Mamba, Attention, SpikeNet, Kan, Ttt). Replaces per-model factory types
+  (old types deprecated).
+- Complexity-adjusted elimination: `score = ewma_error + complexity/n_seen` (MDL-inspired).
+- Drift-triggered re-racing: ADWIN fires → new tournament with expanded bracket.
+- `DiscountedThompsonSampling` bandit (Qi+ 2023) for factory selection with
+  exponential forgetting.
+
+## [9.7.1] - 2026-03-26
+
+### Added
+
+- **Per-node auto-bandwidth soft routing** — `predict_soft_routed()` on
+  DistributionalSGBT and SGBT. Per-node Gaussian kernels with auto-calibrated
+  bandwidths from median split threshold gaps. Continuous weighted blends
+  eliminate step discontinuities at decision boundaries.
+- irithyll-core bumped to 0.9.0 for soft routing support.
+
+## [9.7.0] - 2026-03-25
+
+### Added
+
+- **Streaming Test-Time Training** (`ttt`):
+  - `StreamingTTT` — hidden state IS a linear model (W), updated by gradient
+    descent on reconstruction loss per sample. Titans extensions (momentum +
+    weight decay).
+  - `TTTConfig` builder with `d_model`, `n_heads`, `eta`, `alpha`, `momentum`.
+  - `TTTLayer` — fast weight updates with optional momentum decay.
+  - `prediction_uncertainty()` from rolling variance.
+- **Honest sigma** (`DistributionalSGBT::honest_sigma()`) — tree contribution
+  variance for instant epistemic uncertainty, zero hyperparameters.
+- **Adaptive MTS** — `adaptive_mts(sigma_ratio)` modulates tree lifetime based
+  on model uncertainty. High uncertainty → shorter lifetime → faster adaptation.
+- **Proactive pruning** — `proactive_prune()` replaces least-contributing trees
+  at configurable intervals.
+
+## [9.6.0] - 2026-03-25
+
+### Added
+
+- **Streaming Neural Mixture of Experts** (`moe`):
+  - `NeuralMoE` — polymorphic `Box<dyn StreamingLearner>` experts with top-k
+    sparse routing and DeepSeek-v3 load balancing.
+  - `LinearRouter` — softmax gating with SGD updates and auxiliary load balance loss.
+  - `NeuralMoEBuilder` for ergonomic construction.
+  - `expert_disagreement()` and `cached_disagreement()` for uncertainty.
+  - Implements `StreamingLearner` and `DiagnosticSource`.
+
+## [9.5.2] - 2026-03-24
+
+### Added
+
+- Warmup-aware elimination: `ModelFactory::warmup_hint()` protects neural models
+  during cold-start (warmup-excluded median in early stopping).
+- Statistical early stopping: Welford z-test (z > 2.0, min 30 samples) kills
+  bad candidates early.
+- Adaptive bracket sizing: `n_initial` doubles on promotion, halves when champion holds.
+
+## [9.5.1] - 2026-03-24
+
+### Added
+
+- Tournament successive halving: 8 candidates → eliminate bottom half each round → finalist.
+- Multi-factory racing across heterogeneous model types.
+- Perturbation sampling: 50% candidates from champion's config neighborhood,
+  50% random/bandit-guided.
+- `ConfigSpace`, `HyperParam`, `ConfigSampler` (random, latin hypercube, perturb).
+- `RewardNormalizer` (EWMA baseline, normalize to [0,1]).
+
+## [9.5.0] - 2026-03-24
+
+### Added
+
+- **Streaming AutoML** (`automl`):
+  - `AutoTuner` with champion-challenger racing.
+  - `ModelFactory` trait and `SgbtFactory` for hyperparameter search.
+  - `AutoTunerConfig` with `round_budget`, `n_initial`, `metric`, `ewma_span`.
+  - `auto_tune()` convenience factory function.
+  - `AutoMetric` enum (MAE, RMSE, R2).
+
+## [9.4.1] - 2026-03-24
+
+### Changed
+
+- TUI overhaul: improved dashboard layout, better metric display.
+- Documentation and reference updates across all modules.
+- CLI and Python bindings updated for v9.4 features.
+
+## [9.4.0] - 2026-03-23
+
+### Added
+
+- **SIMD-accelerated inference** in irithyll-core:
+  - `simd::dot_product_f64()` — 4-wide f64 SIMD dot product.
+  - `simd::matvec_f64()` — SIMD matrix-vector multiply.
+  - Feature-gated behind `simd` feature flag.
+  - Auto-vectorization hints for non-SIMD fallback paths.
+
+## [9.3.0] - 2026-03-23
+
+### Added
+
+- **Conformal prediction v2** (`conformal`):
+  - PID control for adaptive coverage (Angelopoulos+ 2024).
+  - Strongly adaptive conformal inference (Gibbs & Candes 2024).
+  - Platt scaling for probability calibration.
+  - `ConformalPID` with configurable P/I/D gains.
+  - Step, exponential, and cosine learning rate schedules.
+
+## [9.2.0] - 2026-03-23
+
+### Added
+
+- **Drift-aware continual learning** (`continual`):
+  - `ContinualLearner` wrapper with pluggable `ContinualStrategy`.
+  - Elastic Weight Consolidation (EWC) — Fisher information regularization.
+  - Neuron regeneration — periodic random re-initialization of dead neurons.
+  - Parameter isolation — freeze important parameters, learn new ones.
+
+## [9.1.0] - 2026-03-22
+
+### Added
+
+- **Unified streaming linear attention** (`attention`):
+  - GLA (Gated Linear Attention).
+  - DeltaNet (delta rule attention).
+  - RWKV-style (time-mixing with exponential decay).
+  - Hawk (gated recurrence with 1D depthwise convolution).
+  - RetNet (multi-scale exponential decay).
+  - mLSTM (matrix LSTM with exponential gating).
+  - `StreamingAttentionModel` with RLS readout.
+  - `AttentionPreprocessor` as `StreamingPreprocessor`.
+
+## [9.0.1] - 2026-03-22
+
+### Added
+
+- Per-split information criterion scoring (Lunde, Kleppe & Skaug 2020) for
+  Hoeffding tree split evaluation.
+
 ## [9.0.0] - 2026-03-22
 
 ### Added

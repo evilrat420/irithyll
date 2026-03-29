@@ -6,12 +6,12 @@ name = "irithyll"
 version = "9.8.3"
 edition = "2021"
 rust-version = "1.75"
-description = "Streaming machine learning in Rust -- gradient boosted trees, kernel methods, linear models, and composable pipelines"
+description = "Streaming ML in Rust -- gradient boosted trees, neural architectures (TTT/KAN/MoE/Mamba/SNN), AutoML, kernel methods, and composable pipelines"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/evilrat420/irithyll"
 readme = "README.md"
 documentation = "https://docs.rs/irithyll"
-keywords = ["machine-learning", "gradient-boosting", "streaming", "online-learning", "decision-trees"]
+keywords = ["machine-learning", "gradient-boosting", "streaming", "online-learning", "automl"]
 categories = ["algorithms", "science"]
 exclude = [".claude/", "irithyll-python/", "irithyll-core/", "irithyll-cli/", "marketing/"]
 

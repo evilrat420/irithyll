@@ -222,19 +222,34 @@ fn render_main(frame: &mut ratatui::Frame, state: &app::AppState, area: ratatui:
         render_importances(frame, state, left_chunks[1]);
     }
 
-    // Right panel: loss chart, optionally split with accuracy chart.
+    // Right panel: loss chart + optional accuracy chart + diagnostics panel.
+    let has_accuracy = !state.accuracy_history.is_empty();
+    let has_diagnostics =
+        state.diagnostics_array.iter().any(|v| v.abs() > 1e-15) || state.total_replacements > 0;
+
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(if state.accuracy_history.is_empty() {
-            vec![Constraint::Percentage(100)]
-        } else {
-            vec![Constraint::Percentage(50), Constraint::Percentage(50)]
+        .constraints(match (has_accuracy, has_diagnostics) {
+            (true, true) => vec![
+                Constraint::Percentage(35),
+                Constraint::Percentage(35),
+                Constraint::Percentage(30),
+            ],
+            (true, false) => vec![Constraint::Percentage(50), Constraint::Percentage(50)],
+            (false, true) => vec![Constraint::Percentage(60), Constraint::Percentage(40)],
+            (false, false) => vec![Constraint::Percentage(100)],
         })
         .split(chunks[1]);
 
     render_loss_chart(frame, state, right_chunks[0]);
-    if !state.accuracy_history.is_empty() {
-        render_accuracy_chart(frame, state, right_chunks[1]);
+
+    let mut next_idx = 1;
+    if has_accuracy && right_chunks.len() > next_idx {
+        render_accuracy_chart(frame, state, right_chunks[next_idx]);
+        next_idx += 1;
+    }
+    if has_diagnostics && right_chunks.len() > next_idx {
+        render_diagnostics(frame, state, right_chunks[next_idx]);
     }
 }
 
@@ -649,6 +664,93 @@ fn render_accuracy_chart(
         );
 
     frame.render_widget(chart, area);
+}
+
+/// Right sub-panel: model diagnostics (replacements, diagnostic signals, honest_sigma).
+#[cfg(feature = "tui")]
+fn render_diagnostics(
+    frame: &mut ratatui::Frame,
+    state: &app::AppState,
+    area: ratatui::layout::Rect,
+) {
+    use ratatui::{prelude::*, widgets::*};
+
+    let block = Block::bordered()
+        .title(Line::from(vec![Span::styled(
+            " Diagnostics ",
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        )]))
+        .border_style(Style::default().fg(theme::MAUVE))
+        .style(Style::default().bg(theme::BASE));
+
+    let d = state.diagnostics_array;
+    let labels = [
+        ("Residual Align", d[0]),
+        ("Reg Sensitivity", d[1]),
+        ("Depth Sufficiency", d[2]),
+        ("Effective DOF", d[3]),
+        ("Uncertainty", d[4]),
+    ];
+
+    let mut rows: Vec<Row> = vec![Row::new(vec![
+        Cell::from(Span::styled(
+            "Replacements",
+            Style::default()
+                .fg(theme::TEXT)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Cell::from(Span::styled(
+            format!("{}", state.total_replacements),
+            Style::default().fg(theme::PEACH),
+        )),
+    ])];
+
+    for (name, val) in &labels {
+        let color = if val.abs() < 1e-15 {
+            theme::SUBTEXT0
+        } else if *val > 0.5 {
+            theme::GREEN
+        } else {
+            theme::TEAL
+        };
+        rows.push(Row::new(vec![
+            Cell::from(Span::styled(
+                *name,
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                format!("{:.6}", val),
+                Style::default().fg(color),
+            )),
+        ]));
+    }
+
+    if state.model_type == "distributional" && state.honest_sigma > 0.0 {
+        rows.push(Row::new(vec![
+            Cell::from(Span::styled(
+                "Honest Sigma",
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Cell::from(Span::styled(
+                format!("{:.6}", state.honest_sigma),
+                Style::default().fg(theme::LAVENDER),
+            )),
+        ]));
+    }
+
+    let table = Table::new(
+        rows,
+        [Constraint::Percentage(50), Constraint::Percentage(50)],
+    )
+    .block(block);
+
+    frame.render_widget(table, area);
 }
 
 /// Footer: keybinding hints + status.

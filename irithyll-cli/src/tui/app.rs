@@ -26,6 +26,17 @@ pub struct AppState {
     pub is_done: bool,
     /// Status message displayed in the footer.
     pub status_message: String,
+
+    // -- Diagnostics --
+    /// Total tree replacements across all boosting steps.
+    pub total_replacements: u64,
+    /// Compact diagnostic signals: [residual_alignment, reg_sensitivity,
+    /// depth_sufficiency, effective_dof, uncertainty].
+    pub diagnostics_array: [f64; 5],
+    /// Honest sigma (DistributionalSGBT only).
+    pub honest_sigma: f64,
+    /// Model type string for conditional diagnostics display.
+    pub model_type: String,
 }
 
 impl AppState {
@@ -43,6 +54,10 @@ impl AppState {
             is_training: true,
             is_done: false,
             status_message: String::from("Initializing..."),
+            total_replacements: 0,
+            diagnostics_array: [0.0; 5],
+            honest_sigma: 0.0,
+            model_type: String::new(),
         }
     }
 

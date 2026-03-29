@@ -645,6 +645,57 @@ impl PyModel {
         Self::from_json(&json)
     }
 
+    /// Dynamically adjust the learning rate.
+    fn set_learning_rate(&mut self, lr: f64) {
+        self.inner.set_learning_rate(lr);
+    }
+
+    /// Dynamically adjust L2 regularization (lambda).
+    fn set_lambda(&mut self, lambda: f64) {
+        self.inner.set_lambda(lambda);
+    }
+
+    /// Dynamically adjust the maximum tree depth.
+    fn set_max_depth(&mut self, depth: usize) {
+        self.inner.set_max_depth(depth);
+    }
+
+    /// Dynamically adjust the number of boosting steps.
+    fn set_n_steps(&mut self, n: usize) {
+        self.inner.set_n_steps(n);
+    }
+
+    /// Total tree replacements across all boosting steps.
+    fn total_replacements(&self) -> u64 {
+        self.inner.total_replacements()
+    }
+
+    /// Raw diagnostic signals: [residual_alignment, reg_sensitivity,
+    /// depth_sufficiency, effective_dof, uncertainty].
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::automl::DiagnosticSource;
+        match self.inner.config_diagnostics() {
+            Some(d) => [
+                d.residual_alignment,
+                d.regularization_sensitivity,
+                d.depth_sufficiency,
+                d.effective_dof,
+                d.uncertainty,
+            ],
+            None => [0.0; 5],
+        }
+    }
+
+    /// The current base prediction (intercept).
+    fn base_prediction(&self) -> f64 {
+        self.inner.base_prediction()
+    }
+
+    /// Total trees (active + alternates).
+    fn n_trees(&self) -> usize {
+        self.inner.n_trees()
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "StreamingGBT(n_steps={}, samples={}, leaves={})",
@@ -902,6 +953,83 @@ impl PyDistributional {
     #[getter]
     fn n_samples_seen(&self) -> u64 {
         self.inner.n_samples_seen()
+    }
+
+    /// Predict only the standard deviation (scale parameter).
+    fn predict_sigma(&self, features: Vec<f64>) -> f64 {
+        self.inner.predict_sigma(&features)
+    }
+
+    /// Predict a symmetric confidence interval (mu +/- z*sigma).
+    ///
+    /// Args:
+    ///     features: feature vector
+    ///     confidence: Z-score multiplier (e.g. 1.96 for 95% CI)
+    ///
+    /// Returns:
+    ///     tuple: (lower, upper)
+    fn predict_interval(&self, features: Vec<f64>, confidence: f64) -> (f64, f64) {
+        self.inner.predict_interval(&features, confidence)
+    }
+
+    /// Predict with soft-routed (continuous blend) location trees.
+    ///
+    /// Returns the mean (mu) of the soft-routed Gaussian prediction.
+    fn predict_soft_routed(&self, features: Vec<f64>) -> f64 {
+        self.inner.predict_soft_routed(&features).mu
+    }
+
+    /// Honest sigma (epistemic uncertainty from tree contribution variance).
+    ///
+    /// Computed from the full Gaussian prediction. Returns the
+    /// Bessel-corrected standard deviation of individual tree contributions.
+    fn honest_sigma(&self, features: Vec<f64>) -> f64 {
+        self.inner.predict(&features).honest_sigma
+    }
+
+    /// Rolling EWMA of honest_sigma across recent predictions.
+    fn rolling_honest_sigma_mean(&self) -> f64 {
+        self.inner.rolling_honest_sigma_mean()
+    }
+
+    /// Feature importances (normalized split gains, sum to 1.0).
+    fn feature_importances(&self) -> Vec<f64> {
+        self.inner.feature_importances()
+    }
+
+    /// Dynamically adjust the learning rate.
+    fn set_learning_rate(&mut self, lr: f64) {
+        self.inner.set_learning_rate(lr);
+    }
+
+    /// Dynamically adjust L2 regularization (lambda).
+    fn set_lambda(&mut self, lambda: f64) {
+        self.inner.set_lambda(lambda);
+    }
+
+    /// Dynamically adjust the maximum tree depth.
+    fn set_max_depth(&mut self, depth: usize) {
+        self.inner.set_max_depth(depth);
+    }
+
+    /// Dynamically adjust the number of boosting steps.
+    fn set_n_steps(&mut self, n: usize) {
+        self.inner.set_n_steps(n);
+    }
+
+    /// Total tree replacements across all boosting steps.
+    fn total_replacements(&self) -> u64 {
+        self.inner.total_replacements()
+    }
+
+    /// Total trees (location + scale, active + alternates).
+    fn n_trees(&self) -> usize {
+        self.inner.n_trees()
+    }
+
+    /// Number of boosting steps.
+    fn n_steps(&self) -> usize {
+        self.inner.n_steps()
     }
 
     /// Reset to initial state.
@@ -1324,6 +1452,12 @@ impl PyNextGenRC {
         self.inner.n_samples_seen()
     }
 
+    /// Raw diagnostic signals for adaptive tuning.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::StreamingLearner;
+        self.inner.diagnostics_array()
+    }
+
     fn __repr__(&self) -> String {
         use irithyll::StreamingLearner;
         format!("NextGenRC(samples={})", self.inner.n_samples_seen())
@@ -1390,6 +1524,17 @@ impl PyEchoStateNetwork {
         self.inner.n_samples_seen()
     }
 
+    /// Raw diagnostic signals for adaptive tuning.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::StreamingLearner;
+        self.inner.diagnostics_array()
+    }
+
+    /// Prediction uncertainty estimate.
+    fn prediction_uncertainty(&self) -> f64 {
+        self.inner.prediction_uncertainty()
+    }
+
     fn __repr__(&self) -> String {
         use irithyll::StreamingLearner;
         format!("EchoStateNetwork(samples={})", self.inner.n_samples_seen())
@@ -1454,6 +1599,17 @@ impl PyStreamingMamba {
         self.inner.n_samples_seen()
     }
 
+    /// Raw diagnostic signals for adaptive tuning.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::StreamingLearner;
+        self.inner.diagnostics_array()
+    }
+
+    /// Prediction uncertainty estimate.
+    fn prediction_uncertainty(&self) -> f64 {
+        self.inner.prediction_uncertainty()
+    }
+
     fn __repr__(&self) -> String {
         use irithyll::StreamingLearner;
         format!("StreamingMamba(samples={})", self.inner.n_samples_seen())
@@ -1516,6 +1672,12 @@ impl PySpikeNet {
     fn n_samples_seen(&self) -> u64 {
         use irithyll::StreamingLearner;
         self.inner.n_samples_seen()
+    }
+
+    /// Raw diagnostic signals for adaptive tuning.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::StreamingLearner;
+        self.inner.diagnostics_array()
     }
 
     fn __repr__(&self) -> String {
@@ -1584,6 +1746,17 @@ impl PyGLA {
     fn n_samples_seen(&self) -> u64 {
         use irithyll::StreamingLearner;
         self.inner.n_samples_seen()
+    }
+
+    /// Raw diagnostic signals for adaptive tuning.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::StreamingLearner;
+        self.inner.diagnostics_array()
+    }
+
+    /// Prediction uncertainty estimate.
+    fn prediction_uncertainty(&self) -> f64 {
+        self.inner.prediction_uncertainty()
     }
 
     fn __repr__(&self) -> String {
@@ -1844,6 +2017,17 @@ impl PyStreamingTTT {
         self.inner.n_samples_seen()
     }
 
+    /// Raw diagnostic signals for adaptive tuning.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::StreamingLearner;
+        self.inner.diagnostics_array()
+    }
+
+    /// Prediction uncertainty estimate.
+    fn prediction_uncertainty(&self) -> f64 {
+        self.inner.prediction_uncertainty()
+    }
+
     fn __repr__(&self) -> String {
         use irithyll::StreamingLearner;
         format!("StreamingTTT(samples={})", self.inner.n_samples_seen())
@@ -1920,6 +2104,12 @@ impl PyStreamingKAN {
     fn n_samples_seen(&self) -> u64 {
         use irithyll::StreamingLearner;
         self.inner.n_samples_seen()
+    }
+
+    /// Raw diagnostic signals for adaptive tuning.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::StreamingLearner;
+        self.inner.diagnostics_array()
     }
 
     fn __repr__(&self) -> String {
@@ -2009,6 +2199,20 @@ impl PyNeuralMoE {
     fn n_samples_seen(&self) -> u64 {
         use irithyll::StreamingLearner;
         self.inner.n_samples_seen()
+    }
+
+    /// Raw diagnostic signals for adaptive tuning.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::StreamingLearner;
+        self.inner.diagnostics_array()
+    }
+
+    /// Expert disagreement for a given feature vector.
+    ///
+    /// High disagreement indicates divergent expert views (epistemic
+    /// uncertainty). Returns 0.0 when fewer than 2 experts exist.
+    fn expert_disagreement(&self, features: Vec<f64>) -> f64 {
+        self.inner.expert_disagreement(&features)
     }
 
     fn __repr__(&self) -> String {
@@ -2113,6 +2317,30 @@ impl PyAutoTuner {
     fn n_samples_seen(&self) -> u64 {
         use irithyll::StreamingLearner;
         self.inner.n_samples_seen()
+    }
+
+    /// Diagnostic snapshot of the current tuner state (debug format).
+    fn snapshot(&self) -> String {
+        format!("{:?}", self.inner.snapshot())
+    }
+
+    /// Names of all registered model factories.
+    fn factory_names(&self) -> Vec<String> {
+        self.inner
+            .factory_names()
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Number of candidates remaining in the current tournament round.
+    fn candidates_remaining(&self) -> usize {
+        self.inner.candidates_remaining()
+    }
+
+    /// Current tournament round (0-indexed).
+    fn current_round(&self) -> usize {
+        self.inner.current_round()
     }
 
     fn __repr__(&self) -> String {
