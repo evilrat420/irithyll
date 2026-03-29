@@ -359,6 +359,21 @@ impl StreamingLearner for StreamingLinearModel {
         self.n_features = None;
         self.samples_seen = 0;
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        [
+            0.0,                                    // residual_alignment
+            0.0,                                    // reg_sensitivity
+            0.0,                                    // depth_sufficiency
+            self.weights.len() as f64,              // effective_dof
+            1.0 / (1.0 + self.samples_seen as f64), // uncertainty
+        ]
+    }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
+        // Scale the learning rate. Clamp to a reasonable floor.
+        self.learning_rate = (self.learning_rate * lr_multiplier).max(1e-12);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +416,12 @@ impl fmt::Debug for StreamingLinearModel {
 
 impl crate::automl::DiagnosticSource for StreamingLinearModel {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
-        None
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: self.weights.len() as f64,
+            // Uncertainty: inverse of data seen — decreases as model trains.
+            uncertainty: 1.0 / (1.0 + self.samples_seen as f64),
+            ..Default::default()
+        })
     }
 }
 

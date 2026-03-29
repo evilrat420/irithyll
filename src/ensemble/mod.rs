@@ -856,6 +856,32 @@ impl<L: Loss> SGBT<L> {
         self.config.learning_rate = lr;
     }
 
+    /// Set the L2 regularization parameter (lambda) for future boosting rounds.
+    ///
+    /// Higher lambda increases regularization, shrinking leaf weights toward
+    /// zero. Takes effect immediately for subsequent leaf weight computations.
+    ///
+    /// # Arguments
+    ///
+    /// * `lambda` -- new L2 regularization value (must be >= 0)
+    #[inline]
+    pub fn set_lambda(&mut self, lambda: f64) {
+        self.config.lambda = lambda.max(0.0);
+    }
+
+    /// Set the maximum tree depth for future replacement trees.
+    ///
+    /// Existing trees are not affected -- only new trees created during
+    /// drift-triggered or proactive replacement will use the updated depth.
+    ///
+    /// # Arguments
+    ///
+    /// * `depth` -- new maximum depth (clamped to 1..=20)
+    #[inline]
+    pub fn set_max_depth(&mut self, depth: usize) {
+        self.config.max_depth = depth.clamp(1, 20);
+    }
+
     /// Immutable access to the boosting steps.
     ///
     /// Useful for model inspection and export (e.g., ONNX serialization).

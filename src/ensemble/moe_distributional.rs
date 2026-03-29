@@ -772,6 +772,35 @@ impl StreamingLearner for MoEDistributionalSGBT {
     fn reset(&mut self) {
         MoEDistributionalSGBT::reset(self);
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use crate::automl::DiagnosticSource;
+        match self.config_diagnostics() {
+            Some(d) => [
+                d.residual_alignment,
+                d.regularization_sensitivity,
+                d.depth_sufficiency,
+                d.effective_dof,
+                d.uncertainty,
+            ],
+            None => [0.0; 5],
+        }
+    }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        for expert in &mut self.experts {
+            let current_lr = expert.config().learning_rate;
+            expert.set_learning_rate(current_lr * lr_multiplier);
+            let current_lambda = expert.config().lambda;
+            expert.set_lambda(current_lambda + lambda_delta);
+        }
+        for shadow in &mut self.shadows {
+            let current_lr = shadow.config().learning_rate;
+            shadow.set_learning_rate(current_lr * lr_multiplier);
+            let current_lambda = shadow.config().lambda;
+            shadow.set_lambda(current_lambda + lambda_delta);
+        }
+    }
 }
 
 // ===========================================================================

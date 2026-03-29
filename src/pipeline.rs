@@ -260,6 +260,19 @@ impl StreamingLearner for Pipeline {
         self.learner.reset();
         self.samples_seen = 0;
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        self.learner.diagnostics_array()
+    }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        self.learner.adjust_config(lr_multiplier, lambda_delta);
+    }
+
+    fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
+        self.learner
+            .apply_structural_change(depth_delta, steps_delta);
+    }
 }
 
 // Pipeline is Send + Sync because its fields are:

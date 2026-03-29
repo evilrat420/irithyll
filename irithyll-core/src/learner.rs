@@ -46,6 +46,9 @@ use alloc::vec::Vec;
 /// |--------|---------|
 /// | [`train`](Self::train) | Convenience wrapper calling `train_one` with unit weight |
 /// | [`predict_batch`](Self::predict_batch) | Map `predict` over a slice of feature vectors |
+/// | [`diagnostics_array`](Self::diagnostics_array) | Raw diagnostic signals for adaptive tuning (all zeros by default) |
+/// | [`adjust_config`](Self::adjust_config) | Apply smooth LR/lambda adjustments (no-op by default) |
+/// | [`apply_structural_change`](Self::apply_structural_change) | Apply depth/steps changes at replacement boundaries (no-op by default) |
 pub trait StreamingLearner: Send + Sync {
     /// Train on a single observation with explicit sample weight.
     ///
@@ -98,4 +101,37 @@ pub trait StreamingLearner: Send + Sync {
     fn predict_batch(&self, feature_matrix: &[&[f64]]) -> Vec<f64> {
         feature_matrix.iter().map(|row| self.predict(row)).collect()
     }
+
+    /// Raw diagnostic signals for adaptive tuning.
+    ///
+    /// Returns `[residual_alignment, reg_sensitivity, depth_sufficiency,
+    /// effective_dof, uncertainty]`. These five signals drive the
+    /// [`DiagnosticAdaptor`] in the auto-builder pipeline.
+    ///
+    /// Default: all zeros (model does not provide diagnostics). Models with
+    /// internal diagnostic caches (e.g. SGBT, DistributionalSGBT) override
+    /// this to return real computed values.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        [0.0; 5]
+    }
+
+    /// Apply smooth learning rate and regularization adjustments.
+    ///
+    /// * `lr_multiplier` -- scales the current learning rate (1.0 = no change,
+    ///   0.99 = 1% decrease, 1.01 = 1% increase).
+    /// * `lambda_delta` -- added to the L2 regularization parameter
+    ///   (0.0 = no change, positive = increase, negative = decrease).
+    ///
+    /// Default: no-op. Override for models with adjustable hyperparameters
+    /// (e.g. SGBT, DistributionalSGBT).
+    fn adjust_config(&mut self, _lr_multiplier: f64, _lambda_delta: f64) {}
+
+    /// Apply structural changes at model replacement boundaries.
+    ///
+    /// * `depth_delta` -- adjust maximum tree depth (+1, -1, or 0).
+    /// * `steps_delta` -- adjust number of ensemble steps (+2, -2, or 0).
+    ///
+    /// Structural changes take effect on the *next* tree replacement, not
+    /// immediately. Default: no-op for models without structural config.
+    fn apply_structural_change(&mut self, _depth_delta: i32, _steps_delta: i32) {}
 }

@@ -587,15 +587,28 @@ impl StreamingLearner for AutoTuner {
 
         // 6. Auto-builder diagnostic adaptation.
         if let Some(ref mut adaptor) = self.adaptor {
-            // For v9.8.2, construct ConfigDiagnostics from available signals.
-            // Full DiagnosticSource integration (downcasting champion to get
-            // tree internals) is v9.9 material.
+            // Extract full diagnostics from the champion via StreamingLearner.
+            let arr = self.champion.diagnostics_array();
             let diagnostics = auto_builder::ConfigDiagnostics {
-                uncertainty: get_metric(&self.champion_ewma, self.config.metric),
-                ..Default::default()
+                residual_alignment: arr[0],
+                regularization_sensitivity: arr[1],
+                depth_sufficiency: arr[2],
+                effective_dof: arr[3],
+                uncertainty: if arr[4] > 0.0 {
+                    arr[4]
+                } else {
+                    get_metric(&self.champion_ewma, self.config.metric)
+                },
             };
-            let _adjustments = adaptor.after_train(&diagnostics);
-            // TODO: apply adjustments to champion config in future
+            let adjustments = adaptor.after_train(&diagnostics);
+
+            // Apply smooth adjustments to the champion's config.
+            if (adjustments.lr_multiplier - 1.0).abs() > 1e-15
+                || adjustments.lambda_direction.abs() > 1e-15
+            {
+                self.champion
+                    .adjust_config(adjustments.lr_multiplier, adjustments.lambda_direction);
+            }
         }
 
         // 7. Drift-triggered re-racing: abort tournament and start fresh.
@@ -967,9 +980,17 @@ unsafe impl Sync for AutoTuner {}
 
 impl crate::automl::DiagnosticSource for AutoTuner {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        let arr = self.champion.diagnostics_array();
         Some(crate::automl::ConfigDiagnostics {
-            uncertainty: get_metric(&self.champion_ewma, self.config.metric),
-            ..Default::default()
+            residual_alignment: arr[0],
+            regularization_sensitivity: arr[1],
+            depth_sufficiency: arr[2],
+            effective_dof: arr[3],
+            uncertainty: if arr[4] > 0.0 {
+                arr[4]
+            } else {
+                get_metric(&self.champion_ewma, self.config.metric)
+            },
         })
     }
 }

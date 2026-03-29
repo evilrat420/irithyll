@@ -363,6 +363,26 @@ impl StreamingLearner for StreamingTTT {
         self.samples_trained = 0;
         self.rolling_uncertainty = 0.0;
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use crate::automl::DiagnosticSource;
+        match self.config_diagnostics() {
+            Some(d) => [
+                d.residual_alignment,
+                d.regularization_sensitivity,
+                d.depth_sufficiency,
+                d.effective_dof,
+                d.uncertainty,
+            ],
+            None => [0.0; 5],
+        }
+    }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
+        // Scale the inner learning rate (eta) for fast weight updates.
+        self.config.eta *= lr_multiplier;
+        self.layer.set_eta(self.config.eta);
+    }
 }
 
 impl std::fmt::Debug for StreamingTTT {

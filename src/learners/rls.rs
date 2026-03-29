@@ -311,6 +311,21 @@ impl StreamingLearner for RecursiveLeastSquares {
         self.samples_seen = 0;
         self.running_mse = 0.0;
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        [
+            0.0,                          // residual_alignment
+            1.0 - self.forgetting_factor, // reg_sensitivity
+            0.0,                          // depth_sufficiency
+            self.weights.len() as f64,    // effective_dof
+            self.running_mse.sqrt(),      // uncertainty
+        ]
+    }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
+        // Scale the forgetting factor. Clamp to (0, 1].
+        self.forgetting_factor = (self.forgetting_factor * lr_multiplier).clamp(1e-6, 1.0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -500,6 +515,10 @@ impl StreamingLearner for StreamingPolynomialRegression {
     fn reset(&mut self) {
         self.rls.reset();
         self.samples_seen = 0;
+    }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        [0.0; 5]
     }
 }
 
@@ -711,6 +730,10 @@ impl StreamingLearner for LocallyWeightedRegression {
         self.head = 0;
         self.len = 0;
         self.samples_seen = 0;
+    }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        [0.0; 5]
     }
 }
 

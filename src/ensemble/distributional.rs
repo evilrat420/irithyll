@@ -1468,6 +1468,24 @@ impl DistributionalSGBT {
         &self.config
     }
 
+    /// Set the learning rate for future boosting rounds.
+    #[inline]
+    pub fn set_learning_rate(&mut self, lr: f64) {
+        self.config.learning_rate = lr;
+    }
+
+    /// Set the L2 regularization parameter (lambda) for future boosting rounds.
+    #[inline]
+    pub fn set_lambda(&mut self, lambda: f64) {
+        self.config.lambda = lambda.max(0.0);
+    }
+
+    /// Set the maximum tree depth for future replacement trees.
+    #[inline]
+    pub fn set_max_depth(&mut self, depth: usize) {
+        self.config.max_depth = depth.clamp(1, 20);
+    }
+
     /// Access the location boosting steps (for export/inspection).
     pub fn location_steps(&self) -> &[BoostingStep] {
         &self.location_steps
@@ -1947,6 +1965,28 @@ impl StreamingLearner for DistributionalSGBT {
 
     fn reset(&mut self) {
         DistributionalSGBT::reset(self);
+    }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        [
+            self.cached_residual_alignment,
+            self.cached_reg_sensitivity,
+            self.cached_depth_sufficiency,
+            self.cached_effective_dof,
+            self.rolling_honest_sigma_mean(),
+        ]
+    }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        self.set_learning_rate(self.config.learning_rate * lr_multiplier);
+        self.set_lambda(self.config.lambda + lambda_delta);
+    }
+
+    fn apply_structural_change(&mut self, depth_delta: i32, _steps_delta: i32) {
+        if depth_delta != 0 {
+            let current = self.config.max_depth as i32;
+            self.set_max_depth((current + depth_delta).max(1) as usize);
+        }
     }
 }
 

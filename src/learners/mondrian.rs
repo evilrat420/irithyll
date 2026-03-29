@@ -582,6 +582,21 @@ impl StreamingLearner for MondrianForest {
         }
         self.samples_seen = 0;
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        [
+            0.0,                                    // residual_alignment
+            0.0,                                    // reg_sensitivity
+            0.0,                                    // depth_sufficiency
+            self.trees.len() as f64,                // effective_dof
+            1.0 / (1.0 + self.samples_seen as f64), // uncertainty
+        ]
+    }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
+        // Scale the lifetime (lambda) parameter. Clamp to a reasonable floor.
+        self.config.lifetime = (self.config.lifetime * lr_multiplier).max(1e-6);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -620,7 +635,12 @@ impl fmt::Debug for MondrianForest {
 
 impl crate::automl::DiagnosticSource for MondrianForest {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
-        None
+        Some(crate::automl::ConfigDiagnostics {
+            effective_dof: self.trees.len() as f64,
+            // Uncertainty: inverse of data seen — decreases as the forest trains.
+            uncertainty: 1.0 / (1.0 + self.samples_seen as f64),
+            ..Default::default()
+        })
     }
 }
 

@@ -241,6 +241,18 @@ impl StreamingLearner for ContinualLearner {
         self.drift_count = 0;
         self.last_drift_signal = DriftSignal::Stable;
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        self.inner.diagnostics_array()
+    }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        self.inner.adjust_config(lr_multiplier, lambda_delta);
+    }
+
+    fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
+        self.inner.apply_structural_change(depth_delta, steps_delta);
+    }
 }
 
 // ---------------------------------------------------------------------------

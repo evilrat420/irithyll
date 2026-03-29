@@ -192,6 +192,35 @@ impl<L: Loss> StreamingLearner for SGBTLearner<L> {
     fn reset(&mut self) {
         self.inner.reset();
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use crate::automl::DiagnosticSource;
+        match self.inner.config_diagnostics() {
+            Some(d) => [
+                d.residual_alignment,
+                d.regularization_sensitivity,
+                d.depth_sufficiency,
+                d.effective_dof,
+                d.uncertainty,
+            ],
+            None => [0.0; 5],
+        }
+    }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        let current_lr = self.inner.config().learning_rate;
+        self.inner.set_learning_rate(current_lr * lr_multiplier);
+        let current_lambda = self.inner.config().lambda;
+        self.inner.set_lambda(current_lambda + lambda_delta);
+    }
+
+    fn apply_structural_change(&mut self, depth_delta: i32, _steps_delta: i32) {
+        if depth_delta != 0 {
+            let current = self.inner.config().max_depth as i32;
+            self.inner
+                .set_max_depth((current + depth_delta).max(1) as usize);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

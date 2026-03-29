@@ -220,6 +220,20 @@ impl StreamingLearner for EchoStateNetwork {
         // not the architecture. If the user wants a fresh reservoir, they should
         // construct a new ESN.
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use crate::automl::DiagnosticSource;
+        match self.config_diagnostics() {
+            Some(d) => [
+                d.residual_alignment,
+                d.regularization_sensitivity,
+                d.depth_sufficiency,
+                d.effective_dof,
+                d.uncertainty,
+            ],
+            None => [0.0; 5],
+        }
+    }
 }
 
 impl fmt::Debug for EchoStateNetwork {

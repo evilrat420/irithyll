@@ -191,6 +191,20 @@ impl StreamingLearner for StreamingAttentionModel {
         }
         self.n_samples = 0;
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use crate::automl::DiagnosticSource;
+        match self.config_diagnostics() {
+            Some(d) => [
+                d.residual_alignment,
+                d.regularization_sensitivity,
+                d.depth_sufficiency,
+                d.effective_dof,
+                d.uncertainty,
+            ],
+            None => [0.0; 5],
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

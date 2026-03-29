@@ -401,6 +401,25 @@ impl StreamingLearner for StreamingKAN {
         self.n_samples = 0;
         self.rolling_loss = 0.0;
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use crate::automl::DiagnosticSource;
+        match self.config_diagnostics() {
+            Some(d) => [
+                d.residual_alignment,
+                d.regularization_sensitivity,
+                d.depth_sufficiency,
+                d.effective_dof,
+                d.uncertainty,
+            ],
+            None => [0.0; 5],
+        }
+    }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
+        // Scale the SGD learning rate for B-spline coefficient updates.
+        self.config.lr *= lr_multiplier;
+    }
 }
 
 impl std::fmt::Debug for StreamingKAN {

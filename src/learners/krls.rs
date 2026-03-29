@@ -478,6 +478,24 @@ impl StreamingLearner for KRLS {
         self.p_matrix.clear();
         self.samples_seen = 0;
     }
+
+    fn diagnostics_array(&self) -> [f64; 5] {
+        let budget = self.budget.max(1) as f64;
+        [
+            0.0,                                   // residual_alignment
+            1.0 - self.forgetting_factor,          // reg_sensitivity
+            0.0,                                   // depth_sufficiency
+            self.dictionary.len() as f64,          // effective_dof
+            self.dictionary.len() as f64 / budget, // uncertainty
+        ]
+    }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
+        // Scale the forgetting factor toward/away from 1.0.
+        // lr_multiplier > 1 => more aggressive forgetting (smaller factor).
+        // Clamp to (0, 1].
+        self.forgetting_factor = (self.forgetting_factor * lr_multiplier).clamp(1e-6, 1.0);
+    }
 }
 
 // ---------------------------------------------------------------------------
