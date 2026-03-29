@@ -253,6 +253,10 @@ impl StreamingLearner for ContinualLearner {
     fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
         self.inner.apply_structural_change(depth_delta, steps_delta);
     }
+
+    fn replacement_count(&self) -> u64 {
+        self.inner.replacement_count()
+    }
 }
 
 // ---------------------------------------------------------------------------

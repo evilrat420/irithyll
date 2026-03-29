@@ -49,6 +49,7 @@ use alloc::vec::Vec;
 /// | [`diagnostics_array`](Self::diagnostics_array) | Raw diagnostic signals for adaptive tuning (all zeros by default) |
 /// | [`adjust_config`](Self::adjust_config) | Apply smooth LR/lambda adjustments (no-op by default) |
 /// | [`apply_structural_change`](Self::apply_structural_change) | Apply depth/steps changes at replacement boundaries (no-op by default) |
+/// | [`replacement_count`](Self::replacement_count) | Total internal model replacements (0 by default) |
 pub trait StreamingLearner: Send + Sync {
     /// Train on a single observation with explicit sample weight.
     ///
@@ -134,4 +135,14 @@ pub trait StreamingLearner: Send + Sync {
     /// Structural changes take effect on the *next* tree replacement, not
     /// immediately. Default: no-op for models without structural config.
     fn apply_structural_change(&mut self, _depth_delta: i32, _steps_delta: i32) {}
+
+    /// Total number of internal model replacements (e.g. tree replacements
+    /// triggered by drift detection or max-tree-samples).
+    ///
+    /// External callers (e.g. the auto-builder) use this to detect when a
+    /// structural boundary has occurred and apply queued structural changes.
+    /// Default: 0 for models without replacement semantics.
+    fn replacement_count(&self) -> u64 {
+        0
+    }
 }

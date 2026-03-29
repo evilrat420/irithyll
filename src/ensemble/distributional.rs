@@ -1486,6 +1486,76 @@ impl DistributionalSGBT {
         self.config.max_depth = depth.clamp(1, 20);
     }
 
+    /// Adjust the number of boosting steps (trees per chain).
+    ///
+    /// Both location and scale ensembles are resized together.
+    /// Clamped to `3..=1000`.
+    pub fn set_n_steps(&mut self, n: usize) {
+        let n = n.clamp(3, 1000);
+        let current = self.location_steps.len();
+        if n > current {
+            let leaf_decay_alpha = self
+                .config
+                .leaf_half_life
+                .map(|hl| (-(2.0_f64.ln()) / hl as f64).exp());
+            let tree_config = TreeConfig::new()
+                .max_depth(self.config.max_depth)
+                .n_bins(self.config.n_bins)
+                .lambda(self.config.lambda)
+                .gamma(self.config.gamma)
+                .grace_period(self.config.grace_period)
+                .delta(self.config.delta)
+                .feature_subsample_rate(self.config.feature_subsample_rate)
+                .leaf_decay_alpha_opt(leaf_decay_alpha)
+                .split_reeval_interval_opt(self.config.split_reeval_interval)
+                .feature_types_opt(self.config.feature_types.clone())
+                .gradient_clip_sigma_opt(self.config.gradient_clip_sigma)
+                .monotone_constraints_opt(self.config.monotone_constraints.clone())
+                .max_leaf_output_opt(self.config.max_leaf_output)
+                .adaptive_depth_opt(self.config.adaptive_depth)
+                .min_hessian_sum_opt(self.config.min_hessian_sum)
+                .leaf_model_type(self.config.leaf_model_type.clone());
+            let mts = self.config.max_tree_samples;
+            let shadow_warmup = self.config.shadow_warmup.unwrap_or(0);
+            for i in current..n {
+                // Location step
+                let mut tc = tree_config.clone();
+                tc.seed = self.config.seed ^ (i as u64);
+                let detector = self.config.drift_detector.create();
+                let step = if shadow_warmup > 0 {
+                    BoostingStep::new_with_graduated(tc, detector, mts, shadow_warmup)
+                } else {
+                    BoostingStep::new_with_max_samples(tc, detector, mts)
+                };
+                self.location_steps.push(step);
+
+                // Scale step
+                let mut tc = tree_config.clone();
+                tc.seed = self.config.seed ^ (i as u64) ^ 0x0005_CA1E_0000_0000;
+                let detector = self.config.drift_detector.create();
+                let step = if shadow_warmup > 0 {
+                    BoostingStep::new_with_graduated(tc, detector, mts, shadow_warmup)
+                } else {
+                    BoostingStep::new_with_max_samples(tc, detector, mts)
+                };
+                self.scale_steps.push(step);
+            }
+        } else if n < current {
+            self.location_steps.truncate(n);
+            self.scale_steps.truncate(n);
+        }
+        self.config.n_steps = n;
+    }
+
+    /// Total tree replacements across all boosting steps (location + scale).
+    pub fn total_replacements(&self) -> u64 {
+        self.location_steps
+            .iter()
+            .chain(self.scale_steps.iter())
+            .map(|s| s.slot().replacements())
+            .sum()
+    }
+
     /// Access the location boosting steps (for export/inspection).
     pub fn location_steps(&self) -> &[BoostingStep] {
         &self.location_steps
@@ -1982,11 +2052,19 @@ impl StreamingLearner for DistributionalSGBT {
         self.set_lambda(self.config.lambda + lambda_delta);
     }
 
-    fn apply_structural_change(&mut self, depth_delta: i32, _steps_delta: i32) {
+    fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
         if depth_delta != 0 {
             let current = self.config.max_depth as i32;
             self.set_max_depth((current + depth_delta).max(1) as usize);
         }
+        if steps_delta != 0 {
+            let current = self.config.n_steps as i32;
+            self.set_n_steps((current + steps_delta).max(3) as usize);
+        }
+    }
+
+    fn replacement_count(&self) -> u64 {
+        self.total_replacements()
     }
 }
 

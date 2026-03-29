@@ -273,6 +273,10 @@ impl StreamingLearner for Pipeline {
         self.learner
             .apply_structural_change(depth_delta, steps_delta);
     }
+
+    fn replacement_count(&self) -> u64 {
+        self.learner.replacement_count()
+    }
 }
 
 // Pipeline is Send + Sync because its fields are:

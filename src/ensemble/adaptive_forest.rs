@@ -414,6 +414,10 @@ impl StreamingLearner for AdaptiveRandomForest {
             member.n_evaluated = 0;
         }
     }
+
+    fn replacement_count(&self) -> u64 {
+        self.n_drifts as u64
+    }
 }
 
 // ---------------------------------------------------------------------------

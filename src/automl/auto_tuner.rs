@@ -250,6 +250,9 @@ pub struct AutoTuner {
 
     /// Optional diagnostic adaptor (active when auto_builder=true).
     adaptor: Option<auto_builder::DiagnosticAdaptor>,
+
+    /// Last observed replacement count from champion (for detecting boundaries).
+    last_replacement_count: u64,
 }
 
 // ===========================================================================
@@ -427,6 +430,7 @@ impl AutoTunerBuilder {
             effective_n_initial,
             drift_detector,
             adaptor,
+            last_replacement_count: 0,
         };
 
         tuner.start_tournament();
@@ -609,6 +613,18 @@ impl StreamingLearner for AutoTuner {
                 self.champion
                     .adjust_config(adjustments.lr_multiplier, adjustments.lambda_direction);
             }
+
+            // Check for structural boundary: champion's replacement count changed.
+            let current_rc = self.champion.replacement_count();
+            if current_rc > self.last_replacement_count {
+                self.last_replacement_count = current_rc;
+                if let Some(change) = adaptor.at_replacement(&diagnostics) {
+                    if change.depth_delta != 0 || change.steps_delta != 0 {
+                        self.champion
+                            .apply_structural_change(change.depth_delta, change.steps_delta);
+                    }
+                }
+            }
         }
 
         // 7. Drift-triggered re-racing: abort tournament and start fresh.
@@ -649,6 +665,7 @@ impl StreamingLearner for AutoTuner {
         } else {
             self.adaptor = None;
         }
+        self.last_replacement_count = 0;
         self.start_tournament();
     }
 }

@@ -882,6 +882,61 @@ impl<L: Loss> SGBT<L> {
         self.config.max_depth = depth.clamp(1, 20);
     }
 
+    /// Adjust the number of boosting steps (trees in the ensemble).
+    ///
+    /// - **Growing** (`n > current`): appends fresh trees using the current config.
+    /// - **Shrinking** (`n < current`): removes trailing steps (newest trees).
+    /// - Clamped to `3..=1000` to prevent degenerate ensembles.
+    pub fn set_n_steps(&mut self, n: usize) {
+        let n = n.clamp(3, 1000);
+        let current = self.steps.len();
+        if n > current {
+            let leaf_decay_alpha = self
+                .config
+                .leaf_half_life
+                .map(|hl| (-(2.0_f64.ln()) / hl as f64).exp());
+            let tree_config = crate::tree::builder::TreeConfig::new()
+                .max_depth(self.config.max_depth)
+                .n_bins(self.config.n_bins)
+                .lambda(self.config.lambda)
+                .gamma(self.config.gamma)
+                .grace_period(self.config.grace_period)
+                .delta(self.config.delta)
+                .feature_subsample_rate(self.config.feature_subsample_rate)
+                .leaf_decay_alpha_opt(leaf_decay_alpha)
+                .split_reeval_interval_opt(self.config.split_reeval_interval)
+                .feature_types_opt(self.config.feature_types.clone())
+                .gradient_clip_sigma_opt(self.config.gradient_clip_sigma)
+                .monotone_constraints_opt(self.config.monotone_constraints.clone())
+                .max_leaf_output_opt(self.config.max_leaf_output)
+                .adaptive_leaf_bound_opt(self.config.adaptive_leaf_bound)
+                .adaptive_depth_opt(self.config.adaptive_depth)
+                .min_hessian_sum_opt(self.config.min_hessian_sum)
+                .leaf_model_type(self.config.leaf_model_type.clone());
+            let mts = self.config.max_tree_samples;
+            let shadow_warmup = self.config.shadow_warmup.unwrap_or(0);
+            for i in current..n {
+                let mut tc = tree_config.clone();
+                tc.seed = self.config.seed ^ (i as u64);
+                let detector = self.config.drift_detector.create();
+                let step = if shadow_warmup > 0 {
+                    BoostingStep::new_with_graduated(tc, detector, mts, shadow_warmup)
+                } else {
+                    BoostingStep::new_with_max_samples(tc, detector, mts)
+                };
+                self.steps.push(step);
+            }
+        } else if n < current {
+            self.steps.truncate(n);
+        }
+        self.config.n_steps = n;
+    }
+
+    /// Total tree replacements across all boosting steps.
+    pub fn total_replacements(&self) -> u64 {
+        self.steps.iter().map(|s| s.slot().replacements()).sum()
+    }
+
     /// Immutable access to the boosting steps.
     ///
     /// Useful for model inspection and export (e.g., ONNX serialization).

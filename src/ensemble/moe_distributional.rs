@@ -801,6 +801,33 @@ impl StreamingLearner for MoEDistributionalSGBT {
             shadow.set_lambda(current_lambda + lambda_delta);
         }
     }
+
+    fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
+        if depth_delta != 0 {
+            for expert in &mut self.experts {
+                let current = expert.config().max_depth as i32;
+                expert.set_max_depth((current + depth_delta).max(1) as usize);
+            }
+            for shadow in &mut self.shadows {
+                let current = shadow.config().max_depth as i32;
+                shadow.set_max_depth((current + depth_delta).max(1) as usize);
+            }
+        }
+        if steps_delta != 0 {
+            for expert in &mut self.experts {
+                let current = expert.n_steps() as i32;
+                expert.set_n_steps((current + steps_delta).max(3) as usize);
+            }
+            for shadow in &mut self.shadows {
+                let current = shadow.n_steps() as i32;
+                shadow.set_n_steps((current + steps_delta).max(3) as usize);
+            }
+        }
+    }
+
+    fn replacement_count(&self) -> u64 {
+        self.shadow_replacements.iter().sum()
+    }
 }
 
 // ===========================================================================

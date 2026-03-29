@@ -214,12 +214,21 @@ impl<L: Loss> StreamingLearner for SGBTLearner<L> {
         self.inner.set_lambda(current_lambda + lambda_delta);
     }
 
-    fn apply_structural_change(&mut self, depth_delta: i32, _steps_delta: i32) {
+    fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
         if depth_delta != 0 {
             let current = self.inner.config().max_depth as i32;
             self.inner
                 .set_max_depth((current + depth_delta).max(1) as usize);
         }
+        if steps_delta != 0 {
+            let current = self.inner.config().n_steps as i32;
+            self.inner
+                .set_n_steps((current + steps_delta).max(3) as usize);
+        }
+    }
+
+    fn replacement_count(&self) -> u64 {
+        self.inner.total_replacements()
     }
 }
 
