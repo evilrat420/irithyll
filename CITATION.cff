@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: "If you use irithyll in your research, please cite it as below."
+title: "irithyll: Streaming Machine Learning in Rust"
+type: software
+authors:
+  - given-names: Jonathan Bailey
+    family-names: Shawe
+    alias: evilrat420
+repository-code: "https://github.com/evilrat420/irithyll"
+url: "https://docs.rs/irithyll"
+license:
+  - MIT
+  - Apache-2.0
+keywords:
+  - streaming-machine-learning
+  - online-learning
+  - gradient-boosted-trees
+  - reservoir-computing
+  - state-space-models
+  - spiking-neural-networks
+  - kolmogorov-arnold-networks
+  - test-time-training
+  - mixture-of-experts
+  - automl
+  - rust
+  - no-std
+  - embedded-ml

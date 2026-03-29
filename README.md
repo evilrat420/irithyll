@@ -566,6 +566,8 @@ Run any example with `cargo run --example <name>`:
 
 - [**API Reference**](https://docs.rs/irithyll) -- full docs on docs.rs (all features enabled)
 - [**Rustdoc (GitHub Pages)**](https://evilrat420.github.io/irithyll/) -- latest from master
+- [**Responsible Use**](RESPONSIBLE_USE.md) -- ethical use policy and research applications
+- [**Contributing**](CONTRIBUTING.md) -- how to contribute, code standards, community values
 
 ## Minimum Supported Rust Version
 
