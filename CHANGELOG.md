@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.8.4] - 2026-03-30
+
+### Added
+
+- **`DiagnosticLearner`** replaces `DiagnosticAdaptor` — RLS meta-learner (7 features)
+  discovers diagnostic→performance relationships from observed data. Zero hardcoded
+  signal→adjustment mappings. Counterfactual queries probe optimal LR/lambda direction.
+- **`MetaObjective` enum** — pluggable optimization targets: `MinimizeRMSE`, `MaximizeR2`,
+  `MaximizeDirection`, `MaximizeF1`, `MaximizeKappa`, `Composite`. AutoTunerBuilder gets
+  `.meta_objective()`.
+- **Adaptive RLS forgetting** — error-driven lambda modulation in RLS core. Fixes ESN
+  sudden drift: 62,698 → 1.84 RMSE.
+- **Real neural diagnostics** — all 8 neural models provide computed values for all 5
+  diagnostic signals (residual alignment, reg sensitivity, effective DOF, uncertainty).
+- **KAN per-edge momentum** (0.5 default), grid_size 5→8.
+- **Benchmark suite** — 8 algorithms × 14 datasets (5 general + 3 high-dimensional +
+  6 neural-specific: Mackey-Glass, NARMA-10, Lorenz, compositional function,
+  non-stationary sequence, sparse temporal events).
+- **3 new QEMU Cortex-M0+ examples** — drift detection (DDM/PHT), stress test, validation.
+- **Model selection guide** in README with per-model use case recommendations.
+
+### Fixed
+
+- **Mamba hidden state exposure** — full SSM state fed to RLS readout (was only d_in
+  dimensions, now d_in×n_state). Mackey-Glass: 0.535 → 0.046.
+- **Mamba high-dim scaling** — capped readout to 64 features via mean-pooling. 50-feature
+  throughput: 281 → 24,404 samp/s.
+- **TTT NaN** — L2 input normalization, gradient clipping, fast weight magnitude guard.
+  Lorenz: NaN → 1.93.
+- **TTT prediction feedback** — fast weight updates directed by prediction error, not
+  reconstruction only. Drift detection resets W_fast when short-term error exceeds baseline.
+- **KAN convergence** — warmup-gated decay (disabled first 2000 samples), stable LR during
+  early training, inter-layer normalization, softer input clamping [-3,3].
+- **RLS numerical stability** — covariance health guard, denominator floor.
+- **ESN reservoir clamping** — defensive clamp after leaky integration.
+- **Residual alignment saturation** — delta-based cosine similarity (SGBT/DistributionalSGBT)
+  and acceleration-based direction agreement (neural models) prevent permanent +1.0.
+- **DiagnosticAdaptor frequency invariance** — interval-gated adjustments, cumulative
+  clamping to feasible bounds (before DiagnosticLearner replacement).
+
+### Changed
+
+- Streaming defaults: `forgetting_factor` 0.999→0.998, TTT `alpha` 0→0.0001,
+  KAN `coefficient_decay` 0→0.0005. Adaptive decay/forgetting driven by error.
+- `StreamingLearner` trait: added `replacement_count()`, `set_n_steps()` on SGBT/DistributionalSGBT.
+- Mamba default `n_state` 16→32, SSM initialization scale 0.01→0.1, skip connection enabled.
+
 ## [9.8.3] - 2026-03-29
 
 ### Added

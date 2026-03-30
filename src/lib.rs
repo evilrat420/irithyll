@@ -128,7 +128,7 @@ pub use irithyll_core::{EnsembleView, FormatError, PackedNode};
 pub use irithyll_core::{PackedNodeI16, QuantizedEnsembleHeader, QuantizedEnsembleView};
 
 // Re-exports -- core types
-pub use drift::{DriftAware, DriftDetector, DriftSignal};
+pub use drift::{DriftDetector, DriftSignal};
 pub use ensemble::adaptive::AdaptiveSGBT;
 pub use ensemble::bagged::BaggedSGBT;
 pub use ensemble::config::{FeatureType, SGBTConfig, ScaleMode};

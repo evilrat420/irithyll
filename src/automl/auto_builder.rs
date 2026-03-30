@@ -473,9 +473,10 @@ pub struct StructuralChange {
 // ===========================================================================
 
 /// Configurable optimization objective for the meta-learner.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub enum MetaObjective {
     /// Minimize root mean squared error (default for regression).
+    #[default]
     MinimizeRMSE,
     /// Maximize R-squared (coefficient of determination).
     MaximizeR2,
@@ -494,12 +495,6 @@ pub enum MetaObjective {
         /// Weight for directional accuracy component.
         dir_weight: f64,
     },
-}
-
-impl Default for MetaObjective {
-    fn default() -> Self {
-        Self::MinimizeRMSE
-    }
 }
 
 // ===========================================================================

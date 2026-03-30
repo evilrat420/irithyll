@@ -607,7 +607,7 @@ mod tests {
         let model = StreamingMamba::new(config);
         assert_eq!(
             model.last_features().len(),
-            1 * 32 + 1,
+            33, // d_in(1) * n_state(32) + d_in(1)
             "small state should use full readout without pooling"
         );
     }
