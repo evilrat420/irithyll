@@ -25,8 +25,8 @@ mod factories;
 mod reward;
 
 pub use auto_builder::{
-    ConfigBounds, ConfigDiagnostics, DiagnosticAdaptor, FeasibleRegion, RaceResults,
-    SmoothAdjustments, StructuralChange, WelfordRace, WelfordStats,
+    ConfigBounds, ConfigDiagnostics, DiagnosticAdaptor, DiagnosticLearner, FeasibleRegion,
+    MetaObjective, RaceResults, SmoothAdjustments, StructuralChange, WelfordRace, WelfordStats,
 };
 pub use auto_tuner::{
     AutoTuner, AutoTunerBuilder, AutoTunerConfig, AutoTunerSnapshot, CandidateSnapshot,

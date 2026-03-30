@@ -252,7 +252,8 @@ pub use automl::{
 };
 pub use automl::{AutoMetric, AutoTuner, AutoTunerBuilder, AutoTunerConfig, ModelFactory};
 pub use automl::{
-    ConfigDiagnostics, DiagnosticAdaptor, DiagnosticSource, FeasibleRegion, WelfordRace,
+    ConfigDiagnostics, DiagnosticAdaptor, DiagnosticLearner, DiagnosticSource, FeasibleRegion,
+    MetaObjective, WelfordRace,
 };
 pub use automl::{ConfigSampler, ConfigSpace, HyperConfig, HyperParam, RewardNormalizer};
 

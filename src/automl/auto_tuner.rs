@@ -147,6 +147,11 @@ pub struct AutoTunerConfig {
     /// diagnostic adaptation. The first training uses all-see-all batch
     /// evaluation instead of tournament elimination.
     pub auto_builder: bool,
+    /// Meta-learner optimization objective (default: MinimizeRMSE).
+    ///
+    /// Only used when `auto_builder` is enabled. Controls which performance
+    /// metric the diagnostic learner optimizes.
+    pub meta_objective: auto_builder::MetaObjective,
 }
 
 impl Default for AutoTunerConfig {
@@ -163,6 +168,7 @@ impl Default for AutoTunerConfig {
             max_n_initial: 32,
             use_drift_rerace: false,
             auto_builder: false,
+            meta_objective: auto_builder::MetaObjective::default(),
         }
     }
 }
@@ -248,8 +254,8 @@ pub struct AutoTuner {
     // Optional drift detector for triggering re-racing
     drift_detector: Option<Box<dyn DriftDetector>>,
 
-    /// Optional diagnostic adaptor (active when auto_builder=true).
-    adaptor: Option<auto_builder::DiagnosticAdaptor>,
+    /// Optional diagnostic learner (active when auto_builder=true).
+    adaptor: Option<auto_builder::DiagnosticLearner>,
 
     /// Last observed replacement count from champion (for detecting boundaries).
     last_replacement_count: u64,
@@ -365,6 +371,15 @@ impl AutoTunerBuilder {
         self
     }
 
+    /// Set the meta-learner optimization objective (default: MinimizeRMSE).
+    ///
+    /// Only relevant when `auto_builder` is enabled. Controls which
+    /// performance metric the diagnostic learner optimizes.
+    pub fn meta_objective(mut self, obj: auto_builder::MetaObjective) -> Self {
+        self.config.meta_objective = obj;
+        self
+    }
+
     /// Build the `AutoTuner`.
     ///
     /// # Panics
@@ -407,7 +422,10 @@ impl AutoTunerBuilder {
         let adaptor = if config.auto_builder {
             // Create FeasibleRegion with conservative initial estimates.
             let region = auto_builder::FeasibleRegion::from_data(100, 1, 1.0);
-            Some(auto_builder::DiagnosticAdaptor::new(region))
+            Some(auto_builder::DiagnosticLearner::with_objective(
+                region,
+                config.meta_objective,
+            ))
         } else {
             None
         };
@@ -604,7 +622,7 @@ impl StreamingLearner for AutoTuner {
                     get_metric(&self.champion_ewma, self.config.metric)
                 },
             };
-            let adjustments = adaptor.after_train(&diagnostics);
+            let adjustments = adaptor.after_train(&diagnostics, champ_pred, target);
 
             // Apply smooth adjustments to the champion's config.
             if (adjustments.lr_multiplier - 1.0).abs() > 1e-15
@@ -661,7 +679,10 @@ impl StreamingLearner for AutoTuner {
         }
         if self.config.auto_builder {
             let region = auto_builder::FeasibleRegion::from_data(100, 1, 1.0);
-            self.adaptor = Some(auto_builder::DiagnosticAdaptor::new(region));
+            self.adaptor = Some(auto_builder::DiagnosticLearner::with_objective(
+                region,
+                self.config.meta_objective,
+            ));
         } else {
             self.adaptor = None;
         }

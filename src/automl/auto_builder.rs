@@ -1,17 +1,22 @@
 //! Auto-builder: diagnostic-driven config adaptation for streaming AutoML.
 //!
 //! Replaces random config sampling with mathematically principled derivation
-//! from data characteristics and model diagnostics.
+//! from data characteristics and model diagnostics. The [`DiagnosticLearner`]
+//! uses an RLS meta-learner to DISCOVER the relationship between diagnostic
+//! signals and optimal config adjustments from observed performance data,
+//! replacing the hardcoded signal-to-adjustment rules of the previous
+//! `DiagnosticAdaptor`.
 //!
 //! # Architecture
 //!
 //! 1. **[`FeasibleRegion`]** -- derives config bounds from (n_samples, n_features, variance)
 //! 2. **[`WelfordRace`]** -- batch evaluation with center + directional perturbations
-//! 3. **[`DiagnosticAdaptor`]** -- streams config adjustments from model diagnostics
+//! 3. **[`DiagnosticLearner`]** -- RLS meta-learner discovers config adjustments from diagnostics
 
 use crate::automl::{ConfigSampler, ModelFactory};
 use crate::ensemble::config::SGBTConfig;
 use crate::learner::SGBTLearner;
+use crate::learners::rls::RecursiveLeastSquares;
 use irithyll_core::learner::StreamingLearner;
 
 // ===========================================================================
@@ -464,19 +469,69 @@ pub struct StructuralChange {
 }
 
 // ===========================================================================
-// DiagnosticAdaptor
+// MetaObjective
 // ===========================================================================
 
-/// Streams config adjustments from model diagnostics.
+/// Configurable optimization objective for the meta-learner.
+#[derive(Debug, Clone, Copy)]
+pub enum MetaObjective {
+    /// Minimize root mean squared error (default for regression).
+    MinimizeRMSE,
+    /// Maximize R-squared (coefficient of determination).
+    MaximizeR2,
+    /// Maximize directional accuracy (correct sign prediction).
+    MaximizeDirection,
+    /// Maximize F1 score (harmonic mean of precision and recall).
+    MaximizeF1,
+    /// Maximize Cohen's kappa (agreement beyond chance).
+    MaximizeKappa,
+    /// Weighted combination of multiple objectives.
+    Composite {
+        /// Weight for RMSE component (lower is better, so this is negated internally).
+        rmse_weight: f64,
+        /// Weight for R-squared component.
+        r2_weight: f64,
+        /// Weight for directional accuracy component.
+        dir_weight: f64,
+    },
+}
+
+impl Default for MetaObjective {
+    fn default() -> Self {
+        Self::MinimizeRMSE
+    }
+}
+
+// ===========================================================================
+// DiagnosticLearner
+// ===========================================================================
+
+/// RLS meta-learner that discovers config adjustments from diagnostic signals.
 ///
-/// Smooth adjustments (every sample): LR and lambda.
-/// Structural adjustments (at tree replacement): depth and n_steps.
+/// Replaces the hardcoded signal-to-adjustment rules of the previous
+/// `DiagnosticAdaptor` with a 7-feature RLS that learns the mapping from
+/// diagnostic signals to performance changes from observed data.
 ///
-/// Call-frequency invariant: adjustments are emitted at fixed intervals
-/// derived from the feasible region, so models calling `after_train()`
-/// at different rates converge to bounded total adjustment.
-#[derive(Debug, Clone)]
-pub struct DiagnosticAdaptor {
+/// # Meta-learner features
+///
+/// The RLS operates on a 7-dimensional feature vector:
+/// 1. `alignment` -- EWMA of residual alignment
+/// 2. `reg_sensitivity_ratio` -- current / baseline regularization sensitivity
+/// 3. `depth_sufficiency` -- EWMA of depth sufficiency signal
+/// 4. `dof_ratio` -- effective DOF / n_samples
+/// 5. `uncertainty` -- EWMA of model uncertainty
+/// 6. `lr_normalized` -- current cumulative LR in log space, normalized to \[-1, 1\]
+/// 7. `lambda_normalized` -- current cumulative lambda, normalized to \[-1, 1\]
+///
+/// # Observation cycle
+///
+/// 1. Baselines always update (every sample)
+/// 2. Performance trackers always update (RMSE, R², direction, F1, kappa)
+/// 3. Init phase (< 50 samples): no adjustments
+/// 4. At observation boundaries: build feature vector, train RLS
+/// 5. After `min_observations` (14): use counterfactual queries to decide adjustments
+#[derive(Debug)]
+pub struct DiagnosticLearner {
     /// Running EWMA of uncertainty for baseline comparison.
     uncertainty_ewma: f64,
     /// Running EWMA of residual alignment.
@@ -517,11 +572,50 @@ pub struct DiagnosticAdaptor {
     last_emitted_lr_log: f64,
     /// Last emitted cumulative_lambda (for computing delta direction).
     last_emitted_lambda: f64,
+
+    // --- Meta-learner fields ---
+    /// RLS meta-learner (7 features -> performance delta).
+    meta_rls: RecursiveLeastSquares,
+    /// Number of observations the RLS has been trained on.
+    meta_observations: u64,
+    /// Minimum observations before the meta-learner emits adjustments.
+    min_observations: u64,
+    /// Optimization objective.
+    objective: MetaObjective,
+
+    // --- Performance trackers ---
+    /// EWMA of squared errors (for RMSE).
+    squared_error_ewma: f64,
+    /// EWMA of target values (for R²).
+    target_ewma: f64,
+    /// EWMA of squared target deviation from mean (for R²).
+    target_var_ewma: f64,
+    /// EWMA of correct direction predictions (for directional accuracy).
+    direction_ewma: f64,
+    /// EWMA of true positives (for F1).
+    tp_ewma: f64,
+    /// EWMA of false positives (for F1).
+    fp_ewma: f64,
+    /// EWMA of false negatives (for F1).
+    fn_ewma: f64,
+    /// EWMA of observed accuracy (for kappa).
+    accuracy_ewma: f64,
+    /// EWMA of positive rate in targets (for kappa).
+    pos_rate_ewma: f64,
+    /// EWMA of positive rate in predictions (for kappa).
+    pred_pos_rate_ewma: f64,
+    /// Previous performance value (for computing delta).
+    prev_performance: f64,
 }
 
-impl DiagnosticAdaptor {
-    /// Create a new adaptor backed by a feasible region.
+impl DiagnosticLearner {
+    /// Create a new learner backed by a feasible region with default objective.
     pub fn new(region: FeasibleRegion) -> Self {
+        Self::with_objective(region, MetaObjective::default())
+    }
+
+    /// Create a new learner backed by a feasible region with a specific objective.
+    pub fn with_objective(region: FeasibleRegion, objective: MetaObjective) -> Self {
         let bounds = region.config_bounds();
 
         // Adjustment interval: center of grace_period range, minimum 1.
@@ -565,6 +659,10 @@ impl DiagnosticAdaptor {
             bounds.lambda.1 - center_lambda,
         );
 
+        // RLS meta-learner: forgetting factor 0.998, delta 1.0.
+        // Lazily initialized on first observation (7 features).
+        let meta_rls = RecursiveLeastSquares::with_delta(0.998, 1.0);
+
         Self {
             uncertainty_ewma: 0.0,
             alignment_ewma: 0.0,
@@ -585,19 +683,42 @@ impl DiagnosticAdaptor {
             lambda_bounds,
             last_emitted_lr_log: 0.0,
             last_emitted_lambda: 0.0,
+            meta_rls,
+            meta_observations: 0,
+            min_observations: 14,
+            objective,
+            squared_error_ewma: 0.0,
+            target_ewma: 0.0,
+            target_var_ewma: 0.0,
+            direction_ewma: 0.5,
+            tp_ewma: 0.0,
+            fp_ewma: 0.0,
+            fn_ewma: 0.0,
+            accuracy_ewma: 0.5,
+            pos_rate_ewma: 0.5,
+            pred_pos_rate_ewma: 0.5,
+            prev_performance: 0.0,
         }
     }
 
     /// Process diagnostics after each `train_one()`. Returns smooth adjustments.
     ///
+    /// The meta-learner observes diagnostic signals alongside prediction
+    /// performance and learns the mapping from signals to performance deltas.
     /// During the first 50 samples, only baselines are updated (no adjustments).
-    /// After initialization, adjustments are emitted at fixed intervals
-    /// (`adjustment_interval` samples apart) to ensure call-frequency invariance.
-    pub fn after_train(&mut self, diagnostics: &ConfigDiagnostics) -> SmoothAdjustments {
+    /// After the init phase, adjustments are emitted at fixed intervals.
+    /// The RLS requires `min_observations` (14) training points before it
+    /// emits non-trivial adjustments via counterfactual queries.
+    pub fn after_train(
+        &mut self,
+        diagnostics: &ConfigDiagnostics,
+        prediction: f64,
+        target: f64,
+    ) -> SmoothAdjustments {
         self.n_samples += 1;
-
-        // Always update running baselines regardless of adjustment timing.
         let a = self.alpha;
+
+        // 1. Always update diagnostic baselines (EWMAs).
         self.uncertainty_ewma = a * diagnostics.uncertainty + (1.0 - a) * self.uncertainty_ewma;
         self.alignment_ewma = a * diagnostics.residual_alignment + (1.0 - a) * self.alignment_ewma;
         self.reg_sensitivity_ewma =
@@ -606,7 +727,60 @@ impl DiagnosticAdaptor {
             a * diagnostics.depth_sufficiency + (1.0 - a) * self.depth_signal_ewma;
         self.dof_ewma = a * diagnostics.effective_dof + (1.0 - a) * self.dof_ewma;
 
-        // Initialization phase: observe only, don't adjust.
+        // 2. Always update performance trackers.
+        let error = target - prediction;
+        self.squared_error_ewma = a * (error * error) + (1.0 - a) * self.squared_error_ewma;
+
+        let old_target_ewma = self.target_ewma;
+        self.target_ewma = a * target + (1.0 - a) * self.target_ewma;
+        let dev = target - old_target_ewma;
+        self.target_var_ewma = a * (dev * dev) + (1.0 - a) * self.target_var_ewma;
+
+        // Directional accuracy: both have the same sign (or both zero).
+        let correct_dir = if (prediction * target) >= 0.0 {
+            1.0
+        } else {
+            0.0
+        };
+        self.direction_ewma = a * correct_dir + (1.0 - a) * self.direction_ewma;
+
+        // F1 components.
+        let predicted_positive = prediction > 0.5;
+        let actual_positive = target > 0.5;
+        let tp = if predicted_positive && actual_positive {
+            1.0
+        } else {
+            0.0
+        };
+        let fp = if predicted_positive && !actual_positive {
+            1.0
+        } else {
+            0.0
+        };
+        let fn_ = if !predicted_positive && actual_positive {
+            1.0
+        } else {
+            0.0
+        };
+        self.tp_ewma = a * tp + (1.0 - a) * self.tp_ewma;
+        self.fp_ewma = a * fp + (1.0 - a) * self.fp_ewma;
+        self.fn_ewma = a * fn_ + (1.0 - a) * self.fn_ewma;
+
+        // Kappa components.
+        let correct = if (predicted_positive && actual_positive)
+            || (!predicted_positive && !actual_positive)
+        {
+            1.0
+        } else {
+            0.0
+        };
+        self.accuracy_ewma = a * correct + (1.0 - a) * self.accuracy_ewma;
+        self.pos_rate_ewma =
+            a * (if actual_positive { 1.0 } else { 0.0 }) + (1.0 - a) * self.pos_rate_ewma;
+        self.pred_pos_rate_ewma =
+            a * (if predicted_positive { 1.0 } else { 0.0 }) + (1.0 - a) * self.pred_pos_rate_ewma;
+
+        // 3. Init phase (< 50 samples): return no-op.
         if self.n_samples < 50 {
             return SmoothAdjustments {
                 lr_multiplier: 1.0,
@@ -617,7 +791,7 @@ impl DiagnosticAdaptor {
             self.initialized = true;
         }
 
-        // Increment interval counter; emit no-op until interval elapsed.
+        // 4. Check observation interval: if not at boundary, return no-op.
         self.samples_since_adjustment += 1;
         if self.samples_since_adjustment < self.adjustment_interval {
             return SmoothAdjustments {
@@ -626,46 +800,76 @@ impl DiagnosticAdaptor {
             };
         }
 
-        // --- Adjustment point reached ---
+        // --- Observation boundary reached ---
         self.samples_since_adjustment = 0;
 
-        // Noise floor threshold: signals below this magnitude are noise.
-        let threshold = 2.0 * self.alpha.sqrt();
+        // 5. Compute performance based on MetaObjective.
+        let performance = self.current_performance();
+        let perf_delta = performance - self.prev_performance;
+        self.prev_performance = performance;
 
-        // LR adjustment from EWMA alignment (not raw signal).
-        // Positive alignment = gradients agree = can increase LR.
-        // Negative alignment = overshooting = decrease LR.
-        if self.alignment_ewma > threshold {
+        // 6. Build normalized 7-feature vector.
+        let features = self.build_feature_vector(diagnostics);
+
+        // 7. Train RLS (predict-before-train).
+        let _rls_pred = self.meta_rls.predict(&features);
+        self.meta_rls.train_one(&features, perf_delta, 1.0);
+        self.meta_observations += 1;
+
+        // 8. Below min_observations: return no-op (not enough data for counterfactuals).
+        if self.meta_observations < self.min_observations {
+            return SmoothAdjustments {
+                lr_multiplier: 1.0,
+                lambda_direction: 0.0,
+            };
+        }
+
+        // 9. Counterfactual queries: probe LR up/down, lambda up/down.
+        let mut features_lr_up = features.clone();
+        let mut features_lr_down = features.clone();
+        let mut features_lambda_up = features.clone();
+        let mut features_lambda_down = features.clone();
+
+        // Feature index 5 = lr_normalized, index 6 = lambda_normalized.
+        let lr_probe = 0.2; // probe 20% of normalized range
+        features_lr_up[5] = (features[5] + lr_probe).clamp(-1.0, 1.0);
+        features_lr_down[5] = (features[5] - lr_probe).clamp(-1.0, 1.0);
+        features_lambda_up[6] = (features[6] + lr_probe).clamp(-1.0, 1.0);
+        features_lambda_down[6] = (features[6] - lr_probe).clamp(-1.0, 1.0);
+
+        let pred_lr_up = self.meta_rls.predict(&features_lr_up);
+        let pred_lr_down = self.meta_rls.predict(&features_lr_down);
+        let pred_lambda_up = self.meta_rls.predict(&features_lambda_up);
+        let pred_lambda_down = self.meta_rls.predict(&features_lambda_down);
+
+        // 10. Apply calibrated adjustments: move toward the direction that
+        // the meta-learner predicts will improve performance.
+        // LR: if increasing LR predicts better performance, increase; else decrease.
+        let lr_gradient = pred_lr_up - pred_lr_down;
+        if lr_gradient > 0.0 {
             self.cumulative_lr_log += self.lr_step;
-        } else if self.alignment_ewma < -threshold {
+        } else if lr_gradient < 0.0 {
             self.cumulative_lr_log -= self.lr_step;
         }
-        // Clamp to feasible bounds.
         self.cumulative_lr_log = self
             .cumulative_lr_log
             .clamp(self.lr_log_bounds.0, self.lr_log_bounds.1);
 
-        // Delta multiplier: ratio of new cumulative to last emitted.
-        let lr_multiplier = (self.cumulative_lr_log - self.last_emitted_lr_log).exp();
-        self.last_emitted_lr_log = self.cumulative_lr_log;
-
-        // Lambda adjustment from regularization sensitivity ratio.
-        // High sensitivity relative to baseline = over-regularized -> decrease lambda.
-        // Low sensitivity = under-regularized -> increase lambda.
-        if self.reg_sensitivity_ewma > 1e-10 {
-            let ratio = diagnostics.regularization_sensitivity / self.reg_sensitivity_ewma;
-            if ratio > 1.5 {
-                self.cumulative_lambda -= self.lambda_step; // over-regularized
-            } else if ratio < 0.5 {
-                self.cumulative_lambda += self.lambda_step; // under-regularized
-            }
+        // Lambda: if increasing lambda predicts better performance, increase; else decrease.
+        let lambda_gradient = pred_lambda_up - pred_lambda_down;
+        if lambda_gradient > 0.0 {
+            self.cumulative_lambda += self.lambda_step;
+        } else if lambda_gradient < 0.0 {
+            self.cumulative_lambda -= self.lambda_step;
         }
-        // Clamp to feasible bounds.
         self.cumulative_lambda = self
             .cumulative_lambda
             .clamp(self.lambda_bounds.0, self.lambda_bounds.1);
 
-        // Delta direction: change since last emission.
+        // 11. Emit delta since last emission.
+        let lr_multiplier = (self.cumulative_lr_log - self.last_emitted_lr_log).exp();
+        self.last_emitted_lr_log = self.cumulative_lr_log;
+
         let lambda_direction = self.cumulative_lambda - self.last_emitted_lambda;
         self.last_emitted_lambda = self.cumulative_lambda;
 
@@ -675,31 +879,47 @@ impl DiagnosticAdaptor {
         }
     }
 
+    /// Fallback for callers that cannot provide prediction/target.
+    ///
+    /// Passes zero prediction and zero target, which still updates diagnostic
+    /// baselines and interval gating but provides no useful performance signal
+    /// to the meta-learner.
+    pub fn after_train_diagnostics_only(
+        &mut self,
+        diagnostics: &ConfigDiagnostics,
+    ) -> SmoothAdjustments {
+        self.after_train(diagnostics, 0.0, 0.0)
+    }
+
     /// Evaluate structural changes at tree replacement boundary.
     ///
     /// Returns `Some` if the diagnostics suggest depth or step count changes,
     /// `None` if the current structure is adequate.
+    ///
+    /// Structural changes remain rule-based (not learned) because they are
+    /// infrequent, discrete events that the meta-learner cannot observe
+    /// often enough to learn from.
     pub fn at_replacement(&mut self, diagnostics: &ConfigDiagnostics) -> Option<StructuralChange> {
         if !self.initialized {
             return None;
         }
 
-        // Update feasible region with current sample count
+        // Update feasible region with current sample count.
         self.region.update(self.n_samples as usize);
         let bounds = self.region.config_bounds();
 
-        // Depth sufficiency: compare current signal to baseline
+        // Depth sufficiency: compare current signal to baseline.
         let needs_more_depth = diagnostics.depth_sufficiency > self.depth_signal_ewma * 1.5
             && bounds.max_depth.1 > bounds.max_depth.0; // room to grow
 
-        // DOF ratio: effective DOF relative to data
+        // DOF ratio: effective DOF relative to data.
         let dof_ratio = if self.n_samples > 0 {
             diagnostics.effective_dof / self.n_samples as f64
         } else {
             0.0
         };
 
-        // Target DOF ratio derived from feasible region budget
+        // Target DOF ratio derived from feasible region budget.
         let target_dof_ratio = (self.region.budget() / self.n_samples as f64).clamp(0.01, 0.5);
         let needs_more_steps = dof_ratio < target_dof_ratio * 0.5;
         let needs_fewer_steps = dof_ratio > target_dof_ratio * 2.0;
@@ -720,7 +940,7 @@ impl DiagnosticAdaptor {
         }
     }
 
-    /// Reset the adaptor state (all EWMA baselines and cumulative adjustments).
+    /// Reset the learner state (all EWMA baselines, cumulative adjustments, and meta-learner).
     pub fn reset(&mut self) {
         self.uncertainty_ewma = 0.0;
         self.alignment_ewma = 0.0;
@@ -734,13 +954,146 @@ impl DiagnosticAdaptor {
         self.cumulative_lambda = 0.0;
         self.last_emitted_lr_log = 0.0;
         self.last_emitted_lambda = 0.0;
+        self.meta_rls = RecursiveLeastSquares::with_delta(0.998, 1.0);
+        self.meta_observations = 0;
+        self.squared_error_ewma = 0.0;
+        self.target_ewma = 0.0;
+        self.target_var_ewma = 0.0;
+        self.direction_ewma = 0.5;
+        self.tp_ewma = 0.0;
+        self.fp_ewma = 0.0;
+        self.fn_ewma = 0.0;
+        self.accuracy_ewma = 0.5;
+        self.pos_rate_ewma = 0.5;
+        self.pred_pos_rate_ewma = 0.5;
+        self.prev_performance = 0.0;
     }
 
     /// Current feasible region.
     pub fn region(&self) -> &FeasibleRegion {
         &self.region
     }
+
+    /// Number of observations the meta-learner has been trained on.
+    pub fn meta_observations(&self) -> u64 {
+        self.meta_observations
+    }
+
+    /// Current optimization objective.
+    pub fn objective(&self) -> MetaObjective {
+        self.objective
+    }
+
+    // -----------------------------------------------------------------------
+    // Private helpers
+    // -----------------------------------------------------------------------
+
+    /// Compute current performance value based on the configured objective.
+    ///
+    /// Higher is always better (for "minimize" objectives we negate).
+    fn current_performance(&self) -> f64 {
+        match self.objective {
+            MetaObjective::MinimizeRMSE => -self.squared_error_ewma.sqrt(),
+            MetaObjective::MaximizeR2 => {
+                if self.target_var_ewma > 1e-15 {
+                    1.0 - self.squared_error_ewma / self.target_var_ewma
+                } else {
+                    0.0
+                }
+            }
+            MetaObjective::MaximizeDirection => self.direction_ewma,
+            MetaObjective::MaximizeF1 => {
+                let denom = 2.0 * self.tp_ewma + self.fp_ewma + self.fn_ewma;
+                if denom > 1e-15 {
+                    2.0 * self.tp_ewma / denom
+                } else {
+                    0.0
+                }
+            }
+            MetaObjective::MaximizeKappa => {
+                let expected = self.pos_rate_ewma * self.pred_pos_rate_ewma
+                    + (1.0 - self.pos_rate_ewma) * (1.0 - self.pred_pos_rate_ewma);
+                if (1.0 - expected).abs() > 1e-15 {
+                    (self.accuracy_ewma - expected) / (1.0 - expected)
+                } else {
+                    0.0
+                }
+            }
+            MetaObjective::Composite {
+                rmse_weight,
+                r2_weight,
+                dir_weight,
+            } => {
+                let rmse_score = -self.squared_error_ewma.sqrt();
+                let r2_score = if self.target_var_ewma > 1e-15 {
+                    1.0 - self.squared_error_ewma / self.target_var_ewma
+                } else {
+                    0.0
+                };
+                let dir_score = self.direction_ewma;
+                rmse_weight * rmse_score + r2_weight * r2_score + dir_weight * dir_score
+            }
+        }
+    }
+
+    /// Build the 7-dimensional normalized feature vector for the meta-learner.
+    fn build_feature_vector(&self, diagnostics: &ConfigDiagnostics) -> Vec<f64> {
+        // 1. alignment: EWMA of residual alignment (already in [-1, 1]).
+        let alignment = self.alignment_ewma.clamp(-1.0, 1.0);
+
+        // 2. reg_sensitivity_ratio: current / baseline, normalized to [-1, 1].
+        let reg_ratio = if self.reg_sensitivity_ewma > 1e-10 {
+            (diagnostics.regularization_sensitivity / self.reg_sensitivity_ewma - 1.0)
+                .clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // 3. depth_sufficiency: EWMA, scaled to roughly [-1, 1].
+        let depth_suf = self.depth_signal_ewma.clamp(-1.0, 1.0);
+
+        // 4. dof_ratio: effective DOF / n_samples.
+        let dof_ratio = if self.n_samples > 0 {
+            (diagnostics.effective_dof / self.n_samples as f64).clamp(0.0, 1.0) * 2.0 - 1.0
+        } else {
+            0.0
+        };
+
+        // 5. uncertainty: EWMA of uncertainty, tanh-squashed.
+        let uncertainty = self.uncertainty_ewma.tanh();
+
+        // 6. lr_normalized: cumulative LR in log space, normalized to [-1, 1].
+        let lr_range = self.lr_log_bounds.1 - self.lr_log_bounds.0;
+        let lr_normalized = if lr_range > 1e-15 {
+            ((self.cumulative_lr_log - self.lr_log_bounds.0) / lr_range * 2.0 - 1.0)
+                .clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // 7. lambda_normalized: cumulative lambda, normalized to [-1, 1].
+        let lambda_range = self.lambda_bounds.1 - self.lambda_bounds.0;
+        let lambda_normalized = if lambda_range > 1e-15 {
+            ((self.cumulative_lambda - self.lambda_bounds.0) / lambda_range * 2.0 - 1.0)
+                .clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+
+        vec![
+            alignment,
+            reg_ratio,
+            depth_suf,
+            dof_ratio,
+            uncertainty,
+            lr_normalized,
+            lambda_normalized,
+        ]
+    }
 }
+
+/// Backward compatibility alias.
+pub type DiagnosticAdaptor = DiagnosticLearner;
 
 // ===========================================================================
 // Tests
@@ -786,7 +1139,6 @@ mod tests {
     fn feasible_region_center_config_valid() {
         let region = FeasibleRegion::from_data(500, 5, 2.0);
         let config = region.center_config();
-        // If we got here without panic, the config passed builder validation.
         assert!(config.n_steps > 0, "center n_steps must be > 0");
         assert!(config.max_depth > 0, "center max_depth must be > 0");
         assert!(
@@ -804,7 +1156,6 @@ mod tests {
             "perturbation_configs should produce > 1 configs, got {}",
             configs.len()
         );
-        // All configs must be valid (they passed the builder or were cloned from valid center)
         for (i, cfg) in configs.iter().enumerate() {
             assert!(cfg.n_steps > 0, "config[{i}] n_steps must be > 0");
             assert!(cfg.max_depth > 0, "config[{i}] max_depth must be > 0");
@@ -857,7 +1208,6 @@ mod tests {
         let configs = region.perturbation_configs();
         let mut race = WelfordRace::new(configs);
 
-        // y = 2x + small noise (deterministic pseudo-noise)
         for i in 0..200 {
             let x = i as f64 * 0.01;
             let noise = ((i * 7 + 3) % 11) as f64 * 0.001 - 0.005;
@@ -865,7 +1215,6 @@ mod tests {
         }
 
         let (_winner, results) = race.select_winner();
-        // The winner should have the lowest mean error
         let winner_mean = results.winner_mean_error;
         for (_, mean, _, _) in &results.all_results {
             assert!(
@@ -884,7 +1233,7 @@ mod tests {
         }
 
         let expected_mean = 5.0;
-        let expected_variance = 4.571428571428571; // population-like with Bessel correction
+        let expected_variance = 4.571428571428571;
         assert!(
             (stats.mean_error - expected_mean).abs() < 1e-10,
             "mean should be {expected_mean}, got {}",
@@ -897,12 +1246,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn diagnostic_adaptor_initialization() {
-        let region = FeasibleRegion::from_data(200, 3, 1.0);
-        let mut adaptor = DiagnosticAdaptor::new(region);
+    // =======================================================================
+    // DiagnosticLearner tests
+    // =======================================================================
 
-        // First 49 samples should return no-op adjustments
+    #[test]
+    fn diagnostic_learner_min_observations_gating() {
+        // No adjustments before 14 meta-observations (which requires 50 init + 14 intervals).
+        let region = FeasibleRegion::from_data(200, 3, 1.0);
+        let bounds = region.config_bounds();
+        let interval = ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
+        let mut learner = DiagnosticLearner::new(region);
+
         let diag = ConfigDiagnostics {
             residual_alignment: 0.5,
             regularization_sensitivity: 1.0,
@@ -911,8 +1266,9 @@ mod tests {
             uncertainty: 0.1,
         };
 
+        // Burn through init phase (49 samples = no-op).
         for _ in 0..49 {
-            let adj = adaptor.after_train(&diag);
+            let adj = learner.after_train(&diag, 0.5, 1.0);
             assert_eq!(
                 adj.lr_multiplier, 1.0,
                 "during init phase, lr_multiplier should be 1.0"
@@ -922,63 +1278,136 @@ mod tests {
                 "during init phase, lambda_direction should be 0.0"
             );
         }
+
+        // After init, feed enough to reach 13 observation intervals (not yet 14).
+        // Each interval is `interval` samples. We need 13 * interval samples
+        // after init to get 13 observations, which is below min_observations.
+        for _ in 0..(13 * interval + interval - 1) {
+            let adj = learner.after_train(&diag, 0.5, 1.0);
+            // All should be no-op: either between intervals, or below min_observations.
+            assert_eq!(
+                adj.lr_multiplier,
+                1.0,
+                "before min_observations, lr_multiplier should be 1.0 (meta_obs={})",
+                learner.meta_observations()
+            );
+            assert_eq!(
+                adj.lambda_direction,
+                0.0,
+                "before min_observations, lambda_direction should be 0.0 (meta_obs={})",
+                learner.meta_observations()
+            );
+        }
     }
 
     #[test]
-    fn diagnostic_adaptor_lr_adjustment() {
-        let region = FeasibleRegion::from_data(200, 3, 1.0);
+    fn diagnostic_learner_cumulative_clamping() {
+        // LR and lambda must never exceed feasible bounds even with many observations.
+        let region = FeasibleRegion::from_data(10_000, 5, 1.0);
         let bounds = region.config_bounds();
-        let interval = ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
-        let mut adaptor = DiagnosticAdaptor::new(region);
+        let center_lr = (bounds.learning_rate.0 * bounds.learning_rate.1).sqrt();
 
-        // Burn through init phase with positive alignment to build EWMA baseline.
-        let positive_diag = ConfigDiagnostics {
-            residual_alignment: 0.5,
-            ..Default::default()
+        let mut learner = DiagnosticLearner::new(region);
+
+        let diag = ConfigDiagnostics {
+            residual_alignment: 0.9,
+            regularization_sensitivity: 0.1,
+            depth_sufficiency: 0.5,
+            effective_dof: 10.0,
+            uncertainty: 0.1,
         };
-        for _ in 0..50 {
-            adaptor.after_train(&positive_diag);
+
+        let mut total_lr_log = 0.0_f64;
+        for i in 0..5_000 {
+            let pred = i as f64 * 0.01;
+            let target = pred + 0.01;
+            let adj = learner.after_train(&diag, pred, target);
+            total_lr_log += adj.lr_multiplier.ln();
         }
 
-        // Feed enough post-init samples to trigger one adjustment interval.
-        // All with strong positive alignment so EWMA stays above threshold.
-        let mut found_increase = false;
-        for _ in 0..(interval + 1) {
-            let adj = adaptor.after_train(&positive_diag);
-            if adj.lr_multiplier > 1.0 {
-                found_increase = true;
-                break;
-            }
-        }
+        let effective_lr = center_lr * total_lr_log.exp();
         assert!(
-            found_increase,
-            "positive alignment should produce lr_multiplier > 1.0 within one adjustment interval ({interval} samples)"
+            effective_lr <= bounds.learning_rate.1 * 1.01,
+            "effective LR {effective_lr:.6} must not exceed upper bound {:.6}",
+            bounds.learning_rate.1
+        );
+        assert!(
+            effective_lr >= bounds.learning_rate.0 * 0.99,
+            "effective LR {effective_lr:.6} must not go below lower bound {:.6}",
+            bounds.learning_rate.0
         );
     }
 
     #[test]
-    fn diagnostic_adaptor_structural_change() {
-        // Use a large initial region. The adaptor will update the region
-        // with its own sample count in at_replacement(), so we need enough
-        // training samples for the budget to support depth headroom.
-        let region = FeasibleRegion::from_data(10_000, 3, 10.0);
-        let mut adaptor = DiagnosticAdaptor::new(region);
+    fn diagnostic_learner_backward_compat_alias() {
+        // DiagnosticAdaptor alias should work identically to DiagnosticLearner.
+        let region = FeasibleRegion::from_data(200, 3, 1.0);
+        let mut adaptor: DiagnosticAdaptor = DiagnosticAdaptor::new(region);
 
-        // Burn through init phase with low depth_sufficiency baseline.
-        // Use many samples so region.update(n) keeps a healthy budget.
+        let diag = ConfigDiagnostics {
+            residual_alignment: 0.5,
+            ..Default::default()
+        };
+
+        // Should compile and behave identically.
+        let adj = adaptor.after_train(&diag, 0.0, 0.0);
+        assert_eq!(
+            adj.lr_multiplier, 1.0,
+            "backward compat alias: init phase should return no-op"
+        );
+
+        // after_train_diagnostics_only should also work via alias.
+        let adj2 = adaptor.after_train_diagnostics_only(&diag);
+        assert_eq!(
+            adj2.lr_multiplier, 1.0,
+            "backward compat alias: diagnostics_only should return no-op"
+        );
+    }
+
+    #[test]
+    fn diagnostic_learner_observation_interval_gating() {
+        // Between observation intervals, adjustments should be no-op.
+        let region = FeasibleRegion::from_data(1_000, 3, 1.0);
+        let bounds = region.config_bounds();
+        let interval = ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
+        let mut learner = DiagnosticLearner::new(region);
+
+        let diag = ConfigDiagnostics {
+            residual_alignment: 0.5,
+            ..Default::default()
+        };
+
+        // Burn init phase.
+        for _ in 0..50 {
+            learner.after_train(&diag, 0.5, 1.0);
+        }
+
+        // Between intervals (first sample after init), should be no-op.
+        if interval > 2 {
+            let adj = learner.after_train(&diag, 0.5, 1.0);
+            assert_eq!(
+                adj.lr_multiplier, 1.0,
+                "first post-init sample (before interval) should be no-op, got lr={}",
+                adj.lr_multiplier
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_learner_structural_change() {
+        let region = FeasibleRegion::from_data(10_000, 3, 10.0);
+        let mut learner = DiagnosticLearner::new(region);
+
         let init_diag = ConfigDiagnostics {
             depth_sufficiency: 0.1,
             effective_dof: 5.0,
             ..Default::default()
         };
         for _ in 0..500 {
-            adaptor.after_train(&init_diag);
+            learner.after_train(&init_diag, 0.5, 1.0);
         }
 
-        // Verify the feasible region (after update(500)) has depth headroom.
-        // With target_variance=10.0, epsilon = sqrt(10)*0.1 ≈ 0.316,
-        // budget = 500 * 0.1 / ln(3) ≈ 45.5 → ln(45.5)/ln(2) ≈ 5.5 → clamp(2,6) = 5
-        let mut check_region = adaptor.region().clone();
+        let mut check_region = learner.region().clone();
         check_region.update(500);
         let bounds = check_region.config_bounds();
         assert!(
@@ -987,13 +1416,12 @@ mod tests {
             bounds.max_depth
         );
 
-        // Now feed high depth_sufficiency -> should suggest increasing depth
         let high_depth_diag = ConfigDiagnostics {
-            depth_sufficiency: 1.0, // much higher than baseline ~0.1
+            depth_sufficiency: 1.0,
             effective_dof: 5.0,
             ..Default::default()
         };
-        let change = adaptor.at_replacement(&high_depth_diag);
+        let change = learner.at_replacement(&high_depth_diag);
         assert!(
             change.is_some(),
             "high depth_sufficiency should trigger structural change"
@@ -1006,151 +1434,31 @@ mod tests {
         );
     }
 
-    // =======================================================================
-    // Call-frequency invariance tests
-    // =======================================================================
-
-    /// Helper: run an adaptor for `n_calls` post-init samples with constant diagnostics.
-    /// Returns the product of all emitted lr_multipliers.
-    fn run_adaptor_total_lr(n_calls: u64, diag: &ConfigDiagnostics) -> f64 {
-        let region = FeasibleRegion::from_data(50_000, 5, 1.0);
-        let mut adaptor = DiagnosticAdaptor::new(region);
-
-        // Burn through init phase with same diagnostics (builds EWMA baseline).
-        for _ in 0..50 {
-            adaptor.after_train(diag);
-        }
-
-        // Accumulate total LR adjustment as product of emitted multipliers.
-        let mut total_lr_log = 0.0_f64;
-        for _ in 0..n_calls {
-            let adj = adaptor.after_train(diag);
-            total_lr_log += adj.lr_multiplier.ln();
-        }
-        total_lr_log.exp()
-    }
-
     #[test]
-    fn call_frequency_invariance_bounded_total_adjustment() {
-        // With the old code, 1.01^40000 = ~1.7e173 (infinity for all purposes).
-        // With interval gating, the total must stay bounded within feasible region.
-        let diag = ConfigDiagnostics {
-            residual_alignment: 0.5, // strong positive signal
-            ..Default::default()
-        };
-
-        let total_100 = run_adaptor_total_lr(100, &diag);
-        let total_10000 = run_adaptor_total_lr(10_000, &diag);
-        let total_40000 = run_adaptor_total_lr(40_000, &diag);
-
-        // All totals must be finite.
-        assert!(
-            total_100.is_finite(),
-            "total LR after 100 calls must be finite, got {total_100}"
-        );
-        assert!(
-            total_10000.is_finite(),
-            "total LR after 10000 calls must be finite, got {total_10000}"
-        );
-        assert!(
-            total_40000.is_finite(),
-            "total LR after 40000 calls must be finite, got {total_40000}"
-        );
-
-        // The ratio between 40K and 10K calls should be modest (bounded by clamping).
-        // With old code this ratio would be 1.01^30000 ≈ 1e130. Now it should be < 10x.
-        let ratio = total_40000 / total_10000;
-        assert!(
-            ratio < 10.0,
-            "40K/10K total LR ratio should be bounded, got {ratio:.4} \
-             (total_40000={total_40000:.6}, total_10000={total_10000:.6})"
-        );
-    }
-
-    #[test]
-    fn cumulative_lr_never_exceeds_feasible_bounds() {
-        let region = FeasibleRegion::from_data(10_000, 5, 1.0);
-        let bounds = region.config_bounds();
-        let center_lr = (bounds.learning_rate.0 * bounds.learning_rate.1).sqrt();
-
-        let mut adaptor = DiagnosticAdaptor::new(region);
-
-        // Strong positive alignment to push LR upward.
-        let diag = ConfigDiagnostics {
-            residual_alignment: 0.9,
-            ..Default::default()
-        };
-
-        // Burn init + feed many samples.
-        let mut total_lr_log = 0.0_f64;
-        for _ in 0..5_000 {
-            let adj = adaptor.after_train(&diag);
-            total_lr_log += adj.lr_multiplier.ln();
-        }
-
-        // The effective LR (center * exp(total_log)) must stay within feasible bounds.
-        let effective_lr = center_lr * total_lr_log.exp();
-        assert!(
-            effective_lr <= bounds.learning_rate.1 * 1.01, // small epsilon for float
-            "effective LR {effective_lr:.6} must not exceed upper bound {:.6}",
-            bounds.learning_rate.1
-        );
-        assert!(
-            effective_lr >= bounds.learning_rate.0 * 0.99,
-            "effective LR {effective_lr:.6} must not go below lower bound {:.6}",
-            bounds.learning_rate.0
-        );
-    }
-
-    #[test]
-    fn init_phase_returns_noop_with_interval_gating() {
-        // Ensure the init phase still works correctly with new interval fields.
-        let region = FeasibleRegion::from_data(500, 3, 1.0);
-        let mut adaptor = DiagnosticAdaptor::new(region);
-
-        let diag = ConfigDiagnostics {
-            residual_alignment: 0.9,
-            regularization_sensitivity: 5.0,
-            depth_sufficiency: 1.0,
-            effective_dof: 50.0,
-            uncertainty: 0.5,
-        };
-
-        // All 49 samples during init must return no-op.
-        for i in 0..49 {
-            let adj = adaptor.after_train(&diag);
-            assert_eq!(
-                adj.lr_multiplier, 1.0,
-                "init phase sample {i}: lr_multiplier should be 1.0, got {}",
-                adj.lr_multiplier
-            );
-            assert_eq!(
-                adj.lambda_direction, 0.0,
-                "init phase sample {i}: lambda_direction should be 0.0, got {}",
-                adj.lambda_direction
-            );
-        }
-    }
-
-    #[test]
-    fn reset_clears_cumulative_state() {
+    fn diagnostic_learner_reset_clears_state() {
         let region = FeasibleRegion::from_data(1_000, 3, 1.0);
-        let mut adaptor = DiagnosticAdaptor::new(region);
+        let mut learner = DiagnosticLearner::new(region);
 
         let diag = ConfigDiagnostics {
             residual_alignment: 0.5,
             ..Default::default()
         };
 
-        // Feed enough samples to accumulate some state.
-        for _ in 0..200 {
-            adaptor.after_train(&diag);
+        for i in 0..200 {
+            learner.after_train(&diag, i as f64 * 0.01, i as f64 * 0.01 + 0.1);
         }
 
-        adaptor.reset();
+        learner.reset();
+
+        // After reset, meta_observations should be 0.
+        assert_eq!(
+            learner.meta_observations(),
+            0,
+            "meta_observations should be 0 after reset"
+        );
 
         // After reset, init phase should be active again (no-op adjustments).
-        let adj = adaptor.after_train(&diag);
+        let adj = learner.after_train(&diag, 0.0, 0.0);
         assert_eq!(
             adj.lr_multiplier, 1.0,
             "after reset, first sample should be init-phase no-op, got lr={}",
@@ -1164,32 +1472,79 @@ mod tests {
     }
 
     #[test]
-    fn between_intervals_returns_noop() {
-        let region = FeasibleRegion::from_data(1_000, 3, 1.0);
-        let bounds = region.config_bounds();
-        let interval = ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
-        let mut adaptor = DiagnosticAdaptor::new(region);
+    fn diagnostic_learner_meta_objective_default() {
+        let region = FeasibleRegion::from_data(200, 3, 1.0);
+        let learner = DiagnosticLearner::new(region);
+        assert!(
+            matches!(learner.objective(), MetaObjective::MinimizeRMSE),
+            "default objective should be MinimizeRMSE"
+        );
+    }
 
+    #[test]
+    fn diagnostic_learner_with_custom_objective() {
+        let region = FeasibleRegion::from_data(200, 3, 1.0);
+        let learner = DiagnosticLearner::with_objective(region, MetaObjective::MaximizeF1);
+        assert!(
+            matches!(learner.objective(), MetaObjective::MaximizeF1),
+            "objective should be MaximizeF1"
+        );
+    }
+
+    // =======================================================================
+    // Call-frequency invariance tests
+    // =======================================================================
+
+    /// Helper: run a learner for `n_calls` post-init samples with constant
+    /// diagnostics. Returns the product of all emitted lr_multipliers.
+    fn run_learner_total_lr(n_calls: u64, diag: &ConfigDiagnostics) -> f64 {
+        let region = FeasibleRegion::from_data(50_000, 5, 1.0);
+        let mut learner = DiagnosticLearner::new(region);
+
+        // Burn through init phase.
+        for i in 0..50 {
+            learner.after_train(diag, i as f64 * 0.01, i as f64 * 0.01 + 0.1);
+        }
+
+        let mut total_lr_log = 0.0_f64;
+        for i in 0..n_calls {
+            let pred = (50 + i) as f64 * 0.01;
+            let target = pred + 0.1;
+            let adj = learner.after_train(diag, pred, target);
+            total_lr_log += adj.lr_multiplier.ln();
+        }
+        total_lr_log.exp()
+    }
+
+    #[test]
+    fn call_frequency_invariance_bounded_total_adjustment() {
         let diag = ConfigDiagnostics {
             residual_alignment: 0.5,
             ..Default::default()
         };
 
-        // Burn init phase.
-        for _ in 0..50 {
-            adaptor.after_train(&diag);
-        }
+        let total_100 = run_learner_total_lr(100, &diag);
+        let total_10000 = run_learner_total_lr(10_000, &diag);
+        let total_40000 = run_learner_total_lr(40_000, &diag);
 
-        // The very next sample starts the interval counter at 1.
-        // For samples 1..(interval-1), adjustment should be no-op.
-        if interval > 2 {
-            // Feed one sample to start the counter.
-            let adj = adaptor.after_train(&diag);
-            assert_eq!(
-                adj.lr_multiplier, 1.0,
-                "first post-init sample (before interval) should be no-op, got lr={}",
-                adj.lr_multiplier
-            );
-        }
+        assert!(
+            total_100.is_finite(),
+            "total LR after 100 calls must be finite, got {total_100}"
+        );
+        assert!(
+            total_10000.is_finite(),
+            "total LR after 10000 calls must be finite, got {total_10000}"
+        );
+        assert!(
+            total_40000.is_finite(),
+            "total LR after 40000 calls must be finite, got {total_40000}"
+        );
+
+        let ratio = total_40000 / total_10000;
+        assert!(
+            ratio < 10.0,
+            "40K/10K total LR ratio should be bounded, got {ratio:.4} \
+             (total_40000={total_40000:.6}, total_10000={total_10000:.6})"
+        );
     }
 }
