@@ -471,6 +471,10 @@ pub struct StructuralChange {
 ///
 /// Smooth adjustments (every sample): LR and lambda.
 /// Structural adjustments (at tree replacement): depth and n_steps.
+///
+/// Call-frequency invariant: adjustments are emitted at fixed intervals
+/// derived from the feasible region, so models calling `after_train()`
+/// at different rates converge to bounded total adjustment.
 #[derive(Debug, Clone)]
 pub struct DiagnosticAdaptor {
     /// Running EWMA of uncertainty for baseline comparison.
@@ -491,11 +495,76 @@ pub struct DiagnosticAdaptor {
     n_samples: u64,
     /// Whether initialization phase (first 50 samples = pure observation).
     initialized: bool,
+
+    // --- Call-frequency invariance fields ---
+    /// Minimum samples between adjustment emissions (from grace_period center).
+    adjustment_interval: u64,
+    /// Counter since last adjustment emission.
+    samples_since_adjustment: u64,
+    /// Per-adjustment step magnitude in log-LR space.
+    lr_step: f64,
+    /// Per-adjustment step magnitude in lambda space.
+    lambda_step: f64,
+    /// Cumulative LR adjustment in log space (starts 0.0 = no change).
+    cumulative_lr_log: f64,
+    /// Cumulative lambda adjustment (starts 0.0 = no change from center).
+    cumulative_lambda: f64,
+    /// Clamping bounds for cumulative_lr_log.
+    lr_log_bounds: (f64, f64),
+    /// Clamping bounds for cumulative_lambda.
+    lambda_bounds: (f64, f64),
+    /// Last emitted cumulative_lr_log (for computing delta multiplier).
+    last_emitted_lr_log: f64,
+    /// Last emitted cumulative_lambda (for computing delta direction).
+    last_emitted_lambda: f64,
 }
 
 impl DiagnosticAdaptor {
     /// Create a new adaptor backed by a feasible region.
     pub fn new(region: FeasibleRegion) -> Self {
+        let bounds = region.config_bounds();
+
+        // Adjustment interval: center of grace_period range, minimum 1.
+        let adjustment_interval =
+            ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
+
+        // Expected number of adjustment points over model lifetime.
+        let expected_adjustments =
+            (region.n_samples() as f64 / adjustment_interval as f64).max(1.0);
+
+        // LR step calibrated to traverse feasible LR range over model lifetime (log space).
+        let lr_step =
+            if bounds.learning_rate.1 > bounds.learning_rate.0 && bounds.learning_rate.0 > 0.0 {
+                (bounds.learning_rate.1 / bounds.learning_rate.0).ln() / expected_adjustments
+            } else {
+                0.01
+            };
+
+        // Lambda step calibrated to traverse feasible lambda range over model lifetime.
+        let lambda_step = if bounds.lambda.1 > bounds.lambda.0 {
+            (bounds.lambda.1 - bounds.lambda.0) / expected_adjustments
+        } else {
+            0.01
+        };
+
+        // LR bounds in log space relative to geometric center.
+        let center_lr = (bounds.learning_rate.0 * bounds.learning_rate.1).sqrt();
+        let lr_log_bounds = if center_lr > 0.0 {
+            (
+                (bounds.learning_rate.0 / center_lr).ln(),
+                (bounds.learning_rate.1 / center_lr).ln(),
+            )
+        } else {
+            (-1.0, 1.0)
+        };
+
+        // Lambda bounds relative to arithmetic center.
+        let center_lambda = (bounds.lambda.0 + bounds.lambda.1) / 2.0;
+        let lambda_bounds = (
+            bounds.lambda.0 - center_lambda,
+            bounds.lambda.1 - center_lambda,
+        );
+
         Self {
             uncertainty_ewma: 0.0,
             alignment_ewma: 0.0,
@@ -506,16 +575,28 @@ impl DiagnosticAdaptor {
             region,
             n_samples: 0,
             initialized: false,
+            adjustment_interval,
+            samples_since_adjustment: 0,
+            lr_step,
+            lambda_step,
+            cumulative_lr_log: 0.0,
+            cumulative_lambda: 0.0,
+            lr_log_bounds,
+            lambda_bounds,
+            last_emitted_lr_log: 0.0,
+            last_emitted_lambda: 0.0,
         }
     }
 
     /// Process diagnostics after each `train_one()`. Returns smooth adjustments.
     ///
     /// During the first 50 samples, only baselines are updated (no adjustments).
+    /// After initialization, adjustments are emitted at fixed intervals
+    /// (`adjustment_interval` samples apart) to ensure call-frequency invariance.
     pub fn after_train(&mut self, diagnostics: &ConfigDiagnostics) -> SmoothAdjustments {
         self.n_samples += 1;
 
-        // Update running baselines
+        // Always update running baselines regardless of adjustment timing.
         let a = self.alpha;
         self.uncertainty_ewma = a * diagnostics.uncertainty + (1.0 - a) * self.uncertainty_ewma;
         self.alignment_ewma = a * diagnostics.residual_alignment + (1.0 - a) * self.alignment_ewma;
@@ -525,7 +606,7 @@ impl DiagnosticAdaptor {
             a * diagnostics.depth_sufficiency + (1.0 - a) * self.depth_signal_ewma;
         self.dof_ewma = a * diagnostics.effective_dof + (1.0 - a) * self.dof_ewma;
 
-        // Initialization phase: observe only, don't adjust
+        // Initialization phase: observe only, don't adjust.
         if self.n_samples < 50 {
             return SmoothAdjustments {
                 lr_multiplier: 1.0,
@@ -536,32 +617,57 @@ impl DiagnosticAdaptor {
             self.initialized = true;
         }
 
-        // LR adjustment from residual alignment:
-        // Positive alignment = gradients agree = can increase LR
-        // Negative alignment = overshooting = decrease LR
-        let lr_multiplier = if diagnostics.residual_alignment > 0.1 {
-            1.01 // small increase
-        } else if diagnostics.residual_alignment < -0.1 {
-            0.99 // small decrease
-        } else {
-            1.0
-        };
+        // Increment interval counter; emit no-op until interval elapsed.
+        self.samples_since_adjustment += 1;
+        if self.samples_since_adjustment < self.adjustment_interval {
+            return SmoothAdjustments {
+                lr_multiplier: 1.0,
+                lambda_direction: 0.0,
+            };
+        }
 
-        // Lambda direction from regularization sensitivity:
-        // High sensitivity relative to baseline = over-regularized -> decrease lambda
-        // Low sensitivity = under-regularized -> increase lambda
-        let lambda_direction = if self.reg_sensitivity_ewma > 1e-10 {
+        // --- Adjustment point reached ---
+        self.samples_since_adjustment = 0;
+
+        // Noise floor threshold: signals below this magnitude are noise.
+        let threshold = 2.0 * self.alpha.sqrt();
+
+        // LR adjustment from EWMA alignment (not raw signal).
+        // Positive alignment = gradients agree = can increase LR.
+        // Negative alignment = overshooting = decrease LR.
+        if self.alignment_ewma > threshold {
+            self.cumulative_lr_log += self.lr_step;
+        } else if self.alignment_ewma < -threshold {
+            self.cumulative_lr_log -= self.lr_step;
+        }
+        // Clamp to feasible bounds.
+        self.cumulative_lr_log = self
+            .cumulative_lr_log
+            .clamp(self.lr_log_bounds.0, self.lr_log_bounds.1);
+
+        // Delta multiplier: ratio of new cumulative to last emitted.
+        let lr_multiplier = (self.cumulative_lr_log - self.last_emitted_lr_log).exp();
+        self.last_emitted_lr_log = self.cumulative_lr_log;
+
+        // Lambda adjustment from regularization sensitivity ratio.
+        // High sensitivity relative to baseline = over-regularized -> decrease lambda.
+        // Low sensitivity = under-regularized -> increase lambda.
+        if self.reg_sensitivity_ewma > 1e-10 {
             let ratio = diagnostics.regularization_sensitivity / self.reg_sensitivity_ewma;
             if ratio > 1.5 {
-                -0.01 // over-regularized
+                self.cumulative_lambda -= self.lambda_step; // over-regularized
             } else if ratio < 0.5 {
-                0.01 // under-regularized
-            } else {
-                0.0
+                self.cumulative_lambda += self.lambda_step; // under-regularized
             }
-        } else {
-            0.0
-        };
+        }
+        // Clamp to feasible bounds.
+        self.cumulative_lambda = self
+            .cumulative_lambda
+            .clamp(self.lambda_bounds.0, self.lambda_bounds.1);
+
+        // Delta direction: change since last emission.
+        let lambda_direction = self.cumulative_lambda - self.last_emitted_lambda;
+        self.last_emitted_lambda = self.cumulative_lambda;
 
         SmoothAdjustments {
             lr_multiplier,
@@ -614,7 +720,7 @@ impl DiagnosticAdaptor {
         }
     }
 
-    /// Reset the adaptor state.
+    /// Reset the adaptor state (all EWMA baselines and cumulative adjustments).
     pub fn reset(&mut self) {
         self.uncertainty_ewma = 0.0;
         self.alignment_ewma = 0.0;
@@ -623,6 +729,11 @@ impl DiagnosticAdaptor {
         self.dof_ewma = 0.0;
         self.n_samples = 0;
         self.initialized = false;
+        self.samples_since_adjustment = 0;
+        self.cumulative_lr_log = 0.0;
+        self.cumulative_lambda = 0.0;
+        self.last_emitted_lr_log = 0.0;
+        self.last_emitted_lambda = 0.0;
     }
 
     /// Current feasible region.
@@ -816,24 +927,32 @@ mod tests {
     #[test]
     fn diagnostic_adaptor_lr_adjustment() {
         let region = FeasibleRegion::from_data(200, 3, 1.0);
+        let bounds = region.config_bounds();
+        let interval = ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
         let mut adaptor = DiagnosticAdaptor::new(region);
 
-        // Burn through init phase
-        let init_diag = ConfigDiagnostics::default();
-        for _ in 0..50 {
-            adaptor.after_train(&init_diag);
-        }
-
-        // Now feed positive alignment -> should get lr_multiplier > 1.0
+        // Burn through init phase with positive alignment to build EWMA baseline.
         let positive_diag = ConfigDiagnostics {
             residual_alignment: 0.5,
             ..Default::default()
         };
-        let adj = adaptor.after_train(&positive_diag);
+        for _ in 0..50 {
+            adaptor.after_train(&positive_diag);
+        }
+
+        // Feed enough post-init samples to trigger one adjustment interval.
+        // All with strong positive alignment so EWMA stays above threshold.
+        let mut found_increase = false;
+        for _ in 0..(interval + 1) {
+            let adj = adaptor.after_train(&positive_diag);
+            if adj.lr_multiplier > 1.0 {
+                found_increase = true;
+                break;
+            }
+        }
         assert!(
-            adj.lr_multiplier > 1.0,
-            "positive alignment should increase lr_multiplier, got {}",
-            adj.lr_multiplier
+            found_increase,
+            "positive alignment should produce lr_multiplier > 1.0 within one adjustment interval ({interval} samples)"
         );
     }
 
@@ -885,5 +1004,192 @@ mod tests {
             "should suggest increasing depth, got delta={}",
             change.depth_delta
         );
+    }
+
+    // =======================================================================
+    // Call-frequency invariance tests
+    // =======================================================================
+
+    /// Helper: run an adaptor for `n_calls` post-init samples with constant diagnostics.
+    /// Returns the product of all emitted lr_multipliers.
+    fn run_adaptor_total_lr(n_calls: u64, diag: &ConfigDiagnostics) -> f64 {
+        let region = FeasibleRegion::from_data(50_000, 5, 1.0);
+        let mut adaptor = DiagnosticAdaptor::new(region);
+
+        // Burn through init phase with same diagnostics (builds EWMA baseline).
+        for _ in 0..50 {
+            adaptor.after_train(diag);
+        }
+
+        // Accumulate total LR adjustment as product of emitted multipliers.
+        let mut total_lr_log = 0.0_f64;
+        for _ in 0..n_calls {
+            let adj = adaptor.after_train(diag);
+            total_lr_log += adj.lr_multiplier.ln();
+        }
+        total_lr_log.exp()
+    }
+
+    #[test]
+    fn call_frequency_invariance_bounded_total_adjustment() {
+        // With the old code, 1.01^40000 = ~1.7e173 (infinity for all purposes).
+        // With interval gating, the total must stay bounded within feasible region.
+        let diag = ConfigDiagnostics {
+            residual_alignment: 0.5, // strong positive signal
+            ..Default::default()
+        };
+
+        let total_100 = run_adaptor_total_lr(100, &diag);
+        let total_10000 = run_adaptor_total_lr(10_000, &diag);
+        let total_40000 = run_adaptor_total_lr(40_000, &diag);
+
+        // All totals must be finite.
+        assert!(
+            total_100.is_finite(),
+            "total LR after 100 calls must be finite, got {total_100}"
+        );
+        assert!(
+            total_10000.is_finite(),
+            "total LR after 10000 calls must be finite, got {total_10000}"
+        );
+        assert!(
+            total_40000.is_finite(),
+            "total LR after 40000 calls must be finite, got {total_40000}"
+        );
+
+        // The ratio between 40K and 10K calls should be modest (bounded by clamping).
+        // With old code this ratio would be 1.01^30000 ≈ 1e130. Now it should be < 10x.
+        let ratio = total_40000 / total_10000;
+        assert!(
+            ratio < 10.0,
+            "40K/10K total LR ratio should be bounded, got {ratio:.4} \
+             (total_40000={total_40000:.6}, total_10000={total_10000:.6})"
+        );
+    }
+
+    #[test]
+    fn cumulative_lr_never_exceeds_feasible_bounds() {
+        let region = FeasibleRegion::from_data(10_000, 5, 1.0);
+        let bounds = region.config_bounds();
+        let center_lr = (bounds.learning_rate.0 * bounds.learning_rate.1).sqrt();
+
+        let mut adaptor = DiagnosticAdaptor::new(region);
+
+        // Strong positive alignment to push LR upward.
+        let diag = ConfigDiagnostics {
+            residual_alignment: 0.9,
+            ..Default::default()
+        };
+
+        // Burn init + feed many samples.
+        let mut total_lr_log = 0.0_f64;
+        for _ in 0..5_000 {
+            let adj = adaptor.after_train(&diag);
+            total_lr_log += adj.lr_multiplier.ln();
+        }
+
+        // The effective LR (center * exp(total_log)) must stay within feasible bounds.
+        let effective_lr = center_lr * total_lr_log.exp();
+        assert!(
+            effective_lr <= bounds.learning_rate.1 * 1.01, // small epsilon for float
+            "effective LR {effective_lr:.6} must not exceed upper bound {:.6}",
+            bounds.learning_rate.1
+        );
+        assert!(
+            effective_lr >= bounds.learning_rate.0 * 0.99,
+            "effective LR {effective_lr:.6} must not go below lower bound {:.6}",
+            bounds.learning_rate.0
+        );
+    }
+
+    #[test]
+    fn init_phase_returns_noop_with_interval_gating() {
+        // Ensure the init phase still works correctly with new interval fields.
+        let region = FeasibleRegion::from_data(500, 3, 1.0);
+        let mut adaptor = DiagnosticAdaptor::new(region);
+
+        let diag = ConfigDiagnostics {
+            residual_alignment: 0.9,
+            regularization_sensitivity: 5.0,
+            depth_sufficiency: 1.0,
+            effective_dof: 50.0,
+            uncertainty: 0.5,
+        };
+
+        // All 49 samples during init must return no-op.
+        for i in 0..49 {
+            let adj = adaptor.after_train(&diag);
+            assert_eq!(
+                adj.lr_multiplier, 1.0,
+                "init phase sample {i}: lr_multiplier should be 1.0, got {}",
+                adj.lr_multiplier
+            );
+            assert_eq!(
+                adj.lambda_direction, 0.0,
+                "init phase sample {i}: lambda_direction should be 0.0, got {}",
+                adj.lambda_direction
+            );
+        }
+    }
+
+    #[test]
+    fn reset_clears_cumulative_state() {
+        let region = FeasibleRegion::from_data(1_000, 3, 1.0);
+        let mut adaptor = DiagnosticAdaptor::new(region);
+
+        let diag = ConfigDiagnostics {
+            residual_alignment: 0.5,
+            ..Default::default()
+        };
+
+        // Feed enough samples to accumulate some state.
+        for _ in 0..200 {
+            adaptor.after_train(&diag);
+        }
+
+        adaptor.reset();
+
+        // After reset, init phase should be active again (no-op adjustments).
+        let adj = adaptor.after_train(&diag);
+        assert_eq!(
+            adj.lr_multiplier, 1.0,
+            "after reset, first sample should be init-phase no-op, got lr={}",
+            adj.lr_multiplier
+        );
+        assert_eq!(
+            adj.lambda_direction, 0.0,
+            "after reset, first sample should be init-phase no-op, got lambda={}",
+            adj.lambda_direction
+        );
+    }
+
+    #[test]
+    fn between_intervals_returns_noop() {
+        let region = FeasibleRegion::from_data(1_000, 3, 1.0);
+        let bounds = region.config_bounds();
+        let interval = ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
+        let mut adaptor = DiagnosticAdaptor::new(region);
+
+        let diag = ConfigDiagnostics {
+            residual_alignment: 0.5,
+            ..Default::default()
+        };
+
+        // Burn init phase.
+        for _ in 0..50 {
+            adaptor.after_train(&diag);
+        }
+
+        // The very next sample starts the interval counter at 1.
+        // For samples 1..(interval-1), adjustment should be no-op.
+        if interval > 2 {
+            // Feed one sample to start the counter.
+            let adj = adaptor.after_train(&diag);
+            assert_eq!(
+                adj.lr_multiplier, 1.0,
+                "first post-init sample (before interval) should be no-op, got lr={}",
+                adj.lr_multiplier
+            );
+        }
     }
 }

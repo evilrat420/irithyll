@@ -6,6 +6,8 @@
 //! Core types and implementations are defined in `irithyll-core` and
 //! re-exported here for backward compatibility.
 
+pub mod drift_aware;
+
 // Re-export core drift types and sub-modules.
 pub use irithyll_core::drift::AdwinBucketState;
 pub use irithyll_core::drift::DriftDetector;
@@ -15,6 +17,8 @@ pub use irithyll_core::drift::DriftSignal;
 pub use irithyll_core::drift::adwin;
 pub use irithyll_core::drift::ddm;
 pub use irithyll_core::drift::pht;
+
+pub use drift_aware::DriftAware;
 
 /// Backward-compatible `state` module re-exporting serializable drift state types.
 pub mod state {

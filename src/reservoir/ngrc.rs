@@ -86,6 +86,12 @@ pub struct NextGenRC {
     n_inputs: Option<usize>,
     /// Samples trained on (post-warmup).
     samples_seen: u64,
+    /// Previous prediction for residual alignment tracking.
+    prev_prediction: f64,
+    /// Previous prediction change for residual alignment tracking.
+    prev_change: f64,
+    /// EWMA of residual alignment signal.
+    alignment_ewma: f64,
 }
 
 impl NextGenRC {
@@ -109,6 +115,9 @@ impl NextGenRC {
             n_inputs: None,
             samples_seen: 0,
             config,
+            prev_prediction: 0.0,
+            prev_change: 0.0,
+            alignment_ewma: 0.0,
         }
     }
 
@@ -183,6 +192,22 @@ impl StreamingLearner for NextGenRC {
 
         // If warm, build features and train the RLS readout.
         if let Some(feat_vec) = self.build_features() {
+            // Update residual alignment tracking (before RLS update).
+            let current_pred = self.rls.predict(&feat_vec);
+            let current_change = current_pred - self.prev_prediction;
+            if self.samples_seen > 0 {
+                let agreement = if (current_change > 0.0) == (self.prev_change > 0.0) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                const ALIGN_ALPHA: f64 = 0.05;
+                self.alignment_ewma =
+                    (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+            }
+            self.prev_change = current_change;
+            self.prev_prediction = current_pred;
+
             self.rls.train_one(&feat_vec, target, weight);
             self.samples_seen += 1;
         }
@@ -216,6 +241,9 @@ impl StreamingLearner for NextGenRC {
         self.total_pushed = 0;
         self.n_inputs = None;
         self.samples_seen = 0;
+        self.prev_prediction = 0.0;
+        self.prev_change = 0.0;
+        self.alignment_ewma = 0.0;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -257,8 +285,12 @@ impl crate::automl::DiagnosticSource for NextGenRC {
         // Before first sample, weights are empty -- fall back to 0.
         let dof = self.rls.weights().len() as f64;
         Some(crate::automl::ConfigDiagnostics {
+            residual_alignment: self.alignment_ewma,
+            regularization_sensitivity: 1.0 - self.config.forgetting_factor,
+            depth_sufficiency: 0.0, // Single polynomial expansion + linear readout.
             effective_dof: dof,
-            ..Default::default()
+            // Prediction uncertainty: std dev of RLS residuals.
+            uncertainty: self.rls.noise_variance().sqrt(),
         })
     }
 }

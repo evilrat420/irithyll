@@ -74,6 +74,12 @@ pub struct StreamingAttentionModel {
     last_features: Vec<f64>,
     /// Total samples trained on.
     n_samples: u64,
+    /// Previous prediction for residual alignment tracking.
+    prev_prediction: f64,
+    /// Previous prediction change for residual alignment tracking.
+    prev_change: f64,
+    /// EWMA of residual alignment signal.
+    alignment_ewma: f64,
 }
 
 impl StreamingAttentionModel {
@@ -101,6 +107,9 @@ impl StreamingAttentionModel {
             readout,
             last_features,
             n_samples: 0,
+            prev_prediction: 0.0,
+            prev_change: 0.0,
+            alignment_ewma: 0.0,
         }
     }
 
@@ -148,10 +157,26 @@ impl StreamingLearner for StreamingAttentionModel {
         // 1. Forward through attention to get temporal features
         let attn_output = self.attention.forward(features);
 
-        // 2. Train RLS readout on attention output
+        // 2. Update residual alignment tracking (before RLS update).
+        let current_pred = self.readout.predict(&attn_output);
+        let current_change = current_pred - self.prev_prediction;
+        if self.n_samples > 0 {
+            let agreement = if (current_change > 0.0) == (self.prev_change > 0.0) {
+                1.0
+            } else {
+                -1.0
+            };
+            const ALIGN_ALPHA: f64 = 0.05;
+            self.alignment_ewma =
+                (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+        }
+        self.prev_change = current_change;
+        self.prev_prediction = current_pred;
+
+        // 3. Train RLS readout on attention output
         self.readout.train_one(&attn_output, target, weight);
 
-        // 3. Cache the attention output for predict()
+        // 4. Cache the attention output for predict()
         self.last_features = attn_output;
 
         self.n_samples += 1;
@@ -190,6 +215,9 @@ impl StreamingLearner for StreamingAttentionModel {
             *f = 0.0;
         }
         self.n_samples = 0;
+        self.prev_prediction = 0.0;
+        self.prev_change = 0.0;
+        self.alignment_ewma = 0.0;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -214,11 +242,11 @@ impl StreamingLearner for StreamingAttentionModel {
 impl crate::automl::DiagnosticSource for StreamingAttentionModel {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         Some(crate::automl::ConfigDiagnostics {
-            effective_dof: (self.config.d_model * self.config.n_heads) as f64,
+            residual_alignment: self.alignment_ewma,
             regularization_sensitivity: 1.0 - self.config.forgetting_factor,
-            // Prediction uncertainty: std dev of RLS residuals.
+            depth_sufficiency: 0.0, // Single attention layer + linear readout.
+            effective_dof: (self.config.d_model * self.config.n_heads) as f64,
             uncertainty: self.prediction_uncertainty(),
-            ..Default::default()
         })
     }
 }

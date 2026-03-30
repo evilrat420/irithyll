@@ -1,6 +1,6 @@
 //! Real-world synthetic benchmark harness for irithyll streaming algorithms.
 //!
-//! Evaluates 8 streaming algorithms across 5 synthetic datasets using the
+//! Evaluates 13 streaming algorithms across 5 synthetic datasets using the
 //! prequential (test-then-train) protocol. All datasets are generated inline
 //! with deterministic seeded RNG -- no file downloads needed for CI.
 //!
@@ -20,9 +20,15 @@
 //! - StreamingMamba
 //! - RecursiveLeastSquares (regression only)
 //! - NeuralMoE (3 experts)
+//! - DA(KAN) -- DriftAware<StreamingKAN> with DDM
+//! - DA(TTT) -- DriftAware<StreamingTTT> with DDM
+//! - DA(ESN) -- DriftAware<EchoStateNetwork> with DDM
+//! - DA(Mamba) -- DriftAware<StreamingMamba> with DDM
+//! - DA(RLS) -- DriftAware<RecursiveLeastSquares> with DDM (regression only)
 //!
 //! Run: `cargo bench --bench real_world_bench`
 
+use irithyll::drift::DriftAware;
 use irithyll::*;
 use std::time::Instant;
 
@@ -415,6 +421,60 @@ fn build_algorithms(n_features: usize) -> Vec<NamedModel> {
         regression_only: false,
     });
 
+    // -----------------------------------------------------------------
+    // DriftAware-wrapped neural models (raw vs drift-aware comparison)
+    // -----------------------------------------------------------------
+
+    algos.push(NamedModel {
+        name: "DA(KAN)",
+        model: {
+            let hidden = n_features.max(5);
+            let layers = vec![n_features, hidden, 1];
+            let kan_model = streaming_kan(&layers, 0.01);
+            Box::new(DriftAware::with_ddm(kan_model))
+        },
+        regression_only: false,
+    });
+
+    algos.push(NamedModel {
+        name: "DA(TTT)",
+        model: {
+            let ttt_model = streaming_ttt(16, 0.005);
+            Box::new(DriftAware::with_ddm(ttt_model))
+        },
+        regression_only: false,
+    });
+
+    algos.push(NamedModel {
+        name: "DA(ESN)",
+        model: {
+            let esn_model = esn(50, 0.9);
+            Box::new(DriftAware::with_ddm(esn_model))
+        },
+        regression_only: false,
+    });
+
+    // StreamingMamba requires d_in >= 2 (internal SIMD constraint)
+    if n_features >= 2 {
+        algos.push(NamedModel {
+            name: "DA(Mamba)",
+            model: {
+                let mamba_model = mamba(n_features, 16);
+                Box::new(DriftAware::with_ddm(mamba_model))
+            },
+            regression_only: false,
+        });
+    }
+
+    algos.push(NamedModel {
+        name: "DA(RLS)",
+        model: {
+            let rls_model = rls(0.999);
+            Box::new(DriftAware::with_ddm(rls_model))
+        },
+        regression_only: true,
+    });
+
     algos
 }
 
@@ -657,7 +717,7 @@ fn main() {
     eprintln!();
     eprintln!("============================================================");
     eprintln!("  irithyll real-world synthetic benchmark suite");
-    eprintln!("  {} algorithms x 5 datasets, prequential evaluation", 8);
+    eprintln!("  {} algorithms x 5 datasets, prequential evaluation", 13);
     eprintln!("============================================================");
 
     let datasets: Vec<Box<dyn BenchmarkDataset>> = vec![

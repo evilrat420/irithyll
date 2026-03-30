@@ -71,6 +71,12 @@ pub struct StreamingMamba {
     last_features: Vec<f64>,
     /// Total samples trained on.
     n_samples: u64,
+    /// Previous prediction for residual alignment tracking.
+    prev_prediction: f64,
+    /// Previous prediction change for residual alignment tracking.
+    prev_change: f64,
+    /// EWMA of residual alignment signal.
+    alignment_ewma: f64,
 }
 
 impl StreamingMamba {
@@ -89,6 +95,9 @@ impl StreamingMamba {
             readout,
             last_features,
             n_samples: 0,
+            prev_prediction: 0.0,
+            prev_change: 0.0,
+            alignment_ewma: 0.0,
         }
     }
 
@@ -126,10 +135,26 @@ impl StreamingLearner for StreamingMamba {
         // 1. Forward through SSM to get temporal features
         let ssm_output = self.ssm.forward(features);
 
-        // 2. Train RLS readout on SSM output
+        // 2. Update residual alignment tracking (before RLS update).
+        let current_pred = self.readout.predict(&ssm_output);
+        let current_change = current_pred - self.prev_prediction;
+        if self.n_samples > 0 {
+            let agreement = if (current_change > 0.0) == (self.prev_change > 0.0) {
+                1.0
+            } else {
+                -1.0
+            };
+            const ALIGN_ALPHA: f64 = 0.05;
+            self.alignment_ewma =
+                (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+        }
+        self.prev_change = current_change;
+        self.prev_prediction = current_pred;
+
+        // 3. Train RLS readout on SSM output
         self.readout.train_one(&ssm_output, target, weight);
 
-        // 3. Cache the SSM output for predict()
+        // 4. Cache the SSM output for predict()
         self.last_features = ssm_output;
 
         self.n_samples += 1;
@@ -168,6 +193,9 @@ impl StreamingLearner for StreamingMamba {
             *f = 0.0;
         }
         self.n_samples = 0;
+        self.prev_prediction = 0.0;
+        self.prev_change = 0.0;
+        self.alignment_ewma = 0.0;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -192,12 +220,11 @@ impl StreamingLearner for StreamingMamba {
 impl crate::automl::DiagnosticSource for StreamingMamba {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         Some(crate::automl::ConfigDiagnostics {
-            effective_dof: (self.config.d_in * self.config.n_state) as f64,
-            // Higher forgetting factor = less regularization pressure.
+            residual_alignment: self.alignment_ewma,
             regularization_sensitivity: 1.0 - self.config.forgetting_factor,
-            // Prediction uncertainty: std dev of RLS residuals.
+            depth_sufficiency: 0.0, // Single SSM layer + linear readout.
+            effective_dof: (self.config.d_in * self.config.n_state) as f64,
             uncertainty: self.prediction_uncertainty(),
-            ..Default::default()
         })
     }
 }

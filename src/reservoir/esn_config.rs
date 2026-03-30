@@ -15,7 +15,7 @@ use crate::error::{ConfigError, IrithyllError, Result};
 /// - `leak_rate` -- leaky integration rate in (0, 1] (default: 0.3).
 /// - `input_scaling` -- input weight magnitude (default: 1.0).
 /// - `bias_scaling` -- bias magnitude (default: 0.0, no bias).
-/// - `forgetting_factor` -- RLS lambda for the readout (default: 0.999).
+/// - `forgetting_factor` -- RLS lambda for the readout (default: 0.998).
 /// - `delta` -- RLS initial P matrix scale (default: 100.0).
 /// - `seed` -- PRNG seed for reservoir initialization (default: 42).
 /// - `warmup` -- number of samples to drive the reservoir before training (default: 50).
@@ -49,7 +49,7 @@ pub struct ESNConfig {
     pub input_scaling: f64,
     /// Bias scaling (default: 0.0).
     pub bias_scaling: f64,
-    /// RLS forgetting factor lambda in (0, 1] (default: 0.999).
+    /// RLS forgetting factor lambda in (0, 1] (default: 0.998).
     pub forgetting_factor: f64,
     /// RLS initial P matrix scale (default: 100.0).
     pub delta: f64,
@@ -69,7 +69,7 @@ impl Default for ESNConfig {
             leak_rate: 0.3,
             input_scaling: 1.0,
             bias_scaling: 0.0,
-            forgetting_factor: 0.999,
+            forgetting_factor: 0.998,
             delta: 100.0,
             seed: 42,
             warmup: 50,
@@ -239,7 +239,7 @@ mod tests {
         assert!((config.leak_rate - 0.3).abs() < 1e-12);
         assert!((config.input_scaling - 1.0).abs() < 1e-12);
         assert!((config.bias_scaling).abs() < 1e-12);
-        assert!((config.forgetting_factor - 0.999).abs() < 1e-12);
+        assert!((config.forgetting_factor - 0.998).abs() < 1e-12);
         assert!((config.delta - 100.0).abs() < 1e-12);
         assert_eq!(config.seed, 42);
         assert_eq!(config.warmup, 50);

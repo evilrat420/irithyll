@@ -134,6 +134,12 @@ pub struct RecursiveLeastSquares {
     samples_seen: u64,
     /// Exponentially weighted moving average of squared residuals (EWMA alpha = 0.01).
     running_mse: f64,
+    /// Whether to use error-driven adaptive forgetting factor.
+    adaptive_forgetting: bool,
+    /// EWMA of |residual| (alpha = 0.01) for comparing current error to baseline.
+    baseline_error: f64,
+    /// The actual lambda used in the last P matrix update (for diagnostics).
+    effective_forgetting_factor: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +148,7 @@ pub struct RecursiveLeastSquares {
 
 impl RecursiveLeastSquares {
     /// Create a new RLS learner with the given forgetting factor and default
-    /// `delta = 100.0`.
+    /// `delta = 100.0`. Adaptive forgetting is enabled by default.
     ///
     /// # Arguments
     ///
@@ -152,6 +158,7 @@ impl RecursiveLeastSquares {
     }
 
     /// Create a new RLS learner with explicit forgetting factor and delta.
+    /// Adaptive forgetting is enabled by default.
     ///
     /// `delta` controls the initial uncertainty: P is initialised to `delta * I`.
     /// Larger delta means faster initial adaptation but potentially noisier
@@ -165,6 +172,30 @@ impl RecursiveLeastSquares {
             n_features: None,
             samples_seen: 0,
             running_mse: 0.0,
+            adaptive_forgetting: true,
+            baseline_error: 0.0,
+            effective_forgetting_factor: forgetting_factor,
+        }
+    }
+
+    /// Create a new RLS learner with fixed (non-adaptive) forgetting factor.
+    ///
+    /// This disables the error-driven adaptive forgetting mechanism, using
+    /// a static lambda for all P matrix updates. Useful when you need
+    /// deterministic forgetting behaviour or are benchmarking against
+    /// classical RLS.
+    pub fn with_fixed_forgetting(forgetting_factor: f64, delta: f64) -> Self {
+        Self {
+            weights: Vec::new(),
+            p_matrix: Vec::new(),
+            forgetting_factor,
+            delta,
+            n_features: None,
+            samples_seen: 0,
+            running_mse: 0.0,
+            adaptive_forgetting: false,
+            baseline_error: 0.0,
+            effective_forgetting_factor: forgetting_factor,
         }
     }
 
@@ -174,10 +205,30 @@ impl RecursiveLeastSquares {
         &self.weights
     }
 
-    /// The forgetting factor (lambda).
+    /// The base forgetting factor (lambda).
     #[inline]
     pub fn forgetting_factor(&self) -> f64 {
         self.forgetting_factor
+    }
+
+    /// The effective forgetting factor used in the last P matrix update.
+    ///
+    /// When adaptive forgetting is enabled, this may differ from the base
+    /// forgetting factor. When adaptive forgetting is disabled, this always
+    /// equals the base forgetting factor.
+    #[inline]
+    pub fn effective_forgetting_factor(&self) -> f64 {
+        self.effective_forgetting_factor
+    }
+
+    /// Dynamically set the base forgetting factor, clamped to `[0.95, 1.0]`.
+    ///
+    /// This allows external callers (e.g. [`StreamingTTT`](crate::ttt::StreamingTTT))
+    /// to modulate the forgetting rate based on upstream uncertainty signals,
+    /// enabling error-driven adaptation of the RLS readout.
+    #[inline]
+    pub fn set_forgetting_factor(&mut self, ff: f64) {
+        self.forgetting_factor = ff.clamp(0.95, 1.0);
     }
 
     // -----------------------------------------------------------------------
@@ -245,6 +296,61 @@ impl RecursiveLeastSquares {
     pub fn noise_variance(&self) -> f64 {
         self.running_mse
     }
+
+    /// Re-regularize the covariance matrix to `delta * I` and reset weights.
+    ///
+    /// Called internally when the P matrix becomes ill-conditioned (extreme
+    /// diagonal values or NaN). This is a numerical safety guard that prevents
+    /// the RLS readout from exploding after sudden distribution shifts.
+    fn reset_covariance(&mut self) {
+        if let Some(d) = self.n_features {
+            // Reset P to delta * I
+            self.p_matrix.fill(0.0);
+            for i in 0..d {
+                self.p_matrix[i * d + i] = self.delta;
+            }
+            // Reset weights to zero
+            self.weights.fill(0.0);
+            self.running_mse = 0.0;
+            self.baseline_error = 0.0;
+        }
+    }
+
+    /// Check P matrix diagonal health and re-regularize if needed.
+    ///
+    /// Returns `true` if a reset was performed.
+    fn check_covariance_health(&mut self) -> bool {
+        if let Some(d) = self.n_features {
+            let mut max_diag: f64 = 0.0;
+            let mut has_nan = false;
+            for i in 0..d {
+                let diag = self.p_matrix[i * d + i];
+                if diag.is_nan() || !diag.is_finite() {
+                    has_nan = true;
+                    break;
+                }
+                if diag.abs() > max_diag {
+                    max_diag = diag.abs();
+                }
+                // Negative diagonal is also pathological
+                if diag < 0.0 {
+                    has_nan = true;
+                    break;
+                }
+            }
+
+            // Also check if any weight is NaN
+            if !has_nan {
+                has_nan = self.weights.iter().any(|w| !w.is_finite());
+            }
+
+            if has_nan || max_diag > 1e10 {
+                self.reset_covariance();
+                return true;
+            }
+        }
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -267,13 +373,39 @@ impl StreamingLearner for RecursiveLeastSquares {
         let residual = target - self.predict(features);
         self.running_mse = 0.99 * self.running_mse + 0.01 * residual * residual;
 
+        // Compute effective forgetting factor (adaptive or fixed).
+        let effective_ff = if self.adaptive_forgetting {
+            // Compute error ratio: current |error| vs baseline
+            let abs_error = residual.abs();
+
+            // Update baseline with slow EWMA
+            self.baseline_error = 0.99 * self.baseline_error + 0.01 * abs_error;
+
+            // Error ratio: >1 means error is above baseline (possible drift)
+            let ratio = if self.baseline_error > 1e-15 {
+                (abs_error / self.baseline_error).clamp(0.1, 10.0)
+            } else {
+                1.0
+            };
+
+            // Modulate: high error -> lower lambda (forget faster)
+            // ratio=1 -> ff unchanged. ratio=2 -> ff * 0.999. ratio=0.5 -> ff * 1.0005
+            // The key: when error spikes, we forget old covariance faster
+            let adjustment = 1.0 - 0.001 * (ratio - 1.0);
+            let adaptive = self.forgetting_factor * adjustment.clamp(0.99, 1.001);
+            adaptive.clamp(0.95, 1.0) // Never go below 0.95 (forget at most 5% per step)
+        } else {
+            self.forgetting_factor
+        };
+        self.effective_forgetting_factor = effective_ff;
+
         // Prediction error, scaled by sqrt(weight).
         let prediction = dot(&self.weights, features);
         let alpha = (target - prediction) * weight.sqrt();
 
         // Gain vector: k = (P * x) / (lambda + x^T * P * x)
         let px = mat_vec(&self.p_matrix, features, n);
-        let denom = self.forgetting_factor + dot(features, &px);
+        let denom = effective_ff + dot(features, &px);
         let mut k = vec![0.0; n];
         let inv_denom = 1.0 / denom;
         for (ki, &pxi) in k.iter_mut().zip(px.iter()) {
@@ -286,7 +418,12 @@ impl StreamingLearner for RecursiveLeastSquares {
         }
 
         // Update P: P = (P - k * (P*x)^T) / lambda
-        outer_subtract_scaled(&mut self.p_matrix, &k, &px, self.forgetting_factor, n);
+        outer_subtract_scaled(&mut self.p_matrix, &k, &px, effective_ff, n);
+
+        // Numerical stability guard: re-regularize if P becomes ill-conditioned.
+        // This prevents the covariance matrix from exploding after sudden
+        // distribution shifts (concept drift).
+        self.check_covariance_health();
 
         self.samples_seen += 1;
     }
@@ -310,6 +447,8 @@ impl StreamingLearner for RecursiveLeastSquares {
         self.n_features = None;
         self.samples_seen = 0;
         self.running_mse = 0.0;
+        self.baseline_error = 0.0;
+        self.effective_forgetting_factor = self.forgetting_factor;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -342,6 +481,9 @@ impl Clone for RecursiveLeastSquares {
             n_features: self.n_features,
             samples_seen: self.samples_seen,
             running_mse: self.running_mse,
+            adaptive_forgetting: self.adaptive_forgetting,
+            baseline_error: self.baseline_error,
+            effective_forgetting_factor: self.effective_forgetting_factor,
         }
     }
 }
@@ -355,9 +497,15 @@ impl fmt::Debug for RecursiveLeastSquares {
         f.debug_struct("RecursiveLeastSquares")
             .field("n_features", &self.n_features)
             .field("forgetting_factor", &self.forgetting_factor)
+            .field(
+                "effective_forgetting_factor",
+                &self.effective_forgetting_factor,
+            )
+            .field("adaptive_forgetting", &self.adaptive_forgetting)
             .field("delta", &self.delta)
             .field("samples_seen", &self.samples_seen)
             .field("running_mse", &self.running_mse)
+            .field("baseline_error", &self.baseline_error)
             .field("weights", &self.weights)
             .finish()
     }
@@ -1206,5 +1354,130 @@ mod tests {
         assert!(hi.is_finite());
         assert!(lo <= mean);
         assert!(mean <= hi);
+    }
+
+    // ===================================================================
+    // Adaptive forgetting tests
+    // ===================================================================
+
+    #[test]
+    fn adaptive_ff_stable_data_stays_near_base() {
+        // Feed stable linear data: effective_ff should stay near the base forgetting factor.
+        let base_ff = 0.99;
+        let mut rls = RecursiveLeastSquares::new(base_ff);
+
+        // Train on a clean linear relationship y = 2x + 1 with bias trick.
+        for i in 0..500 {
+            let x = i as f64 * 0.01;
+            rls.train(&[x, 1.0], 2.0 * x + 1.0);
+        }
+
+        let eff = rls.effective_forgetting_factor();
+        let diff = (eff - base_ff).abs();
+        assert!(
+            diff < 0.005,
+            "stable data: effective_ff should stay near base {}, got {} (diff={})",
+            base_ff,
+            eff,
+            diff
+        );
+    }
+
+    #[test]
+    fn adaptive_ff_drops_on_sudden_shift() {
+        // Feed stable data then a sudden distribution shift.
+        // The effective_ff should drop below the base during the shift.
+        let base_ff = 0.99;
+        let mut rls = RecursiveLeastSquares::new(base_ff);
+
+        // Phase 1: stable y = x.
+        for i in 0..300 {
+            let x = i as f64 * 0.01;
+            rls.train(&[x, 1.0], x);
+        }
+
+        let ff_before_shift = rls.effective_forgetting_factor();
+
+        // Phase 2: abrupt shift to y = 10x + 50.
+        // Train a few samples from the new distribution and capture ff.
+        let mut min_ff_during_shift = base_ff;
+        for i in 0..50 {
+            let x = i as f64 * 0.01;
+            rls.train(&[x, 1.0], 10.0 * x + 50.0);
+            let eff = rls.effective_forgetting_factor();
+            if eff < min_ff_during_shift {
+                min_ff_during_shift = eff;
+            }
+        }
+
+        assert!(
+            min_ff_during_shift < ff_before_shift,
+            "effective_ff should drop during distribution shift: before={}, min_during={}",
+            ff_before_shift,
+            min_ff_during_shift
+        );
+    }
+
+    #[test]
+    fn adaptive_ff_recovers_after_shift() {
+        // After a shift stabilizes, effective_ff should recover toward the base.
+        let base_ff = 0.99;
+        let mut rls = RecursiveLeastSquares::new(base_ff);
+
+        // Phase 1: stable y = x.
+        for i in 0..300 {
+            let x = i as f64 * 0.01;
+            rls.train(&[x, 1.0], x);
+        }
+
+        // Phase 2: abrupt shift to y = 10x + 50.
+        for i in 0..50 {
+            let x = i as f64 * 0.01;
+            rls.train(&[x, 1.0], 10.0 * x + 50.0);
+        }
+
+        let ff_after_shift = rls.effective_forgetting_factor();
+
+        // Phase 3: continue with the new distribution (now stable).
+        for i in 0..500 {
+            let x = i as f64 * 0.01;
+            rls.train(&[x, 1.0], 10.0 * x + 50.0);
+        }
+
+        let ff_recovered = rls.effective_forgetting_factor();
+        let diff_from_base = (ff_recovered - base_ff).abs();
+
+        assert!(
+            ff_recovered > ff_after_shift || diff_from_base < 0.005,
+            "effective_ff should recover after shift stabilizes: after_shift={}, recovered={}, base={}",
+            ff_after_shift, ff_recovered, base_ff
+        );
+    }
+
+    #[test]
+    fn fixed_forgetting_does_not_adapt() {
+        // with_fixed_forgetting should keep effective_ff equal to base at all times.
+        let base_ff = 0.99;
+        let mut rls = RecursiveLeastSquares::with_fixed_forgetting(base_ff, 100.0);
+
+        // Phase 1: stable.
+        for i in 0..200 {
+            let x = i as f64 * 0.01;
+            rls.train(&[x, 1.0], x);
+        }
+        assert!(
+            (rls.effective_forgetting_factor() - base_ff).abs() < 1e-15,
+            "fixed forgetting: effective_ff must equal base"
+        );
+
+        // Phase 2: shift.
+        for i in 0..100 {
+            let x = i as f64 * 0.01;
+            rls.train(&[x, 1.0], 10.0 * x + 50.0);
+        }
+        assert!(
+            (rls.effective_forgetting_factor() - base_ff).abs() < 1e-15,
+            "fixed forgetting: effective_ff must equal base even after shift"
+        );
     }
 }

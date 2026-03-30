@@ -1,12 +1,3 @@
 /target
-BENCHMARK_PLAN.md
 comparison/target/
 datasets/
-.claude/
-irithyll-cli/RESEARCH.md
-irithyll-python/test_model.json
-marketing/
-SNN_RESEARCH.md
-SSM_RESEARCH.md
-research/
-tests/private_autobuilder.rs

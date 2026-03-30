@@ -71,6 +71,13 @@ pub struct SpikeNet {
 
     n_samples: u64,
     n_input: usize,
+
+    /// Previous prediction for residual alignment tracking.
+    prev_prediction: f64,
+    /// Previous prediction change for residual alignment tracking.
+    prev_change: f64,
+    /// EWMA of residual alignment signal.
+    alignment_ewma: f64,
 }
 
 // SpikeNet is Send + Sync because SpikeNetFixed is Send + Sync and all
@@ -95,6 +102,9 @@ impl SpikeNet {
             quantized_target: Vec::new(),
             n_samples: 0,
             n_input: 0,
+            prev_prediction: 0.0,
+            prev_change: 0.0,
+            alignment_ewma: 0.0,
         }
     }
 
@@ -225,6 +235,22 @@ impl StreamingLearner for SpikeNet {
         // Quantize target
         self.quantize_target(target);
 
+        // Update residual alignment tracking (before training step).
+        let current_pred = self.predict(features);
+        let current_change = current_pred - self.prev_prediction;
+        if self.n_samples > 0 {
+            let agreement = if (current_change > 0.0) == (self.prev_change > 0.0) {
+                1.0
+            } else {
+                -1.0
+            };
+            const ALIGN_ALPHA: f64 = 0.05;
+            self.alignment_ewma =
+                (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+        }
+        self.prev_change = current_change;
+        self.prev_prediction = current_pred;
+
         // Apply sample weight: for SNNs with fixed-point internals, weight
         // modulation is approximated. Weight ~0 skips the update, weight >0
         // trains once with the base learning rate. The fixed-point config
@@ -270,6 +296,9 @@ impl StreamingLearner for SpikeNet {
             *v = Q14_HALF as f64;
         }
         self.n_samples = 0;
+        self.prev_prediction = 0.0;
+        self.prev_change = 0.0;
+        self.alignment_ewma = 0.0;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -310,13 +339,13 @@ impl crate::automl::DiagnosticSource for SpikeNet {
             None => 0.0, // Not yet initialized.
         };
 
-        // Weight matrix size: n_hidden * n_hidden (recurrent) is the dominant DOF.
         Some(crate::automl::ConfigDiagnostics {
-            effective_dof: (self.config.n_hidden * self.config.n_hidden) as f64,
-            // Learning rate controls update magnitude.
+            residual_alignment: self.alignment_ewma,
+            // Learning rate as regularization sensitivity (controls update magnitude).
             regularization_sensitivity: self.config.eta,
+            depth_sufficiency: 0.0, // Single hidden layer SNN.
+            effective_dof: self.config.n_hidden as f64,
             uncertainty,
-            ..Default::default()
         })
     }
 }

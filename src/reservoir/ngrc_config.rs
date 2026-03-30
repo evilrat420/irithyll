@@ -14,7 +14,7 @@ use crate::error::{ConfigError, IrithyllError, Result};
 /// - `s` -- skip between delays. `s = 1` means consecutive observations,
 ///   `s = 2` means every other observation, etc.
 /// - `degree` -- polynomial degree for nonlinear features (must be >= 2).
-/// - `forgetting_factor` -- RLS lambda for the readout layer.
+/// - `forgetting_factor` -- RLS lambda for the readout layer (default: 0.998).
 /// - `delta` -- initial P matrix scale for RLS.
 /// - `include_bias` -- whether to prepend a constant 1.0 to the feature vector.
 ///
@@ -30,7 +30,7 @@ use crate::error::{ConfigError, IrithyllError, Result};
 ///     .k(3)
 ///     .s(2)
 ///     .degree(2)
-///     .forgetting_factor(0.999)
+///     .forgetting_factor(0.998)
 ///     .build()
 ///     .unwrap();
 ///
@@ -45,7 +45,7 @@ pub struct NGRCConfig {
     pub s: usize,
     /// Polynomial degree for nonlinear features (default: 2).
     pub degree: usize,
-    /// RLS forgetting factor lambda in (0, 1] (default: 0.999).
+    /// RLS forgetting factor lambda in (0, 1] (default: 0.998).
     pub forgetting_factor: f64,
     /// RLS initial P matrix scale (default: 100.0).
     pub delta: f64,
@@ -59,7 +59,7 @@ impl Default for NGRCConfig {
             k: 2,
             s: 1,
             degree: 2,
-            forgetting_factor: 0.999,
+            forgetting_factor: 0.998,
             delta: 100.0,
             include_bias: true,
         }
@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(config.k, 2);
         assert_eq!(config.s, 1);
         assert_eq!(config.degree, 2);
-        assert!((config.forgetting_factor - 0.999).abs() < 1e-12);
+        assert!((config.forgetting_factor - 0.998).abs() < 1e-12);
         assert!((config.delta - 100.0).abs() < 1e-12);
         assert!(config.include_bias);
     }

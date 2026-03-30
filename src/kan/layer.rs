@@ -236,22 +236,34 @@ impl KANLayer {
                 }
 
                 // --- Update coefficients (SPARSE: only k+1 per edge) ---
-                for (b, &basis_val) in bases.iter().enumerate() {
-                    let coeff_idx = basis_start + b;
-                    if coeff_idx < self.n_coeffs {
-                        // dL/dc_g = delta_j * w_s * B_g(x)
-                        self.coefficients[coeff_base + coeff_idx] -=
-                            lr * delta_j * self.w_s[edge] * basis_val;
+                // NaN/Inf guard: skip coefficient updates if any gradient is non-finite
+                let coeff_grad_base = delta_j * self.w_s[edge];
+                if coeff_grad_base.is_finite() {
+                    for (b, &basis_val) in bases.iter().enumerate() {
+                        let coeff_idx = basis_start + b;
+                        if coeff_idx < self.n_coeffs {
+                            let grad = coeff_grad_base * basis_val;
+                            if grad.is_finite() {
+                                // dL/dc_g = delta_j * w_s * B_g(x)
+                                self.coefficients[coeff_base + coeff_idx] -= lr * grad;
+                            }
+                        }
                     }
                 }
 
                 // --- Update w_b ---
                 // dL/dw_b = delta_j * SiLU(x)
-                self.w_b[edge] -= lr * delta_j * silu(x);
+                let wb_grad = delta_j * silu(x);
+                if wb_grad.is_finite() {
+                    self.w_b[edge] -= lr * wb_grad;
+                }
 
                 // --- Update w_s ---
                 // dL/dw_s = delta_j * spline_val
-                self.w_s[edge] -= lr * delta_j * spline_val;
+                let ws_grad = delta_j * spline_val;
+                if ws_grad.is_finite() {
+                    self.w_s[edge] -= lr * ws_grad;
+                }
 
                 // --- Input gradient ---
                 // dφ/dx = w_b * SiLU'(x) + w_s * Σ c_g * B'_g(x)
@@ -299,6 +311,22 @@ impl KANLayer {
     /// `n_out * n_in * (n_coeffs + 2)` — coefficients plus w_b and w_s per edge.
     pub fn n_params(&self) -> usize {
         self.n_out * self.n_in * (self.n_coeffs + 2)
+    }
+
+    /// Read-only access to all B-spline coefficients.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn coefficients(&self) -> &[f64] {
+        &self.coefficients
+    }
+
+    /// Mutable access to all B-spline coefficients.
+    ///
+    /// Used by [`StreamingKAN`](super::StreamingKAN) for coefficient decay
+    /// (forgetting mechanism for concept-drift adaptation).
+    #[inline]
+    pub fn coefficients_mut(&mut self) -> &mut [f64] {
+        &mut self.coefficients
     }
 }
 

@@ -52,11 +52,11 @@ pub struct TTTConfig {
     pub n_heads: usize,
     /// Inner learning rate for fast weight updates (default: 0.01).
     pub eta: f64,
-    /// Weight decay / forgetting factor, Titans-style (default: 0.0 = none).
+    /// Weight decay / forgetting factor, Titans-style (default: 0.0001).
     pub alpha: f64,
     /// Momentum coefficient, Titans-style (default: 0.0 = none).
     pub momentum: f64,
-    /// RLS forgetting factor for readout (default: 0.999).
+    /// RLS forgetting factor for readout (default: 0.998).
     pub forgetting_factor: f64,
     /// Initial P matrix diagonal for RLS (default: 100.0).
     pub delta_rls: f64,
@@ -72,9 +72,9 @@ impl Default for TTTConfig {
             d_model: 32,
             n_heads: 1,
             eta: 0.01,
-            alpha: 0.0,
+            alpha: 0.0001,
             momentum: 0.0,
-            forgetting_factor: 0.999,
+            forgetting_factor: 0.998,
             delta_rls: 100.0,
             warmup: 10,
             seed: 42,
@@ -146,7 +146,7 @@ impl TTTConfigBuilder {
         self
     }
 
-    /// Set the weight decay coefficient, Titans-style (default: 0.0 = none).
+    /// Set the weight decay coefficient, Titans-style (default: 0.0001).
     pub fn alpha(mut self, a: f64) -> Self {
         self.config.alpha = a;
         self
@@ -158,7 +158,7 @@ impl TTTConfigBuilder {
         self
     }
 
-    /// Set the RLS forgetting factor for the readout (default: 0.999).
+    /// Set the RLS forgetting factor for the readout (default: 0.998).
     pub fn forgetting_factor(mut self, f: f64) -> Self {
         self.config.forgetting_factor = f;
         self
@@ -249,6 +249,12 @@ pub struct StreamingTTT {
     samples_trained: u64,
     /// EWMA of prediction uncertainty for eta modulation.
     rolling_uncertainty: f64,
+    /// Previous prediction for residual alignment tracking.
+    prev_prediction: f64,
+    /// Previous prediction change for residual alignment tracking.
+    prev_change: f64,
+    /// EWMA of residual alignment signal.
+    alignment_ewma: f64,
 }
 
 impl StreamingTTT {
@@ -273,6 +279,9 @@ impl StreamingTTT {
             total_seen: 0,
             samples_trained: 0,
             rolling_uncertainty: 0.0,
+            prev_prediction: 0.0,
+            prev_change: 0.0,
+            alignment_ewma: 0.0,
         }
     }
 
@@ -323,12 +332,38 @@ impl StreamingLearner for StreamingTTT {
         };
         self.layer.set_eta(effective_eta);
 
+        // Also modulate RLS forgetting factor by the same uncertainty ratio.
+        // High uncertainty → lower ff (forget faster to shed stale weights).
+        // Low uncertainty → higher ff (conserve stable weights).
+        if self.rolling_uncertainty > 1e-10 {
+            let ratio = (current_uncertainty / self.rolling_uncertainty).clamp(0.5, 2.0);
+            let base_ff = self.config.forgetting_factor;
+            let adaptive_ff = base_ff * (1.0 - 0.001 * (ratio - 1.0));
+            self.readout.set_forgetting_factor(adaptive_ff);
+        }
+
         // Always forward through TTT layer (even during warmup, to warm up projections)
         let ttt_output = self.layer.forward(features);
         self.total_seen += 1;
 
         // Only train RLS after warmup
         if self.past_warmup() {
+            // Update residual alignment tracking (before RLS update).
+            let current_pred = self.readout.predict(&ttt_output);
+            let current_change = current_pred - self.prev_prediction;
+            if self.samples_trained > 0 {
+                let agreement = if (current_change > 0.0) == (self.prev_change > 0.0) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                const ALIGN_ALPHA: f64 = 0.05;
+                self.alignment_ewma =
+                    (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+            }
+            self.prev_change = current_change;
+            self.prev_prediction = current_pred;
+
             self.readout.train_one(&ttt_output, target, weight);
             self.samples_trained += 1;
         }
@@ -362,6 +397,9 @@ impl StreamingLearner for StreamingTTT {
         self.total_seen = 0;
         self.samples_trained = 0;
         self.rolling_uncertainty = 0.0;
+        self.prev_prediction = 0.0;
+        self.prev_change = 0.0;
+        self.alignment_ewma = 0.0;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -406,13 +444,13 @@ impl std::fmt::Debug for StreamingTTT {
 impl crate::automl::DiagnosticSource for StreamingTTT {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         Some(crate::automl::ConfigDiagnostics {
-            // Fast weight matrix size: d_model * d_model per head.
-            effective_dof: (self.config.d_model * self.config.d_model) as f64,
+            residual_alignment: self.alignment_ewma,
             // Weight decay alpha = regularization strength.
             regularization_sensitivity: self.config.alpha,
-            // Prediction uncertainty: std dev of RLS residuals.
+            depth_sufficiency: 0.0, // Single TTT layer + linear readout.
+            // Layer dimension as effective DOF.
+            effective_dof: self.config.d_model as f64,
             uncertainty: self.prediction_uncertainty(),
-            ..Default::default()
         })
     }
 }
@@ -653,6 +691,55 @@ mod tests {
             unc.is_finite(),
             "prediction_uncertainty should be finite, got {}",
             unc
+        );
+    }
+
+    #[test]
+    fn adaptive_forgetting_factor_produces_finite_predictions() {
+        // Verify that uncertainty-driven RLS forgetting factor modulation
+        // produces finite predictions through stable and drift regimes.
+        let config = TTTConfig::builder()
+            .d_model(16)
+            .eta(0.01)
+            .forgetting_factor(0.998)
+            .warmup(5)
+            .build()
+            .unwrap();
+        let mut model = StreamingTTT::new(config);
+
+        // Phase 1: stable regime
+        for i in 0..100 {
+            let x = [i as f64 * 0.1, (i as f64).sin()];
+            let y = x[0] * 2.0 + 1.0;
+            model.train(&x, y);
+        }
+
+        let pred_stable = model.predict(&[5.0, 5.0_f64.sin()]);
+        assert!(
+            pred_stable.is_finite(),
+            "prediction should be finite after stable training, got {}",
+            pred_stable
+        );
+
+        // Phase 2: sudden distribution shift (drift) — should not diverge
+        for i in 0..50 {
+            let x = [i as f64 * 0.1, (i as f64).cos()];
+            let y = -x[0] * 3.0 + 10.0; // completely different relationship
+            model.train(&x, y);
+        }
+
+        let pred_drift = model.predict(&[2.5, 2.5_f64.cos()]);
+        assert!(
+            pred_drift.is_finite(),
+            "prediction should be finite after drift, got {}",
+            pred_drift
+        );
+
+        // Rolling uncertainty should be tracked and finite
+        assert!(
+            model.rolling_uncertainty.is_finite(),
+            "rolling_uncertainty should be finite, got {}",
+            model.rolling_uncertainty
         );
     }
 }

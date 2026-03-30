@@ -14,7 +14,7 @@
 //! | `d_key` | d_model / n_heads | Key dimension per head |
 //! | `d_value` | d_model / n_heads | Value dimension per head |
 //! | `mode` | GLA | Attention variant |
-//! | `forgetting_factor` | 0.999 | RLS exponential forgetting |
+//! | `forgetting_factor` | 0.998 | RLS exponential forgetting |
 //! | `delta` | 100.0 | Initial P matrix diagonal for RLS |
 //! | `seed` | 42 | PRNG seed for attention weight initialization |
 //! | `warmup` | 10 | Samples before RLS predictions are trusted |
@@ -50,7 +50,7 @@ pub struct StreamingAttentionConfig {
     pub d_value: usize,
     /// Attention variant (default: GLA).
     pub mode: AttentionMode,
-    /// RLS forgetting factor (default: 0.999, in (0, 1]).
+    /// RLS forgetting factor (default: 0.998, in (0, 1]).
     pub forgetting_factor: f64,
     /// Initial P matrix diagonal for RLS (default: 100.0, > 0).
     pub delta: f64,
@@ -132,7 +132,7 @@ impl Default for StreamingAttentionConfigBuilder {
             d_key: None,
             d_value: None,
             mode: AttentionMode::GLA,
-            forgetting_factor: 0.999,
+            forgetting_factor: 0.998,
             delta: 100.0,
             seed: 42,
             warmup: 10,
@@ -180,7 +180,7 @@ impl StreamingAttentionConfigBuilder {
         self
     }
 
-    /// Set the RLS forgetting factor (default: 0.999, must be in (0, 1]).
+    /// Set the RLS forgetting factor (default: 0.998, must be in (0, 1]).
     pub fn forgetting_factor(mut self, ff: f64) -> Self {
         self.forgetting_factor = ff;
         self
@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(config.n_heads, 2);
         assert_eq!(config.d_key, 4);
         assert_eq!(config.d_value, 4);
-        assert!((config.forgetting_factor - 0.999).abs() < 1e-12);
+        assert!((config.forgetting_factor - 0.998).abs() < 1e-12);
         assert!((config.delta - 100.0).abs() < 1e-12);
         assert_eq!(config.seed, 42);
         assert_eq!(config.warmup, 10);

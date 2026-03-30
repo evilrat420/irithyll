@@ -83,6 +83,12 @@ pub struct EchoStateNetwork {
     samples_trained: u64,
     /// Input dimension (set lazily on first call).
     n_inputs: Option<usize>,
+    /// Previous prediction for residual alignment tracking.
+    prev_prediction: f64,
+    /// Previous prediction change for residual alignment tracking.
+    prev_change: f64,
+    /// EWMA of residual alignment signal.
+    alignment_ewma: f64,
 }
 
 impl EchoStateNetwork {
@@ -108,6 +114,9 @@ impl EchoStateNetwork {
             samples_trained: 0,
             n_inputs: None,
             config,
+            prev_prediction: 0.0,
+            prev_change: 0.0,
+            alignment_ewma: 0.0,
         }
     }
 
@@ -190,6 +199,23 @@ impl StreamingLearner for EchoStateNetwork {
         // After warmup, train the RLS readout.
         if self.past_warmup() {
             let readout_features = self.build_readout_features(features);
+            let current_pred = self.rls.predict(&readout_features);
+
+            // Update residual alignment tracking.
+            let current_change = current_pred - self.prev_prediction;
+            if self.samples_trained > 0 {
+                let agreement = if (current_change > 0.0) == (self.prev_change > 0.0) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                const ALIGN_ALPHA: f64 = 0.05;
+                self.alignment_ewma =
+                    (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+            }
+            self.prev_change = current_change;
+            self.prev_prediction = current_pred;
+
             self.rls.train_one(&readout_features, target, weight);
             self.samples_trained += 1;
         }
@@ -216,6 +242,9 @@ impl StreamingLearner for EchoStateNetwork {
         self.rls.reset();
         self.total_seen = 0;
         self.samples_trained = 0;
+        self.prev_prediction = 0.0;
+        self.prev_change = 0.0;
+        self.alignment_ewma = 0.0;
         // Keep n_inputs and reservoir weights — reset only resets learned state,
         // not the architecture. If the user wants a fresh reservoir, they should
         // construct a new ESN.
@@ -257,11 +286,11 @@ impl fmt::Debug for EchoStateNetwork {
 impl crate::automl::DiagnosticSource for EchoStateNetwork {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         Some(crate::automl::ConfigDiagnostics {
-            effective_dof: self.config.n_reservoir as f64,
+            residual_alignment: self.alignment_ewma,
             regularization_sensitivity: 1.0 - self.config.forgetting_factor,
-            // Prediction uncertainty: std dev of RLS residuals.
+            depth_sufficiency: 0.0, // Single-layer readout.
+            effective_dof: self.rls.weights().len() as f64,
             uncertainty: self.prediction_uncertainty(),
-            ..Default::default()
         })
     }
 }

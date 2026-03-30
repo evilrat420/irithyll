@@ -107,6 +107,12 @@ pub struct NeuralMoE {
     n_samples: u64,
     /// Cached expert disagreement (std dev of active expert predictions).
     cached_disagreement: f64,
+    /// Previous prediction for residual alignment tracking.
+    prev_prediction: f64,
+    /// Previous prediction change for residual alignment tracking.
+    prev_change: f64,
+    /// EWMA of residual alignment signal.
+    alignment_ewma: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -226,6 +232,9 @@ impl NeuralMoEBuilder {
             config,
             n_samples: 0,
             cached_disagreement: 0.0,
+            prev_prediction: 0.0,
+            prev_change: 0.0,
+            alignment_ewma: 0.0,
         }
     }
 }
@@ -344,6 +353,29 @@ impl StreamingLearner for NeuralMoE {
             self.cached_disagreement = var.sqrt();
         }
 
+        // Update residual alignment tracking using the weighted prediction.
+        {
+            let weights = self.router.renormalized_weights(features, &active_indices);
+            let mut current_pred = 0.0;
+            for (idx, w) in &weights {
+                current_pred +=
+                    w * active_preds[active_indices.iter().position(|&i| i == *idx).unwrap_or(0)];
+            }
+            let current_change = current_pred - self.prev_prediction;
+            if self.n_samples > 0 {
+                let agreement = if (current_change > 0.0) == (self.prev_change > 0.0) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                const ALIGN_ALPHA: f64 = 0.05;
+                self.alignment_ewma =
+                    (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+            }
+            self.prev_change = current_change;
+            self.prev_prediction = current_pred;
+        }
+
         // 3. Train active experts
         for &idx in &active_indices {
             self.experts[idx].model.train_one(features, target, weight);
@@ -398,6 +430,9 @@ impl StreamingLearner for NeuralMoE {
         self.router.reset();
         self.n_samples = 0;
         self.cached_disagreement = 0.0;
+        self.prev_prediction = 0.0;
+        self.prev_change = 0.0;
+        self.alignment_ewma = 0.0;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -440,17 +475,14 @@ impl NeuralMoE {
 
 impl crate::automl::DiagnosticSource for NeuralMoE {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
-        // Only count live experts for effective DOF.
-        let live_experts = self.n_experts().saturating_sub(self.n_dead_experts());
-        let effective_dof = live_experts.max(1) as f64 * 100.0;
-
         Some(crate::automl::ConfigDiagnostics {
-            effective_dof,
+            residual_alignment: self.alignment_ewma,
             regularization_sensitivity: self.config.load_balance_rate,
+            depth_sufficiency: 0.0, // MoE is flat (experts are peers, not stacked).
+            effective_dof: self.n_experts() as f64,
             // Expert disagreement: real prediction-based uncertainty signal
             // cached from the most recent train_one call.
             uncertainty: self.cached_disagreement,
-            ..Default::default()
         })
     }
 }

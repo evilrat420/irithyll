@@ -160,6 +160,11 @@ impl CycleReservoir {
 
             // Leaky integration.
             self.state[i] = one_minus_leak * old_state[i] + leak * x_tilde;
+
+            // Defensive clamp: tanh already bounds x_tilde to [-1, 1] and leaky
+            // integration preserves this bound, but clamp to [-10, 10] as a
+            // numerical safety guard against any floating-point edge cases.
+            self.state[i] = self.state[i].clamp(-10.0, 10.0);
         }
     }
 
