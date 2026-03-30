@@ -273,6 +273,8 @@ pub struct DistributionalSGBT {
     // -----------------------------------------------------------------------
     /// Previous per-tree contributions for residual alignment (cosine similarity).
     prev_contributions: Vec<f64>,
+    /// Contributions from two calls ago, for delta-based alignment.
+    prev_prev_contributions: Vec<f64>,
     /// Cached cosine similarity of consecutive tree contribution vectors.
     cached_residual_alignment: f64,
     /// Cached mean |G|/(H+λ)² across all leaves.
@@ -313,6 +315,7 @@ impl Clone for DistributionalSGBT {
             samples_since_refresh: self.samples_since_refresh,
             packed_refresh_interval: self.packed_refresh_interval,
             prev_contributions: self.prev_contributions.clone(),
+            prev_prev_contributions: self.prev_prev_contributions.clone(),
             cached_residual_alignment: self.cached_residual_alignment,
             cached_reg_sensitivity: self.cached_reg_sensitivity,
             cached_depth_sufficiency: self.cached_depth_sufficiency,
@@ -438,6 +441,7 @@ impl DistributionalSGBT {
             samples_since_refresh: 0,
             packed_refresh_interval,
             prev_contributions: Vec::new(),
+            prev_prev_contributions: Vec::new(),
             cached_residual_alignment: 0.0,
             cached_reg_sensitivity: 0.0,
             cached_depth_sufficiency: 0.0,
@@ -582,26 +586,35 @@ impl DistributionalSGBT {
 
         if !self.prev_contributions.is_empty()
             && self.prev_contributions.len() == contributions.len()
+            && !self.prev_prev_contributions.is_empty()
+            && self.prev_prev_contributions.len() == contributions.len()
         {
-            let dot: f64 = contributions
+            // Delta-based alignment: cosine similarity of consecutive *changes*
+            // in the contribution vector, not the raw vectors themselves.
+            // This prevents saturation when contributions change slowly.
+            let delta_curr: Vec<f64> = contributions
                 .iter()
                 .zip(&self.prev_contributions)
-                .map(|(a, b)| a * b)
-                .sum();
-            let norm_curr: f64 = contributions.iter().map(|x| x * x).sum::<f64>().sqrt();
-            let norm_prev: f64 = self
+                .map(|(a, b)| a - b)
+                .collect();
+            let delta_prev: Vec<f64> = self
                 .prev_contributions
                 .iter()
-                .map(|x| x * x)
-                .sum::<f64>()
-                .sqrt();
+                .zip(&self.prev_prev_contributions)
+                .map(|(a, b)| a - b)
+                .collect();
+
+            let dot: f64 = delta_curr.iter().zip(&delta_prev).map(|(a, b)| a * b).sum();
+            let norm_curr: f64 = delta_curr.iter().map(|x| x * x).sum::<f64>().sqrt();
+            let norm_prev: f64 = delta_prev.iter().map(|x| x * x).sum::<f64>().sqrt();
             self.cached_residual_alignment = if norm_curr > 1e-15 && norm_prev > 1e-15 {
                 dot / (norm_curr * norm_prev)
             } else {
                 0.0
             };
         }
-        self.prev_contributions = contributions;
+        self.prev_prev_contributions =
+            core::mem::replace(&mut self.prev_contributions, contributions);
 
         // 2-4. Leaf traversal for reg_sensitivity, depth_sufficiency, effective_dof
         let mut total_sensitivity = 0.0;
@@ -1414,6 +1427,7 @@ impl DistributionalSGBT {
         self.packed_cache = None;
         self.samples_since_refresh = 0;
         self.prev_contributions.clear();
+        self.prev_prev_contributions.clear();
         self.cached_residual_alignment = 0.0;
         self.cached_reg_sensitivity = 0.0;
         self.cached_depth_sufficiency = 0.0;
@@ -2003,6 +2017,7 @@ impl DistributionalSGBT {
             samples_since_refresh: 0,
             packed_refresh_interval,
             prev_contributions: Vec::new(),
+            prev_prev_contributions: Vec::new(),
             cached_residual_alignment: 0.0,
             cached_reg_sensitivity: 0.0,
             cached_depth_sufficiency: 0.0,

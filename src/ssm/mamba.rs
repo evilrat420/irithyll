@@ -94,6 +94,8 @@ pub struct StreamingMamba {
     prev_prediction: f64,
     /// Previous prediction change for residual alignment tracking.
     prev_change: f64,
+    /// Change from two steps ago, for acceleration-based alignment.
+    prev_prev_change: f64,
     /// EWMA of residual alignment signal.
     alignment_ewma: f64,
 }
@@ -130,6 +132,7 @@ impl StreamingMamba {
             n_samples: 0,
             prev_prediction: 0.0,
             prev_change: 0.0,
+            prev_prev_change: 0.0,
             alignment_ewma: 0.0,
         }
     }
@@ -219,19 +222,26 @@ impl StreamingLearner for StreamingMamba {
         let state = self.ssm.state();
         let readout_features = self.build_readout_features(state, &ssm_output);
 
-        // 3. Update residual alignment tracking (before RLS update).
+        // 3. Update residual alignment tracking (acceleration-based).
         let current_pred = self.readout.predict(&readout_features);
         let current_change = current_pred - self.prev_prediction;
         if self.n_samples > 0 {
-            let agreement = if (current_change > 0.0) == (self.prev_change > 0.0) {
-                1.0
+            let acceleration = current_change - self.prev_change;
+            let prev_acceleration = self.prev_change - self.prev_prev_change;
+            let agreement = if acceleration.abs() > 1e-15 && prev_acceleration.abs() > 1e-15 {
+                if (acceleration > 0.0) == (prev_acceleration > 0.0) {
+                    1.0
+                } else {
+                    -1.0
+                }
             } else {
-                -1.0
+                0.0
             };
             const ALIGN_ALPHA: f64 = 0.05;
             self.alignment_ewma =
                 (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
         }
+        self.prev_prev_change = self.prev_change;
         self.prev_change = current_change;
         self.prev_prediction = current_pred;
 
@@ -279,6 +289,7 @@ impl StreamingLearner for StreamingMamba {
         self.n_samples = 0;
         self.prev_prediction = 0.0;
         self.prev_change = 0.0;
+        self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
     }
 
