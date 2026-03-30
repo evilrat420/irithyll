@@ -118,6 +118,23 @@ Three families of neural architectures, all implementing `StreamingLearner` -- t
 
 All neural models also have preprocessor variants (`ESNPreprocessor`, `MambaPreprocessor`, `SpikePreprocessor`) that implement `StreamingPreprocessor` for pipeline composition.
 
+### When to Use Each Model
+
+| Use Case | Recommended Model | Why |
+|----------|-------------------|-----|
+| **General streaming (any data)** | `SGBT` / `DistributionalSGBT` | Built-in drift detection, tree replacement. Best all-rounder across 14 benchmarks. |
+| **Classification with drift** | `NeuralMoE` | Expert diversity handles distribution shift. 93% accuracy on drifting binary classification. |
+| **Chaotic time series** | `StreamingMamba` | SSM hidden state captures temporal dynamics. 0.046 RMSE on Mackey-Glass (2nd best). |
+| **Temporal / autoregressive data** | `EchoStateNetwork` | Reservoir provides rich temporal features. Best on temporal pattern benchmarks. |
+| **Linear / fast regression** | `RecursiveLeastSquares` | 7M samples/sec. Best on Mackey-Glass (0.035). Adaptive forgetting handles drift. |
+| **Symbolic / function regression** | `StreamingKAN` | B-spline edge activations learn compositional functions. Best at NARMA-10 (0.10). |
+| **Sequence adaptation** | `StreamingTTT` | Fast weights adapt per-sample via self-supervised reconstruction. Handles Lorenz attractor. |
+| **Energy-efficient / neuromorphic** | `SpikeNet` | e-prop online learning. Integer-only variant fits 22KB (Cortex-M0+). |
+| **Uncertainty quantification** | `DistributionalSGBT` | Gaussian N(mu, sigma) output with honest_sigma from tree contribution variance. |
+| **Automatic model selection** | `AutoTuner` | Tournament racing across all model families. Picks the best for your data. |
+
+**Note on neural models and classification:** KAN, TTT, and Mamba are regression-focused architectures (Liu et al. 2024, Sun et al. 2024, Gu & Dao 2023). For classification tasks, use SGBT, NeuralMoE, or compose neural models as feature extractors in a `Pipeline` with a classification head.
+
 ## Principled Streaming Adaptation
 
 Principled streaming adaptation in gradient boosted ensembles:
