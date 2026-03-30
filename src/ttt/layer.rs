@@ -1,10 +1,16 @@
-//! Core TTT (Test-Time Training) layer.
+//! Core TTT (Test-Time Training) layer with dual-objective fast weight updates.
 //!
 //! The hidden state is a weight matrix W ("fast weights") updated per step
 //! by gradient descent on a self-supervised reconstruction loss:
 //! `L = ||W * k_t - (v_t - k_t)||^2`
 //!
 //! The gradient is a rank-1 outer product: `dW = residual * k_t^T`.
+//!
+//! The reconstruction residual is modulated by an external prediction error
+//! signal (`prediction_feedback`): when prediction error is high, fast weights
+//! adapt more aggressively; when prediction is accurate, reconstruction drives
+//! slow refinement. The inner objective remains reconstruction (preserving
+//! TTT's identity), but adaptation magnitude is coupled to prediction quality.
 //!
 //! Based on Sun et al. (2024) "Learning to (Learn at Test Time)" ICML,
 //! with Titans extensions (Behrouz et al., 2025): weight decay (forgetting)
@@ -62,6 +68,7 @@ fn standard_normal(state: &mut u64) -> f64 {
 /// 1. Project: `k = W_K · x`, `v = W_V · x`, `q = W_Q · x`
 /// 2. Inner forward: `z = W_fast · k`
 /// 3. Gradient: `residual = z - (v - k)`, `grad = residual · k^T`
+///    - Dual-objective: scale residual by `prediction_feedback` magnitude
 /// 4. Update: `W_fast = (1 - α) · W_fast - η · grad` (with optional momentum)
 /// 5. Output: `output = q + W_fast · q` (residual connection)
 ///
@@ -90,6 +97,13 @@ pub(crate) struct TTTLayer {
     alpha: f64,          // weight decay (forgetting factor, 0 = no decay)
     use_momentum: bool,  // whether momentum is enabled
     momentum_decay: f64, // momentum coefficient (typically 0.9)
+
+    /// External prediction error signal for dual-objective fast weight updates.
+    ///
+    /// When non-zero, scales the reconstruction residual by the prediction error
+    /// magnitude: high prediction error → more aggressive fast weight adaptation,
+    /// low prediction error → reconstruction-only refinement.
+    pub prediction_feedback: f64,
 
     initialized: bool,
     rng_state: u64,
@@ -133,6 +147,7 @@ impl TTTLayer {
             alpha,
             use_momentum,
             momentum_decay,
+            prediction_feedback: 0.0,
             initialized: false,
             rng_state: if seed == 0 { 1 } else { seed },
         }
@@ -146,6 +161,7 @@ impl TTTLayer {
     /// 1. Project: `k = W_K · x`, `v = W_V · x`, `q = W_Q · x`
     /// 2. Inner forward: `z = W_fast · k`
     /// 3. Gradient: `residual = z - (v - k)`, `grad = residual · k^T`
+    ///    - Dual-objective: scale residual by `prediction_feedback` magnitude
     /// 4. Update: `W_fast = (1 - α) · W_fast - η · grad` (with optional momentum)
     /// 5. Output: `output = q + W_fast · q` (residual connection)
     #[allow(clippy::needless_range_loop)]
@@ -172,6 +188,16 @@ impl TTTLayer {
         let mut residual = vec![0.0; d];
         for i in 0..d {
             residual[i] = z[i] - (v[i] - k[i]);
+        }
+
+        // Dual-objective: modulate reconstruction residual by prediction error.
+        // When prediction error is high, scale up fast weight adaptation.
+        // When prediction is accurate, reconstruction drives slow refinement.
+        if self.prediction_feedback.abs() > 1e-15 {
+            let pred_scale = (self.prediction_feedback.abs()).clamp(0.1, 3.0);
+            for r in &mut residual {
+                *r *= pred_scale;
+            }
         }
 
         // 4. Update fast weights (with gradient clipping to prevent explosion)
@@ -248,6 +274,7 @@ impl TTTLayer {
         self.w_v.clear();
         self.w_q.clear();
         self.d_model = 0;
+        self.prediction_feedback = 0.0;
         self.initialized = false;
     }
 }

@@ -1,8 +1,14 @@
-//! Streaming Test-Time Training (TTT) layers.
+//! Streaming Test-Time Training (TTT) layers with dual-objective fast weights.
 //!
 //! The hidden state is a linear model with weights W, updated by gradient
 //! descent on self-supervised reconstruction at every time step. This makes
 //! the model's representation continuously adapt to the input distribution.
+//!
+//! The reconstruction objective is modulated by prediction error feedback:
+//! when the readout's prediction error is high, the TTT layer adapts its fast
+//! weights more aggressively; when prediction is accurate, reconstruction
+//! drives slow refinement. This couples the inner (reconstruction) and outer
+//! (prediction) objectives without replacing the TTT self-supervised loss.
 //!
 //! Optionally includes Titans-style momentum and weight decay for
 //! non-stationary streaming environments.
@@ -11,6 +17,7 @@
 //!
 //! ```text
 //! x_t → [TTT Layer: project → reconstruct → update W → query] → z_t → [RLS Readout] → ŷ_t
+//!                          ↑ prediction_feedback ←────────────────────────── pred_error
 //! ```
 //!
 //! # References
@@ -364,7 +371,12 @@ impl StreamingLearner for StreamingTTT {
             self.prev_change = current_change;
             self.prev_prediction = current_pred;
 
+            // Dual-objective: compute prediction error BEFORE RLS update,
+            // then feed it back to the TTT layer so the next forward pass
+            // scales reconstruction adaptation by prediction quality.
+            let pred_error = target - current_pred;
             self.readout.train_one(&ttt_output, target, weight);
+            self.layer.prediction_feedback = pred_error;
             self.samples_trained += 1;
         }
 

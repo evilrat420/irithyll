@@ -16,14 +16,16 @@
 //! features ──→ SSM.forward() ──→ ssm_output ──┐
 //!                │                              │
 //!                └──→ SSM.state() ──→ hidden ───┼──→ [hidden; ssm_output]
-//!                                               │        (d_in*n_state + d_in features)
+//!                                               │        (capped to MAX_READOUT_FEATURES)
 //!                                               └──→ RLS.train_one(readout_features, target)
 //!                                                    RLS.predict(readout_features)  ←── prediction
 //! ```
 //!
-//! The RLS readout sees the full `d_in * n_state` hidden state plus the `d_in`
-//! SSM output, giving it access to all temporal information captured by the SSM.
-//! This is analogous to how an ESN feeds the full reservoir state to its readout.
+//! The RLS readout sees either the full `d_in * n_state` hidden state (when small
+//! enough) or a mean-pooled projection of it (for high-dimensional inputs), plus
+//! the `d_in` SSM output. This capped projection ensures the RLS covariance matrix
+//! stays at most `MAX_READOUT_FEATURES × MAX_READOUT_FEATURES`, keeping the O(n³)
+//! update cost bounded regardless of input dimension.
 //!
 //! # Prediction
 //!
@@ -43,9 +45,14 @@ use crate::ssm::mamba_config::MambaConfig;
 /// Combines a selective SSM for temporal feature extraction with an RLS
 /// readout layer. The SSM processes each input as a timestep, evolving
 /// hidden state to capture temporal dependencies. The RLS layer learns
-/// a linear mapping from the full SSM hidden state (plus SSM output) to
-/// the regression target, giving it access to `d_in * n_state + d_in`
-/// features per timestep.
+/// a linear mapping from (optionally pooled) SSM hidden state plus SSM
+/// output to the regression target.
+///
+/// When the full hidden state (`d_in * n_state + d_in`) exceeds
+/// [`MAX_READOUT_FEATURES`](Self::MAX_READOUT_FEATURES), the hidden
+/// state is mean-pooled into fewer dimensions before feeding the RLS.
+/// This keeps the RLS covariance matrix bounded, preventing O(n³)
+/// blowup on high-dimensional inputs.
 ///
 /// # Example
 ///
@@ -78,7 +85,8 @@ pub struct StreamingMamba {
     ssm: SelectiveSSM,
     /// RLS readout layer for prediction.
     readout: RecursiveLeastSquares,
-    /// Cached readout features (hidden state + SSM output) from the most recent train_one call.
+    /// Cached readout features (possibly pooled hidden state + SSM output)
+    /// from the most recent `train_one` call.
     last_features: Vec<f64>,
     /// Total samples trained on.
     n_samples: u64,
@@ -91,18 +99,27 @@ pub struct StreamingMamba {
 }
 
 impl StreamingMamba {
+    /// Maximum number of features fed to the RLS readout layer.
+    ///
+    /// When `d_in * n_state + d_in` exceeds this limit, the hidden state is
+    /// mean-pooled into `MAX_READOUT_FEATURES - d_in` dimensions before
+    /// concatenation with the SSM output. This caps the RLS covariance matrix
+    /// at 64 × 64, keeping the O(n³) update cost at ~262 K ops regardless of
+    /// input dimension.
+    pub const MAX_READOUT_FEATURES: usize = 64;
+
     /// Create a new streaming Mamba model from the given configuration.
     ///
     /// Initializes the SSM with random weights (seeded by `config.seed`) and
     /// an RLS readout with the specified forgetting factor and P matrix scale.
     ///
-    /// The readout feature vector is `[hidden_state; ssm_output]`, giving it
-    /// access to the full `d_in * n_state` hidden state plus the `d_in` SSM
-    /// output (total: `d_in * n_state + d_in` features).
+    /// The readout feature vector is `[pooled_hidden_state; ssm_output]`. When
+    /// the full state is small enough it is used directly; otherwise it is
+    /// mean-pooled so the total never exceeds [`MAX_READOUT_FEATURES`](Self::MAX_READOUT_FEATURES).
     pub fn new(config: MambaConfig) -> Self {
         let ssm = SelectiveSSM::new(config.d_in, config.n_state, config.seed);
         let readout = RecursiveLeastSquares::with_delta(config.forgetting_factor, config.delta_rls);
-        let readout_dim = config.d_in * config.n_state + config.d_in;
+        let readout_dim = Self::capped_readout_dim(config.d_in, config.n_state);
         let last_features = vec![0.0; readout_dim];
 
         Self {
@@ -114,6 +131,51 @@ impl StreamingMamba {
             prev_prediction: 0.0,
             prev_change: 0.0,
             alignment_ewma: 0.0,
+        }
+    }
+
+    /// Compute the readout dimension after capping.
+    fn capped_readout_dim(d_in: usize, n_state: usize) -> usize {
+        let full = d_in * n_state + d_in;
+        if full <= Self::MAX_READOUT_FEATURES {
+            full
+        } else {
+            // Pool the hidden state into (MAX - d_in) dims, then append d_in SSM output.
+            let target_state_dim = Self::MAX_READOUT_FEATURES.saturating_sub(d_in).max(1);
+            let state_len = d_in * n_state;
+            let chunk_size = state_len.div_ceil(target_state_dim);
+            // Actual pooled dim depends on how chunks divide evenly.
+            let pooled = state_len.div_ceil(chunk_size);
+            pooled + d_in
+        }
+    }
+
+    /// Build readout features from the SSM hidden state and output.
+    ///
+    /// When the full state fits within [`MAX_READOUT_FEATURES`](Self::MAX_READOUT_FEATURES),
+    /// the raw `[hidden_state; ssm_output]` is returned. Otherwise the hidden
+    /// state is mean-pooled into fewer dimensions before concatenation.
+    fn build_readout_features(&self, state: &[f64], ssm_output: &[f64]) -> Vec<f64> {
+        let full_len = state.len() + ssm_output.len();
+        if full_len <= Self::MAX_READOUT_FEATURES {
+            // Small enough -- use the full state.
+            let mut rf = Vec::with_capacity(full_len);
+            rf.extend_from_slice(state);
+            rf.extend_from_slice(ssm_output);
+            rf
+        } else {
+            // Mean-pool the hidden state into fewer dimensions.
+            let target_state_dim = Self::MAX_READOUT_FEATURES
+                .saturating_sub(ssm_output.len())
+                .max(1);
+            let chunk_size = state.len().div_ceil(target_state_dim);
+            let mut rf = Vec::with_capacity(Self::MAX_READOUT_FEATURES);
+            for chunk in state.chunks(chunk_size) {
+                let mean = chunk.iter().sum::<f64>() / chunk.len() as f64;
+                rf.push(mean);
+            }
+            rf.extend_from_slice(ssm_output);
+            rf
         }
     }
 
@@ -151,13 +213,11 @@ impl StreamingLearner for StreamingMamba {
         // 1. Forward through SSM to get temporal features
         let ssm_output = self.ssm.forward(features);
 
-        // 2. Build readout features: full hidden state + SSM output.
-        //    The hidden state (d_in * n_state dims) gives the RLS access to the
-        //    entire temporal representation, not just the d_in-dim projection.
+        // 2. Build readout features: (optionally pooled) hidden state + SSM output.
+        //    When the full state exceeds MAX_READOUT_FEATURES, the hidden state is
+        //    mean-pooled to keep the RLS covariance matrix bounded.
         let state = self.ssm.state();
-        let mut readout_features = Vec::with_capacity(state.len() + ssm_output.len());
-        readout_features.extend_from_slice(state);
-        readout_features.extend_from_slice(&ssm_output);
+        let readout_features = self.build_readout_features(state, &ssm_output);
 
         // 3. Update residual alignment tracking (before RLS update).
         let current_pred = self.readout.predict(&readout_features);
@@ -175,7 +235,7 @@ impl StreamingLearner for StreamingMamba {
         self.prev_change = current_change;
         self.prev_prediction = current_pred;
 
-        // 4. Train RLS readout on full readout features
+        // 4. Train RLS readout on (capped) readout features
         self.readout.train_one(&readout_features, target, weight);
 
         // 5. Cache readout features for predict()
@@ -247,7 +307,7 @@ impl crate::automl::DiagnosticSource for StreamingMamba {
             residual_alignment: self.alignment_ewma,
             regularization_sensitivity: 1.0 - self.config.forgetting_factor,
             depth_sufficiency: 0.0, // Single SSM layer + linear readout.
-            effective_dof: (self.config.d_in * self.config.n_state) as f64,
+            effective_dof: Self::capped_readout_dim(self.config.d_in, self.config.n_state) as f64,
             uncertainty: self.prediction_uncertainty(),
         })
     }
@@ -265,9 +325,15 @@ mod tests {
     fn new_creates_fresh_model() {
         let model = StreamingMamba::new(default_config(3));
         assert_eq!(model.n_samples_seen(), 0);
-        // Readout features = d_in * n_state (hidden state) + d_in (SSM output)
-        // With defaults: 3 * 32 + 3 = 99
-        assert_eq!(model.last_features().len(), 3 * 32 + 3);
+        // d_in=3, n_state=32 → full state = 3*32+3 = 99 > MAX_READOUT_FEATURES(64)
+        // → hidden state is pooled: target=61, chunk_size=ceil(96/61)=2, pooled=48, total=48+3=51
+        let expected = StreamingMamba::capped_readout_dim(3, 32);
+        assert_eq!(model.last_features().len(), expected);
+        assert!(
+            expected <= StreamingMamba::MAX_READOUT_FEATURES,
+            "capped readout dim should be <= MAX_READOUT_FEATURES, got {}",
+            expected
+        );
     }
 
     #[test]
@@ -516,6 +582,133 @@ mod tests {
             unc.is_finite(),
             "prediction_uncertainty should be finite, got {}",
             unc
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Readout capping tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn small_state_uses_full_readout() {
+        // d_in=1, n_state=32 → 1*32+1 = 33 features, under MAX_READOUT_FEATURES
+        let config = MambaConfig::builder().d_in(1).n_state(32).build().unwrap();
+        let model = StreamingMamba::new(config);
+        assert_eq!(
+            model.last_features().len(),
+            1 * 32 + 1,
+            "small state should use full readout without pooling"
+        );
+    }
+
+    #[test]
+    fn large_state_caps_readout_to_max() {
+        // d_in=50, n_state=32 → 50*32+50 = 1650, way over MAX_READOUT_FEATURES
+        let config = MambaConfig::builder().d_in(50).n_state(32).build().unwrap();
+        let model = StreamingMamba::new(config);
+        assert!(
+            model.last_features().len() <= StreamingMamba::MAX_READOUT_FEATURES,
+            "high-dim state should be capped to MAX_READOUT_FEATURES, got {}",
+            model.last_features().len()
+        );
+    }
+
+    #[test]
+    fn high_dim_training_produces_finite_predictions() {
+        // d_in=50 would create a 1650-feature readout without capping.
+        // Verify the pooled readout still learns correctly.
+        let config = MambaConfig::builder()
+            .d_in(50)
+            .n_state(32)
+            .forgetting_factor(0.998)
+            .seed(42)
+            .build()
+            .unwrap();
+        let mut model = StreamingMamba::new(config);
+
+        let features: Vec<f64> = (0..50).map(|i| (i as f64 * 0.1).sin()).collect();
+        for i in 0..200 {
+            let target = (i as f64 * 0.05).sin();
+            model.train(&features, target);
+        }
+
+        let pred = model.predict(&features);
+        assert!(
+            pred.is_finite(),
+            "prediction with 50-dim input should be finite, got {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn high_dim_convergence() {
+        // Verify the model converges even with mean-pooled readout features.
+        // Use a simpler linear target so the RLS can learn it cleanly through
+        // the pooled projection. We also use more training to let the RLS
+        // settle (the early window starts at 50 to capture initial adaptation).
+        let config = MambaConfig::builder()
+            .d_in(10)
+            .n_state(16)
+            .forgetting_factor(0.999)
+            .seed(42)
+            .build()
+            .unwrap();
+        let mut model = StreamingMamba::new(config);
+
+        // Full state = 10*16+10 = 170, will be pooled to <= MAX_READOUT_FEATURES
+        assert!(
+            model.last_features().len() <= StreamingMamba::MAX_READOUT_FEATURES,
+            "d_in=10,n_state=16 should be capped, got {}",
+            model.last_features().len()
+        );
+
+        let mut errors_early = Vec::new();
+        let mut errors_late = Vec::new();
+
+        for i in 0..2000 {
+            let t = i as f64 * 0.1;
+            // Simple periodic target: sum of two sinusoids from the first two features.
+            let x: Vec<f64> = (0..10).map(|k| (t + k as f64 * 0.3).sin()).collect();
+            let y = 0.5 * x[0] + 0.3 * x[1];
+
+            if model.n_samples_seen() > 0 {
+                let pred = model.predict(&x);
+                let err = (pred - y).powi(2);
+                if (50..200).contains(&i) {
+                    errors_early.push(err);
+                } else if i >= 1500 {
+                    errors_late.push(err);
+                }
+            }
+
+            model.train(&x, y);
+        }
+
+        let mse_early: f64 = errors_early.iter().sum::<f64>() / errors_early.len() as f64;
+        let mse_late: f64 = errors_late.iter().sum::<f64>() / errors_late.len() as f64;
+
+        assert!(
+            mse_late < mse_early,
+            "pooled model should converge: late MSE ({}) should be < early MSE ({})",
+            mse_late,
+            mse_early
+        );
+    }
+
+    #[test]
+    fn capped_readout_dim_boundary() {
+        // Exactly at the boundary: d_in=2, n_state=31 → 2*31+2 = 64 = MAX
+        assert_eq!(
+            StreamingMamba::capped_readout_dim(2, 31),
+            64,
+            "exactly at MAX should use full state"
+        );
+        // One over: d_in=2, n_state=32 → 2*32+2 = 66 > 64
+        let dim = StreamingMamba::capped_readout_dim(2, 32);
+        assert!(
+            dim <= StreamingMamba::MAX_READOUT_FEATURES,
+            "one over MAX should be capped, got {}",
+            dim
         );
     }
 }
