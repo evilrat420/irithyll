@@ -1,6 +1,6 @@
 //! Real-world synthetic benchmark harness for irithyll streaming algorithms.
 //!
-//! Evaluates 13 streaming algorithms across 5 synthetic datasets using the
+//! Evaluates 8 streaming algorithms across 8 synthetic datasets using the
 //! prequential (test-then-train) protocol. All datasets are generated inline
 //! with deterministic seeded RNG -- no file downloads needed for CI.
 //!
@@ -10,6 +10,9 @@
 //! - **Sensor drift**: 6 features with gradual drift every 5K samples, 30K samples
 //! - **Multi-class spiral**: 3 interlocking spirals, 15K samples
 //! - **Sudden drift**: abrupt distribution change at sample 25K of 50K
+//! - **High-dim nonlinear**: 50 features (5 signal + 45 noise), regression, 20K samples
+//! - **Temporal pattern**: autoregressive 10-feature regression with 3-step lag, 30K samples
+//! - **High-dim binary drift**: 30 features, binary classification with feature-level concept drift, 30K samples
 //!
 //! Algorithms:
 //! - SGBT (default config)
@@ -18,17 +21,11 @@
 //! - StreamingTTT
 //! - EchoStateNetwork
 //! - StreamingMamba
-//! - RecursiveLeastSquares (regression only)
+//! - RecursiveLeastSquares
 //! - NeuralMoE (3 experts)
-//! - DA(KAN) -- DriftAware<StreamingKAN> with DDM
-//! - DA(TTT) -- DriftAware<StreamingTTT> with DDM
-//! - DA(ESN) -- DriftAware<EchoStateNetwork> with DDM
-//! - DA(Mamba) -- DriftAware<StreamingMamba> with DDM
-//! - DA(RLS) -- DriftAware<RecursiveLeastSquares> with DDM (regression only)
 //!
 //! Run: `cargo bench --bench real_world_bench`
 
-use irithyll::drift::DriftAware;
 use irithyll::*;
 use std::time::Instant;
 
@@ -340,6 +337,177 @@ impl BenchmarkDataset for SuddenDrift {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 6. High-dim nonlinear: 50 features (5 signal + 45 noise), regression, 20K
+// ---------------------------------------------------------------------------
+
+struct HighDimNonlinear;
+
+impl BenchmarkDataset for HighDimNonlinear {
+    fn name(&self) -> &str {
+        "High-Dim Nonlinear (20K)"
+    }
+
+    fn n_features(&self) -> usize {
+        50
+    }
+
+    fn task(&self) -> Task {
+        Task::Regression
+    }
+
+    fn load(&self) -> (Vec<Vec<f64>>, Vec<f64>) {
+        let mut rng = Rng::new(0xAD10_0006);
+        let n = 20_000;
+        let d = 50;
+
+        let mut features = Vec::with_capacity(n);
+        let mut targets = Vec::with_capacity(n);
+
+        for _ in 0..n {
+            let x: Vec<f64> = (0..d).map(|_| rng.normal(0.0, 1.0)).collect();
+
+            // Target = nonlinear combination of 5 key features + noise
+            // f(x) = sin(x[0]*x[1]) + x[2]^2 - x[3]*x[4] + cos(x[0]+x[2]) + noise
+            // Features 5-49 are noise dimensions
+            let y = (x[0] * x[1]).sin() + x[2].powi(2) - x[3] * x[4]
+                + (x[0] + x[2]).cos()
+                + rng.normal(0.0, 0.3);
+
+            features.push(x);
+            targets.push(y);
+        }
+        (features, targets)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 7. Temporal pattern: autoregressive 10-feature regression with 3-step lag
+// ---------------------------------------------------------------------------
+
+struct TemporalPattern;
+
+impl BenchmarkDataset for TemporalPattern {
+    fn name(&self) -> &str {
+        "Temporal Pattern (30K)"
+    }
+
+    fn n_features(&self) -> usize {
+        10
+    }
+
+    fn task(&self) -> Task {
+        Task::Regression
+    }
+
+    fn load(&self) -> (Vec<Vec<f64>>, Vec<f64>) {
+        let mut rng = Rng::new(0x7E3F_0007);
+        let n = 30_000;
+        let d = 10;
+        let lag = 3;
+
+        // Ring buffer for lagged features
+        let mut history: Vec<Vec<f64>> = Vec::new();
+        let lag_weights: [f64; 3] = [0.5, 0.3, 0.2]; // weights for lag 1,2,3
+
+        let mut features = Vec::with_capacity(n);
+        let mut targets = Vec::with_capacity(n);
+
+        // State vector that evolves autoregressively
+        let mut state: Vec<f64> = (0..d).map(|_| rng.normal(0.0, 1.0)).collect();
+
+        for _ in 0..n {
+            // Evolve state autoregressively: state[t] = 0.8*state[t-1] + noise
+            for s in state.iter_mut() {
+                *s = 0.8 * *s + rng.normal(0.0, 0.3);
+            }
+
+            let x = state.clone();
+
+            // Target = weighted sum with 3-step lag
+            // Current contribution
+            let mut y = x[0] * 1.0 + x[1] * 0.5 - x[2] * 0.3;
+
+            // Lagged contributions (if enough history)
+            for (lag_idx, &w) in lag_weights.iter().enumerate() {
+                let hist_idx = lag_idx + 1; // lag 1, 2, 3
+                if history.len() >= hist_idx {
+                    let past = &history[history.len() - hist_idx];
+                    y += w * (past[3] + past[4] * 0.5);
+                }
+            }
+
+            y += rng.normal(0.0, 0.2);
+
+            features.push(x.clone());
+            targets.push(y);
+
+            // Maintain history ring buffer (keep only last `lag` entries)
+            history.push(x);
+            if history.len() > lag {
+                history.remove(0);
+            }
+        }
+        (features, targets)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 8. High-dim binary drift: 30 features, binary classification with
+//    feature-level concept drift every 10K samples
+// ---------------------------------------------------------------------------
+
+struct HighDimBinaryDrift;
+
+impl BenchmarkDataset for HighDimBinaryDrift {
+    fn name(&self) -> &str {
+        "High-Dim Binary Drift (30K)"
+    }
+
+    fn n_features(&self) -> usize {
+        30
+    }
+
+    fn task(&self) -> Task {
+        Task::BinaryClassification
+    }
+
+    fn load(&self) -> (Vec<Vec<f64>>, Vec<f64>) {
+        let mut rng = Rng::new(0xBDF7_0008);
+        let n = 30_000;
+        let d = 30;
+
+        // Three regimes of 10K samples each, with different relevant features
+        // Regime 0: features 0-4 are relevant
+        // Regime 1: features 10-14 are relevant
+        // Regime 2: features 20-24 are relevant
+        let regime_offsets = [0usize, 10, 20];
+
+        let mut features = Vec::with_capacity(n);
+        let mut targets = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let x: Vec<f64> = (0..d).map(|_| rng.normal(0.0, 1.0)).collect();
+
+            // Select which 5 features are relevant based on regime
+            let regime = (i / 10_000).min(2);
+            let offset = regime_offsets[regime];
+
+            // Nonlinear boundary using 5 relevant features
+            let score = (x[offset] * x[offset + 1]).sin() + x[offset + 2].powi(2)
+                - x[offset + 3] * x[offset + 4]
+                + 0.5 * x[offset].cos();
+
+            let noise = rng.normal(0.0, 0.3);
+            let label = if score + noise > 0.5 { 1.0 } else { 0.0 };
+
+            features.push(x);
+            targets.push(label);
+        }
+        (features, targets)
+    }
+}
+
 // ===========================================================================
 // Algorithm wrappers
 // ===========================================================================
@@ -373,16 +541,15 @@ fn build_algorithms(n_features: usize) -> Vec<NamedModel> {
         NamedModel {
             name: "StreamingKAN",
             model: {
-                // Input -> hidden -> output
-                let hidden = n_features.max(5);
-                let layers = vec![n_features, hidden, 1];
+                // Input -> hidden -> output (20 hidden for more capacity)
+                let layers = vec![n_features, 20, 1];
                 Box::new(streaming_kan(&layers, 0.01))
             },
             regression_only: false,
         },
         NamedModel {
             name: "StreamingTTT",
-            model: Box::new(streaming_ttt(16, 0.005)),
+            model: Box::new(streaming_ttt(32, 0.005)),
             regression_only: false,
         },
         NamedModel {
@@ -392,19 +559,16 @@ fn build_algorithms(n_features: usize) -> Vec<NamedModel> {
         },
     ];
 
-    // StreamingMamba requires d_in >= 2 (internal SIMD constraint)
-    if n_features >= 2 {
-        algos.push(NamedModel {
-            name: "StreamingMamba",
-            model: Box::new(mamba(n_features, 16)),
-            regression_only: false,
-        });
-    }
+    algos.push(NamedModel {
+        name: "StreamingMamba",
+        model: Box::new(mamba(n_features, 32)),
+        regression_only: false,
+    });
 
     algos.push(NamedModel {
         name: "RLS",
         model: Box::new(rls(0.999)),
-        regression_only: true,
+        regression_only: false,
     });
 
     algos.push(NamedModel {
@@ -419,60 +583,6 @@ fn build_algorithms(n_features: usize) -> Vec<NamedModel> {
             Box::new(moe)
         },
         regression_only: false,
-    });
-
-    // -----------------------------------------------------------------
-    // DriftAware-wrapped neural models (raw vs drift-aware comparison)
-    // -----------------------------------------------------------------
-
-    algos.push(NamedModel {
-        name: "DA(KAN)",
-        model: {
-            let hidden = n_features.max(5);
-            let layers = vec![n_features, hidden, 1];
-            let kan_model = streaming_kan(&layers, 0.01);
-            Box::new(DriftAware::with_ddm(kan_model))
-        },
-        regression_only: false,
-    });
-
-    algos.push(NamedModel {
-        name: "DA(TTT)",
-        model: {
-            let ttt_model = streaming_ttt(16, 0.005);
-            Box::new(DriftAware::with_ddm(ttt_model))
-        },
-        regression_only: false,
-    });
-
-    algos.push(NamedModel {
-        name: "DA(ESN)",
-        model: {
-            let esn_model = esn(50, 0.9);
-            Box::new(DriftAware::with_ddm(esn_model))
-        },
-        regression_only: false,
-    });
-
-    // StreamingMamba requires d_in >= 2 (internal SIMD constraint)
-    if n_features >= 2 {
-        algos.push(NamedModel {
-            name: "DA(Mamba)",
-            model: {
-                let mamba_model = mamba(n_features, 16);
-                Box::new(DriftAware::with_ddm(mamba_model))
-            },
-            regression_only: false,
-        });
-    }
-
-    algos.push(NamedModel {
-        name: "DA(RLS)",
-        model: {
-            let rls_model = rls(0.999);
-            Box::new(DriftAware::with_ddm(rls_model))
-        },
-        regression_only: true,
     });
 
     algos
@@ -563,6 +673,7 @@ fn prequential_binary_classification(
             peak_predict_ns = pred_ns;
         }
 
+        // Threshold at 0.5 for binary classification
         let pred_label = if pred_raw >= 0.5 { 1.0 } else { 0.0 };
         total += 1;
         if (pred_label - targets[i]).abs() < 0.5 {
@@ -595,7 +706,7 @@ fn prequential_multiclass_classification(
     model: &mut dyn StreamingLearner,
     features: &[Vec<f64>],
     targets: &[f64],
-    _n_classes: usize,
+    n_classes: usize,
 ) -> BenchResult {
     let n = features.len();
     let mut correct = 0u64;
@@ -613,8 +724,8 @@ fn prequential_multiclass_classification(
             peak_predict_ns = pred_ns;
         }
 
-        // Round to nearest class
-        let pred_class = pred_raw.round().max(0.0) as usize;
+        // Nearest-class: round and clamp to valid class range
+        let pred_class = pred_raw.round().clamp(0.0, (n_classes - 1) as f64) as usize;
         let true_class = targets[i] as usize;
         total += 1;
         if pred_class == true_class {
@@ -717,7 +828,7 @@ fn main() {
     eprintln!();
     eprintln!("============================================================");
     eprintln!("  irithyll real-world synthetic benchmark suite");
-    eprintln!("  {} algorithms x 5 datasets, prequential evaluation", 13);
+    eprintln!("  {} algorithms x 8 datasets, prequential evaluation", 13);
     eprintln!("============================================================");
 
     let datasets: Vec<Box<dyn BenchmarkDataset>> = vec![
@@ -726,6 +837,9 @@ fn main() {
         Box::new(SensorDrift),
         Box::new(MulticlassSpiral),
         Box::new(SuddenDrift),
+        Box::new(HighDimNonlinear),
+        Box::new(TemporalPattern),
+        Box::new(HighDimBinaryDrift),
     ];
 
     let overall_start = Instant::now();
