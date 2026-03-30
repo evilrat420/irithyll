@@ -89,6 +89,10 @@ pub(crate) struct KANLayer {
     /// B-spline coefficients, flattened as `[n_out * n_in * n_coeffs]`.
     /// Layout: edge (j, i) has coefficients at offset `(j * n_in + i) * n_coeffs`.
     coefficients: Vec<f64>,
+    /// Momentum velocity for each coefficient, same layout as `coefficients`.
+    /// Accumulates gradient direction across samples for faster convergence
+    /// on sparse B-spline updates.
+    velocity: Vec<f64>,
     /// Residual bypass weights, `[n_out * n_in]`.
     w_b: Vec<f64>,
     /// Spline scale weights, `[n_out * n_in]`.
@@ -103,6 +107,8 @@ pub(crate) struct KANLayer {
     g: usize,
     /// Number of B-spline coefficients per edge (= g + k).
     n_coeffs: usize,
+    /// Momentum factor for SGD (0.0 = no momentum).
+    momentum: f64,
 }
 
 impl KANLayer {
@@ -112,8 +118,16 @@ impl KANLayer {
     /// - `n_out`: output dimension
     /// - `k`: spline order (3 for cubic)
     /// - `g`: number of grid intervals
+    /// - `momentum`: SGD momentum factor (0.0 = disabled, 0.9 = standard)
     /// - `seed`: mutable RNG state
-    pub fn new(n_in: usize, n_out: usize, k: usize, g: usize, seed: &mut u64) -> Self {
+    pub fn new(
+        n_in: usize,
+        n_out: usize,
+        k: usize,
+        g: usize,
+        momentum: f64,
+        seed: &mut u64,
+    ) -> Self {
         let n_coeffs = g + k;
         let n_edges = n_out * n_in;
         let grid = bspline::make_grid(-1.0, 1.0, g, k);
@@ -125,6 +139,9 @@ impl KANLayer {
             coefficients.push(standard_normal(seed) * 0.1);
         }
 
+        // Velocity: zero-initialized (same layout as coefficients)
+        let velocity = vec![0.0; total_coeffs];
+
         // Residual bypass: 1/n_in (scaled initialization)
         let w_b_val = 1.0 / n_in as f64;
         let w_b = vec![w_b_val; n_edges];
@@ -134,6 +151,7 @@ impl KANLayer {
 
         Self {
             coefficients,
+            velocity,
             w_b,
             w_s,
             grid,
@@ -142,6 +160,7 @@ impl KANLayer {
             k,
             g,
             n_coeffs,
+            momentum,
         }
     }
 
@@ -236,7 +255,9 @@ impl KANLayer {
                 }
 
                 // --- Update coefficients (SPARSE: only k+1 per edge) ---
-                // NaN/Inf guard: skip coefficient updates if any gradient is non-finite
+                // NaN/Inf guard: skip coefficient updates if any gradient is non-finite.
+                // Per-edge momentum: velocity accumulates gradient direction across
+                // samples, making sparse B-spline updates converge much faster.
                 let coeff_grad_base = delta_j * self.w_s[edge];
                 if coeff_grad_base.is_finite() {
                     for (b, &basis_val) in bases.iter().enumerate() {
@@ -245,7 +266,9 @@ impl KANLayer {
                             let grad = coeff_grad_base * basis_val;
                             if grad.is_finite() {
                                 // dL/dc_g = delta_j * w_s * B_g(x)
-                                self.coefficients[coeff_base + coeff_idx] -= lr * grad;
+                                let vi = coeff_base + coeff_idx;
+                                self.velocity[vi] = self.momentum * self.velocity[vi] + lr * grad;
+                                self.coefficients[vi] -= self.velocity[vi];
                             }
                         }
                     }
@@ -284,6 +307,9 @@ impl KANLayer {
     pub fn reset(&mut self, seed: &mut u64) {
         for c in &mut self.coefficients {
             *c = standard_normal(seed) * 0.1;
+        }
+        for v in &mut self.velocity {
+            *v = 0.0;
         }
         let w_b_val = 1.0 / self.n_in as f64;
         for w in &mut self.w_b {
@@ -345,7 +371,7 @@ mod tests {
     #[test]
     fn forward_dimensions() {
         let mut seed = make_seed();
-        let layer = KANLayer::new(4, 3, 3, 5, &mut seed);
+        let layer = KANLayer::new(4, 3, 3, 5, 0.9, &mut seed);
         let input = vec![0.1, -0.5, 0.3, 0.8];
         let output = layer.forward(&input);
         assert_eq!(
@@ -359,7 +385,7 @@ mod tests {
     #[test]
     fn forward_finite() {
         let mut seed = make_seed();
-        let layer = KANLayer::new(4, 3, 3, 5, &mut seed);
+        let layer = KANLayer::new(4, 3, 3, 5, 0.9, &mut seed);
         let input = vec![0.1, -0.5, 0.3, 0.8];
         let output = layer.forward(&input);
         for (idx, &val) in output.iter().enumerate() {
@@ -370,7 +396,7 @@ mod tests {
     #[test]
     fn backward_updates_coefficients() {
         let mut seed = make_seed();
-        let mut layer = KANLayer::new(2, 2, 3, 5, &mut seed);
+        let mut layer = KANLayer::new(2, 2, 3, 5, 0.9, &mut seed);
         let input = vec![0.3, -0.7];
         let output_grad = vec![1.0, -0.5];
 
@@ -399,7 +425,7 @@ mod tests {
         let k = 3;
         let g = 5;
         let mut seed = make_seed();
-        let mut layer = KANLayer::new(n_in, n_out, k, g, &mut seed);
+        let mut layer = KANLayer::new(n_in, n_out, k, g, 0.9, &mut seed);
         let input = vec![0.2, -0.4, 0.6];
         let output_grad = vec![1.0, 1.0];
 
@@ -434,7 +460,7 @@ mod tests {
         let k = 3;
         let g = 5;
         let mut seed = make_seed();
-        let layer = KANLayer::new(n_in, n_out, k, g, &mut seed);
+        let layer = KANLayer::new(n_in, n_out, k, g, 0.9, &mut seed);
         let n_coeffs = g + k;
         let expected = n_out * n_in * (n_coeffs + 2);
         assert_eq!(
@@ -450,7 +476,7 @@ mod tests {
     fn learning_y_equals_x_squared() {
         // Train a single-edge KAN layer to approximate y = x^2
         let mut seed = make_seed();
-        let mut layer = KANLayer::new(1, 1, 3, 5, &mut seed);
+        let mut layer = KANLayer::new(1, 1, 3, 5, 0.9, &mut seed);
         let lr = 0.01;
 
         // Generate training data: x in [-1, 1]

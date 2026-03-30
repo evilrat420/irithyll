@@ -1,16 +1,16 @@
-//! Core TTT (Test-Time Training) layer with dual-objective fast weight updates.
+//! Core TTT (Test-Time Training) layer with prediction-directed fast weight updates.
 //!
 //! The hidden state is a weight matrix W ("fast weights") updated per step
-//! by gradient descent on a self-supervised reconstruction loss:
-//! `L = ||W * k_t - (v_t - k_t)||^2`
+//! by gradient descent. The gradient source depends on whether prediction
+//! feedback is available:
+//!
+//! - **With prediction feedback** (after warmup): the fast weight update is
+//!   directed by the prediction error projected onto the query space. This
+//!   makes W_fast directly minimize prediction loss rather than reconstruction.
+//! - **Without prediction feedback** (during warmup): falls back to the
+//!   self-supervised reconstruction loss `L = ||W * k_t - (v_t - k_t)||^2`.
 //!
 //! The gradient is a rank-1 outer product: `dW = residual * k_t^T`.
-//!
-//! The reconstruction residual is modulated by an external prediction error
-//! signal (`prediction_feedback`): when prediction error is high, fast weights
-//! adapt more aggressively; when prediction is accurate, reconstruction drives
-//! slow refinement. The inner objective remains reconstruction (preserving
-//! TTT's identity), but adaptation magnitude is coupled to prediction quality.
 //!
 //! Based on Sun et al. (2024) "Learning to (Learn at Test Time)" ICML,
 //! with Titans extensions (Behrouz et al., 2025): weight decay (forgetting)
@@ -67,8 +67,9 @@ fn standard_normal(state: &mut u64) -> f64 {
 ///
 /// 1. Project: `k = W_K · x`, `v = W_V · x`, `q = W_Q · x`
 /// 2. Inner forward: `z = W_fast · k`
-/// 3. Gradient: `residual = z - (v - k)`, `grad = residual · k^T`
-///    - Dual-objective: scale residual by `prediction_feedback` magnitude
+/// 3. Gradient: compute residual, then `grad = residual · k^T`
+///    - With prediction feedback: `residual = -pred_err * q / d` (prediction-directed)
+///    - Without (warmup): `residual = z - (v - k)` (reconstruction)
 /// 4. Update: `W_fast = (1 - α) · W_fast - η · grad` (with optional momentum)
 /// 5. Output: `output = q + W_fast · q` (residual connection)
 ///
@@ -98,11 +99,12 @@ pub(crate) struct TTTLayer {
     use_momentum: bool,  // whether momentum is enabled
     momentum_decay: f64, // momentum coefficient (typically 0.9)
 
-    /// External prediction error signal for dual-objective fast weight updates.
+    /// External prediction error signal for prediction-directed fast weight updates.
     ///
-    /// When non-zero, scales the reconstruction residual by the prediction error
-    /// magnitude: high prediction error → more aggressive fast weight adaptation,
-    /// low prediction error → reconstruction-only refinement.
+    /// When non-zero, replaces the reconstruction residual with a prediction-
+    /// directed residual: `-pred_err * q[i] / d`. This makes the fast weight
+    /// update directly minimize prediction loss instead of reconstruction loss.
+    /// Falls back to reconstruction during warmup (before first prediction).
     pub prediction_feedback: f64,
 
     initialized: bool,
@@ -160,8 +162,9 @@ impl TTTLayer {
     /// Per-step computation:
     /// 1. Project: `k = W_K · x`, `v = W_V · x`, `q = W_Q · x`
     /// 2. Inner forward: `z = W_fast · k`
-    /// 3. Gradient: `residual = z - (v - k)`, `grad = residual · k^T`
-    ///    - Dual-objective: scale residual by `prediction_feedback` magnitude
+    /// 3. Gradient: compute residual, then `grad = residual · k^T`
+    ///    - With prediction feedback: `residual = -pred_err * q / d` (prediction-directed)
+    ///    - Without (warmup): `residual = z - (v - k)` (reconstruction)
     /// 4. Update: `W_fast = (1 - α) · W_fast - η · grad` (with optional momentum)
     /// 5. Output: `output = q + W_fast · q` (residual connection)
     #[allow(clippy::needless_range_loop)]
@@ -182,21 +185,23 @@ impl TTTLayer {
         // 2. Inner forward: z = W_fast * k
         let z = fast_mat_vec(&self.w_fast, &k, d);
 
-        // 3. Gradient of L = ||z - (v - k)||^2
-        //    dL/dW = 2 * residual * k^T  (rank-1 outer product)
-        //    We absorb the 2 into eta for simplicity.
+        // 3. Compute residual for fast weight update.
+        //    Gradient: dW = residual * k^T (rank-1 outer product).
         let mut residual = vec![0.0; d];
-        for i in 0..d {
-            residual[i] = z[i] - (v[i] - k[i]);
-        }
-
-        // Dual-objective: modulate reconstruction residual by prediction error.
-        // When prediction error is high, scale up fast weight adaptation.
-        // When prediction is accurate, reconstruction drives slow refinement.
         if self.prediction_feedback.abs() > 1e-15 {
-            let pred_scale = (self.prediction_feedback.abs()).clamp(0.1, 3.0);
-            for r in &mut residual {
-                *r *= pred_scale;
+            // Prediction-directed: use prediction error projected onto query space.
+            // d(pred_err^2)/dW_fast ∝ -pred_err * q (for the output dimension).
+            // This makes W_fast directly minimize prediction loss.
+            let pred_err = self.prediction_feedback;
+            for i in 0..d {
+                residual[i] = -pred_err * q[i] / (d as f64);
+            }
+        } else {
+            // Fallback to reconstruction during warmup (before first prediction).
+            // L = ||z - (v - k)||^2, dL/dW = 2 * residual * k^T
+            // (the 2 is absorbed into eta).
+            for i in 0..d {
+                residual[i] = z[i] - (v[i] - k[i]);
             }
         }
 
@@ -262,6 +267,18 @@ impl TTTLayer {
     #[inline]
     pub fn set_eta(&mut self, eta: f64) {
         self.eta = eta;
+    }
+
+    /// Reset only the fast weights (preserves projections and initialization).
+    ///
+    /// Used by drift detection: when prediction error spikes, clear the fast
+    /// weight matrix to allow clean adaptation to the new regime.
+    pub fn reset_fast_weights(&mut self) {
+        self.w_fast.fill(0.0);
+        if self.use_momentum {
+            self.momentum_buf.fill(0.0);
+        }
+        self.prediction_feedback = 0.0;
     }
 
     /// Full reset including projections (returns to uninitialized state).

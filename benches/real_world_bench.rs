@@ -988,6 +988,7 @@ fn build_algorithms(n_features: usize) -> Vec<NamedModel> {
             name: "StreamingKAN",
             model: {
                 // Input -> hidden -> output (20 hidden for more capacity)
+                // Uses default grid_size=8, momentum=0.9 for fast convergence
                 let layers = vec![n_features, 20, 1];
                 Box::new(streaming_kan(&layers, 0.01))
             },

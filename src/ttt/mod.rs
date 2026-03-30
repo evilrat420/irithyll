@@ -1,14 +1,14 @@
-//! Streaming Test-Time Training (TTT) layers with dual-objective fast weights.
+//! Streaming Test-Time Training (TTT) layers with prediction-directed fast weights.
 //!
 //! The hidden state is a linear model with weights W, updated by gradient
-//! descent on self-supervised reconstruction at every time step. This makes
-//! the model's representation continuously adapt to the input distribution.
+//! descent at every time step. After warmup, the fast weight update is
+//! directed by the readout's prediction error — making W directly minimize
+//! prediction loss rather than task-agnostic reconstruction. During warmup,
+//! falls back to self-supervised reconstruction.
 //!
-//! The reconstruction objective is modulated by prediction error feedback:
-//! when the readout's prediction error is high, the TTT layer adapts its fast
-//! weights more aggressively; when prediction is accurate, reconstruction
-//! drives slow refinement. This couples the inner (reconstruction) and outer
-//! (prediction) objectives without replacing the TTT self-supervised loss.
+//! This prediction-directed approach enables fast adaptation on non-stationary
+//! data: when the target function shifts, the prediction error immediately
+//! redirects the fast weight updates toward the new relationship.
 //!
 //! Optionally includes Titans-style momentum and weight decay for
 //! non-stationary streaming environments.
@@ -59,7 +59,11 @@ pub struct TTTConfig {
     pub n_heads: usize,
     /// Inner learning rate for fast weight updates (default: 0.01).
     pub eta: f64,
-    /// Weight decay / forgetting factor, Titans-style (default: 0.0001).
+    /// Weight decay / forgetting factor, Titans-style (default: 0.005).
+    ///
+    /// At 0.005, fast weights lose 50% of old information in ~139 steps —
+    /// fast enough for non-stationary regimes with ~8K-sample phases while
+    /// retaining short-term memory.
     pub alpha: f64,
     /// Momentum coefficient, Titans-style (default: 0.0 = none).
     pub momentum: f64,
@@ -79,7 +83,7 @@ impl Default for TTTConfig {
             d_model: 32,
             n_heads: 1,
             eta: 0.01,
-            alpha: 0.0001,
+            alpha: 0.005,
             momentum: 0.0,
             forgetting_factor: 0.998,
             delta_rls: 100.0,
@@ -153,7 +157,7 @@ impl TTTConfigBuilder {
         self
     }
 
-    /// Set the weight decay coefficient, Titans-style (default: 0.0001).
+    /// Set the weight decay coefficient, Titans-style (default: 0.005).
     pub fn alpha(mut self, a: f64) -> Self {
         self.config.alpha = a;
         self
@@ -256,6 +260,8 @@ pub struct StreamingTTT {
     samples_trained: u64,
     /// EWMA of prediction uncertainty for eta modulation.
     rolling_uncertainty: f64,
+    /// Fast-reacting EWMA of squared error for drift detection (alpha=0.1).
+    short_term_error: f64,
     /// Previous prediction for residual alignment tracking.
     prev_prediction: f64,
     /// Previous prediction change for residual alignment tracking.
@@ -286,6 +292,7 @@ impl StreamingTTT {
             total_seen: 0,
             samples_trained: 0,
             rolling_uncertainty: 0.0,
+            short_term_error: 0.0,
             prev_prediction: 0.0,
             prev_change: 0.0,
             alignment_ewma: 0.0,
@@ -349,14 +356,29 @@ impl StreamingLearner for StreamingTTT {
             self.readout.set_forgetting_factor(adaptive_ff);
         }
 
-        // Always forward through TTT layer (even during warmup, to warm up projections)
-        let ttt_output = self.layer.forward(features);
-        self.total_seen += 1;
-
-        // Only train RLS after warmup
+        // Compute prediction error BEFORE forward so the fast weight update
+        // in this step is driven by the current prediction error. This gives
+        // tighter coupling: the TTT layer adapts W_fast to reduce the error
+        // that the readout is currently making, not the previous step's error.
         if self.past_warmup() {
-            // Update residual alignment tracking (before RLS update).
-            let current_pred = self.readout.predict(&ttt_output);
+            let current_pred = self.readout.predict(&self.last_features);
+            let pred_error = target - current_pred;
+            self.layer.prediction_feedback = pred_error;
+
+            // Drift detection: compare short-term vs long-term error.
+            // Short-term EWMA (alpha=0.1) reacts fast to phase changes.
+            // Long-term is rolling_uncertainty (alpha=0.001).
+            // When short-term > 2x long-term, reset fast weights.
+            let sq_err = pred_error * pred_error;
+            let short_alpha = 0.1;
+            self.short_term_error =
+                (1.0 - short_alpha) * self.short_term_error + short_alpha * sq_err;
+            let short_rmse = self.short_term_error.sqrt();
+            if self.rolling_uncertainty > 1e-10 && short_rmse > 2.0 * self.rolling_uncertainty {
+                self.layer.reset_fast_weights();
+            }
+
+            // Update residual alignment tracking.
             let current_change = current_pred - self.prev_prediction;
             if self.samples_trained > 0 {
                 let agreement = if (current_change > 0.0) == (self.prev_change > 0.0) {
@@ -370,13 +392,15 @@ impl StreamingLearner for StreamingTTT {
             }
             self.prev_change = current_change;
             self.prev_prediction = current_pred;
+        }
 
-            // Dual-objective: compute prediction error BEFORE RLS update,
-            // then feed it back to the TTT layer so the next forward pass
-            // scales reconstruction adaptation by prediction quality.
-            let pred_error = target - current_pred;
+        // Forward through TTT layer (uses prediction_feedback if set above).
+        let ttt_output = self.layer.forward(features);
+        self.total_seen += 1;
+
+        // Train RLS readout on the new features (after warmup).
+        if self.past_warmup() {
             self.readout.train_one(&ttt_output, target, weight);
-            self.layer.prediction_feedback = pred_error;
             self.samples_trained += 1;
         }
 
@@ -409,6 +433,7 @@ impl StreamingLearner for StreamingTTT {
         self.total_seen = 0;
         self.samples_trained = 0;
         self.rolling_uncertainty = 0.0;
+        self.short_term_error = 0.0;
         self.prev_prediction = 0.0;
         self.prev_change = 0.0;
         self.alignment_ewma = 0.0;

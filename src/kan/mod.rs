@@ -48,10 +48,19 @@ pub struct KANConfig {
     pub layer_sizes: Vec<usize>,
     /// B-spline order (default: 3 = cubic).
     pub spline_order: usize,
-    /// Number of grid intervals per edge (default: 5).
+    /// Number of grid intervals per edge (default: 8).
+    ///
+    /// More grid intervals give finer B-spline resolution, improving convergence
+    /// on compositional functions at the cost of slightly more parameters per edge.
     pub grid_size: usize,
     /// Learning rate for SGD (default: 0.01).
     pub lr: f64,
+    /// SGD momentum factor for B-spline coefficient updates (default: 0.5).
+    ///
+    /// Momentum accumulates gradient direction across samples, making the
+    /// sparse B-spline updates (only `k+1` coefficients per edge per step)
+    /// converge much faster. Set to 0.0 to disable.
+    pub momentum: f64,
     /// Decay factor applied to spline coefficients each step (default: 0.0005).
     ///
     /// After each gradient update, all B-spline coefficients are multiplied by
@@ -68,8 +77,9 @@ impl Default for KANConfig {
         Self {
             layer_sizes: vec![1, 5, 1],
             spline_order: 3,
-            grid_size: 5,
+            grid_size: 8,
             lr: 0.01,
+            momentum: 0.5,
             coefficient_decay: 0.0005,
             seed: 42,
         }
@@ -80,11 +90,12 @@ impl std::fmt::Display for KANConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "KANConfig(layers={:?}, k={}, g={}, lr={}, decay={}, seed={})",
+            "KANConfig(layers={:?}, k={}, g={}, lr={}, momentum={}, decay={}, seed={})",
             self.layer_sizes,
             self.spline_order,
             self.grid_size,
             self.lr,
+            self.momentum,
             self.coefficient_decay,
             self.seed
         )
@@ -105,8 +116,9 @@ impl std::fmt::Display for KANConfig {
 /// let config = KANConfig::builder()
 ///     .layer_sizes(vec![5, 10, 1])
 ///     .spline_order(3)
-///     .grid_size(5)
+///     .grid_size(8)
 ///     .lr(0.01)
+///     .momentum(0.5)
 ///     .build()
 ///     .unwrap();
 ///
@@ -142,7 +154,10 @@ impl KANConfigBuilder {
         self
     }
 
-    /// Set the number of grid intervals per edge (default: 5).
+    /// Set the number of grid intervals per edge (default: 8).
+    ///
+    /// More grid intervals give finer B-spline resolution. Values of 5-12
+    /// are typical; 8 balances resolution and parameter count.
     pub fn grid_size(mut self, g: usize) -> Self {
         self.config.grid_size = g;
         self
@@ -151,6 +166,16 @@ impl KANConfigBuilder {
     /// Set the learning rate for SGD (default: 0.01).
     pub fn lr(mut self, lr: f64) -> Self {
         self.config.lr = lr;
+        self
+    }
+
+    /// Set the SGD momentum factor (default: 0.5).
+    ///
+    /// Momentum accumulates gradient direction across samples, making sparse
+    /// B-spline updates converge faster. Standard value is 0.9. Set to 0.0
+    /// to disable.
+    pub fn momentum(mut self, m: f64) -> Self {
+        self.config.momentum = m;
         self
     }
 
@@ -290,6 +315,7 @@ impl StreamingKAN {
                 config.layer_sizes[i + 1],
                 config.spline_order,
                 config.grid_size,
+                config.momentum,
                 &mut rng,
             ));
         }
@@ -354,7 +380,7 @@ impl StreamingKAN {
                 1.0
             };
             normalized[i] = (x - self.input_mean[i]) / std;
-            // Clamp to [-3, 3] — B-splines with grid_size=5 handle this range.
+            // Clamp to [-3, 3] — B-splines handle this range well.
             // Clamping to [-1, 1] was too aggressive and destroyed signal variance.
             normalized[i] = normalized[i].clamp(-3.0, 3.0);
         }
@@ -590,7 +616,12 @@ mod tests {
         let config = KANConfig::builder().build().unwrap();
         assert_eq!(config.layer_sizes, vec![1, 5, 1]);
         assert_eq!(config.spline_order, 3);
-        assert_eq!(config.grid_size, 5);
+        assert_eq!(config.grid_size, 8);
+        assert!(
+            (config.momentum - 0.5).abs() < 1e-12,
+            "default momentum should be 0.5, got {}",
+            config.momentum
+        );
     }
 
     #[test]
@@ -826,6 +857,7 @@ mod tests {
         let s = format!("{config}");
         assert!(s.contains("layers="), "display should contain layers");
         assert!(s.contains("k=3"), "display should contain spline order");
+        assert!(s.contains("momentum="), "display should contain momentum");
         assert!(s.contains("decay="), "display should contain decay");
     }
 
