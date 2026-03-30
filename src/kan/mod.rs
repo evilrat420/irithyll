@@ -354,8 +354,9 @@ impl StreamingKAN {
                 1.0
             };
             normalized[i] = (x - self.input_mean[i]) / std;
-            // Clamp to B-spline grid range [-1, 1] for best spline support
-            normalized[i] = normalized[i].clamp(-1.0, 1.0);
+            // Clamp to [-3, 3] — B-splines with grid_size=5 handle this range.
+            // Clamping to [-1, 1] was too aggressive and destroyed signal variance.
+            normalized[i] = normalized[i].clamp(-3.0, 3.0);
         }
         normalized
     }
@@ -363,15 +364,47 @@ impl StreamingKAN {
 
 impl StreamingLearner for StreamingKAN {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
-        // 1. Normalize input
-        let normalized = self.normalize_input(features);
+        // 1. Normalize input (skip during warmup — Welford stats unstable)
+        let normalized = if self.input_count < 50 {
+            // During warmup: use raw features, just clamp to prevent extreme values
+            // Also update Welford stats without applying normalization
+            self.input_count += 1;
+            let n = self.input_count as f64;
+            for (i, &x) in features.iter().enumerate() {
+                if i < self.input_mean.len() {
+                    let delta = x - self.input_mean[i];
+                    self.input_mean[i] += delta / n;
+                    let delta2 = x - self.input_mean[i];
+                    self.input_var[i] += delta * delta2;
+                }
+            }
+            features.iter().map(|x| x.clamp(-3.0, 3.0)).collect()
+        } else {
+            self.normalize_input(features)
+        };
 
         // 2. Forward through all layers, saving activations
         let mut activations: Vec<Vec<f64>> = Vec::with_capacity(self.layers.len() + 1);
         activations.push(normalized.clone());
         let mut current = normalized;
-        for layer in &self.layers {
+        let n_layers = self.layers.len();
+        for (layer_idx, layer) in self.layers.iter().enumerate() {
             current = layer.forward(&current);
+            // Inter-layer normalization: keep hidden activations in B-spline
+            // support range. Skip the last layer (output layer).
+            if layer_idx < n_layers - 1 {
+                let layer_output_max = current
+                    .iter()
+                    .map(|x| x.abs())
+                    .fold(0.0_f64, f64::max)
+                    .max(1.0);
+                if layer_output_max > 5.0 {
+                    let scale = 5.0 / layer_output_max;
+                    for val in current.iter_mut() {
+                        *val *= scale;
+                    }
+                }
+            }
             activations.push(current.clone());
         }
 
@@ -386,11 +419,11 @@ impl StreamingLearner for StreamingKAN {
         const LOSS_ALPHA: f64 = 0.001;
         self.rolling_loss = (1.0 - LOSS_ALPHA) * self.rolling_loss + LOSS_ALPHA * sq_error;
 
-        let effective_lr = if self.rolling_loss > 1e-10 {
+        let effective_lr = if self.n_samples > 500 && self.rolling_loss > 1e-10 {
             let ratio = (sq_error / self.rolling_loss).clamp(0.5, 2.0);
             self.config.lr * ratio
         } else {
-            self.config.lr
+            self.config.lr // Fixed LR during warmup
         };
 
         let lr = effective_lr * weight;
@@ -403,8 +436,9 @@ impl StreamingLearner for StreamingKAN {
 
         // 6. Adaptive coefficient decay: high error → more decay (forget stale
         //    coefficients faster during drift), low error → less decay (conserve
-        //    during stable regimes). Uses the same error ratio as LR modulation.
-        if self.config.coefficient_decay > 0.0 {
+        //    during stable regimes). Only apply after the model has had time to
+        //    learn (warmup) — early error is learning phase error, not drift.
+        if self.config.coefficient_decay > 0.0 && self.n_samples > 2000 {
             let ratio = if self.rolling_loss > 1e-10 {
                 (sq_error / self.rolling_loss).clamp(0.5, 3.0)
             } else {
@@ -867,6 +901,7 @@ mod tests {
         // Test that adaptive coefficient decay shrinks coefficients over
         // multiple steps. We use a moderate decay and zero learning rate so
         // gradient updates don't add magnitude back, isolating the decay effect.
+        // Note: decay only activates after 2000 samples (warmup protection).
         let config = KANConfig::builder()
             .layer_sizes(vec![1, 5, 1])
             .lr(0.01)
@@ -875,9 +910,9 @@ mod tests {
             .unwrap();
         let mut model = StreamingKAN::new(config);
 
-        // Train a few steps to populate non-zero coefficients and rolling_loss
-        for i in 0..50 {
-            let x = i as f64 * 0.1;
+        // Train past the warmup threshold so decay activates
+        for i in 0..2100 {
+            let x = (i as f64 * 0.03).sin();
             model.train(&[x], x * 2.0);
         }
 
@@ -966,6 +1001,7 @@ mod tests {
         // Train two identical models on the same stable data, then hit one with
         // a large-error sample. The adaptive decay rate on the high-error step
         // should produce different coefficient norms vs a fixed-decay model.
+        // Note: decay only activates after 2000 samples (warmup protection).
         let config = KANConfig::builder()
             .layer_sizes(vec![1, 5, 1])
             .lr(0.01)
@@ -975,8 +1011,8 @@ mod tests {
             .unwrap();
         let mut model = StreamingKAN::new(config);
 
-        // Establish a stable rolling_loss baseline
-        for i in 0..200 {
+        // Train past the warmup threshold to activate decay
+        for i in 0..2100 {
             let x = (i as f64 * 0.05).sin();
             let y = x * 2.0;
             model.train(&[x], y);

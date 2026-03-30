@@ -9,7 +9,7 @@
 //! | Parameter | Default | Description |
 //! |-----------|---------|-------------|
 //! | `d_in` | (required) | Input feature dimension |
-//! | `n_state` | 16 | Hidden state dimension per channel |
+//! | `n_state` | 32 | Hidden state dimension per channel |
 //! | `forgetting_factor` | 0.998 | RLS exponential forgetting |
 //! | `delta_rls` | 100.0 | Initial P matrix diagonal for RLS |
 //! | `seed` | 42 | PRNG seed for SSM weight initialization |
@@ -37,7 +37,7 @@ use crate::error::ConfigError;
 pub struct MambaConfig {
     /// Input/output feature dimension (required, >= 1).
     pub d_in: usize,
-    /// Hidden state dimension per channel (default: 16, >= 1).
+    /// Hidden state dimension per channel (default: 32, >= 1).
     pub n_state: usize,
     /// RLS forgetting factor (default: 0.998, in (0, 1]).
     pub forgetting_factor: f64,
@@ -103,7 +103,7 @@ impl Default for MambaConfigBuilder {
     fn default() -> Self {
         Self {
             d_in: None,
-            n_state: 16,
+            n_state: 32,
             forgetting_factor: 0.998,
             delta_rls: 100.0,
             seed: 42,
@@ -124,7 +124,7 @@ impl MambaConfigBuilder {
         self
     }
 
-    /// Set the hidden state dimension per channel (default: 16, >= 1).
+    /// Set the hidden state dimension per channel (default: 32, >= 1).
     pub fn n_state(mut self, n_state: usize) -> Self {
         self.n_state = n_state;
         self
@@ -211,7 +211,7 @@ mod tests {
     fn builder_defaults() {
         let config = MambaConfig::builder().d_in(4).build().unwrap();
         assert_eq!(config.d_in, 4);
-        assert_eq!(config.n_state, 16);
+        assert_eq!(config.n_state, 32);
         assert!((config.forgetting_factor - 0.998).abs() < 1e-12);
         assert!((config.delta_rls - 100.0).abs() < 1e-12);
         assert_eq!(config.seed, 42);
@@ -299,7 +299,7 @@ mod tests {
         let config = MambaConfig::builder().d_in(4).build().unwrap();
         let s = format!("{}", config);
         assert!(s.contains("d_in=4"), "display should contain d_in");
-        assert!(s.contains("n_state=16"), "display should contain n_state");
+        assert!(s.contains("n_state=32"), "display should contain n_state");
     }
 
     #[test]

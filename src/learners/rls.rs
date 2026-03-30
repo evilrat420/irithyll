@@ -405,7 +405,7 @@ impl StreamingLearner for RecursiveLeastSquares {
 
         // Gain vector: k = (P * x) / (lambda + x^T * P * x)
         let px = mat_vec(&self.p_matrix, features, n);
-        let denom = effective_ff + dot(features, &px);
+        let denom = (effective_ff + dot(features, &px)).max(1e-8);
         let mut k = vec![0.0; n];
         let inv_denom = 1.0 / denom;
         for (ki, &pxi) in k.iter_mut().zip(px.iter()) {

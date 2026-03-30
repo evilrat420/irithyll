@@ -91,9 +91,10 @@ pub struct SelectiveSSM {
 impl SelectiveSSM {
     /// Create a new selective SSM with random weight initialization.
     ///
-    /// Weights are initialized from a small normal distribution (scale 0.01)
+    /// Weights are initialized from a small normal distribution (scale 0.1)
     /// using the provided seed for reproducibility. A is initialized via the
-    /// Mamba strategy (A_n = -(n+1)).
+    /// Mamba strategy (A_n = -(n+1)). Skip connections (D) are initialized
+    /// to 1.0 to enable input passthrough by default.
     ///
     /// # Arguments
     ///
@@ -111,7 +112,7 @@ impl SelectiveSSM {
     pub fn new(d_in: usize, n_state: usize, seed: u64) -> Self {
         let log_a = mamba_init(n_state);
         let mut rng = Xorshift64(seed);
-        let scale = 0.01;
+        let scale = 0.1;
 
         // Initialize projection weights from small normal distribution
         let w_delta: Vec<f64> = (0..d_in).map(|_| rng.next_normal() * scale).collect();
@@ -122,7 +123,7 @@ impl SelectiveSSM {
         let w_c: Vec<f64> = (0..n_state * d_in)
             .map(|_| rng.next_normal() * scale)
             .collect();
-        let d_skip = vec![0.0; d_in];
+        let d_skip = vec![1.0; d_in];
         let h = vec![0.0; d_in * n_state];
 
         Self {

@@ -154,10 +154,14 @@ impl TTTLayer {
 
         let d = self.d_state;
 
+        // Normalize input to prevent large projections (L2 norm, floor at 1.0)
+        let input_norm: f64 = features.iter().map(|x| x * x).sum::<f64>().sqrt().max(1.0);
+        let normalized: Vec<f64> = features.iter().map(|x| x / input_norm).collect();
+
         // 1. Project: k, v, q (each d_state-dimensional)
-        let k = mat_vec_mul(&self.w_k, features, d);
-        let v = mat_vec_mul(&self.w_v, features, d);
-        let q = mat_vec_mul(&self.w_q, features, d);
+        let k = mat_vec_mul(&self.w_k, &normalized, d);
+        let v = mat_vec_mul(&self.w_v, &normalized, d);
+        let q = mat_vec_mul(&self.w_q, &normalized, d);
 
         // 2. Inner forward: z = W_fast * k
         let z = fast_mat_vec(&self.w_fast, &k, d);
@@ -170,7 +174,7 @@ impl TTTLayer {
             residual[i] = z[i] - (v[i] - k[i]);
         }
 
-        // 4. Update fast weights
+        // 4. Update fast weights (with gradient clipping to prevent explosion)
         if self.use_momentum {
             // Titans: S = momentum_decay * S - eta * (residual * k^T)
             //         W = (1 - alpha) * W + S
@@ -178,8 +182,9 @@ impl TTTLayer {
                 for j in 0..d {
                     let idx = i * d + j;
                     let grad = residual[i] * k[j];
+                    let clipped_grad = grad.clamp(-1.0, 1.0);
                     self.momentum_buf[idx] =
-                        self.momentum_decay * self.momentum_buf[idx] - self.eta * grad;
+                        self.momentum_decay * self.momentum_buf[idx] - self.eta * clipped_grad;
                     self.w_fast[idx] =
                         (1.0 - self.alpha) * self.w_fast[idx] + self.momentum_buf[idx];
                 }
@@ -190,13 +195,27 @@ impl TTTLayer {
                 for j in 0..d {
                     let idx = i * d + j;
                     let grad = residual[i] * k[j];
-                    self.w_fast[idx] = (1.0 - self.alpha) * self.w_fast[idx] - self.eta * grad;
+                    let clipped_grad = grad.clamp(-1.0, 1.0);
+                    self.w_fast[idx] =
+                        (1.0 - self.alpha) * self.w_fast[idx] - self.eta * clipped_grad;
                 }
             }
         }
 
+        // Emergency: scale down fast weights if they explode
+        let w_max = self.w_fast.iter().map(|x| x.abs()).fold(0.0_f64, f64::max);
+        if w_max > 1e4 || w_max.is_nan() {
+            let scale = 1e3 / w_max.max(1e-15);
+            for w in &mut self.w_fast {
+                *w *= scale;
+            }
+        }
+
         // 5. Output: q + W_fast * q (residual connection)
-        let wq = fast_mat_vec(&self.w_fast, &q, d);
+        let mut wq = fast_mat_vec(&self.w_fast, &q, d);
+        for val in wq.iter_mut() {
+            *val = val.clamp(-10.0, 10.0);
+        }
         let mut output = vec![0.0; d];
         for i in 0..d {
             output[i] = q[i] + wq[i];
