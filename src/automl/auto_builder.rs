@@ -112,12 +112,19 @@ impl FeasibleRegion {
 
         let n_bins_upper = 64usize.min(self.n_samples / 4).max(8);
 
+        // Lambda bounds: derived from target scale so regularization matches
+        // gradient magnitude. High-variance targets need higher lambda, low-variance
+        // need lower. Prevents stumpy trees from over-regularization.
+        let target_std = self.target_epsilon * 10.0; // undo the 0.1 scaling from from_data()
+        let lambda_center = target_std.max(0.01);
+        let lambda_bounds = (lambda_center * 0.1, lambda_center * 3.0);
+
         ConfigBounds {
             max_depth: (2, max_depth_upper),
             n_steps: (3, n_steps_upper),
             grace_period: (3, gp_upper),
             learning_rate: (0.05, 0.3),
-            lambda: (0.1, 5.0),
+            lambda: lambda_bounds,
             n_bins: (8, n_bins_upper),
             feature_subsample: (0.5, 1.0),
         }
