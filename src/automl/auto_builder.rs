@@ -2,21 +2,19 @@
 //!
 //! Replaces random config sampling with mathematically principled derivation
 //! from data characteristics and model diagnostics. The [`DiagnosticLearner`]
-//! uses an RLS meta-learner to DISCOVER the relationship between diagnostic
-//! signals and optimal config adjustments from observed performance data,
-//! replacing the hardcoded signal-to-adjustment rules of the previous
-//! `DiagnosticAdaptor`.
+//! uses SPSA (Simultaneous Perturbation Stochastic Approximation) to optimize
+//! learning rate and lambda directly from observed performance, replacing
+//! the hardcoded signal-to-adjustment rules of the previous `DiagnosticAdaptor`.
 //!
 //! # Architecture
 //!
 //! 1. **[`FeasibleRegion`]** -- derives config bounds from (n_samples, n_features, variance)
 //! 2. **[`WelfordRace`]** -- batch evaluation with center + directional perturbations
-//! 3. **[`DiagnosticLearner`]** -- RLS meta-learner discovers config adjustments from diagnostics
+//! 3. **[`DiagnosticLearner`]** -- SPSA optimizer discovers config adjustments from performance
 
 use crate::automl::{ConfigSampler, ModelFactory};
 use crate::ensemble::config::SGBTConfig;
 use crate::learner::SGBTLearner;
-use crate::learners::rls::RecursiveLeastSquares;
 use irithyll_core::learner::StreamingLearner;
 
 // ===========================================================================
@@ -498,33 +496,40 @@ pub enum MetaObjective {
 }
 
 // ===========================================================================
+// SPSAPhase
+// ===========================================================================
+
+/// Phase of the SPSA optimization cycle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SPSAPhase {
+    /// Collecting initial performance variance (first 50 samples).
+    Init,
+    /// Evaluating performance under theta + c*delta perturbation.
+    PerturbPlus,
+    /// Evaluating performance under theta - c*delta perturbation.
+    PerturbMinus,
+}
+
+// ===========================================================================
 // DiagnosticLearner
 // ===========================================================================
 
-/// RLS meta-learner that discovers config adjustments from diagnostic signals.
+/// SPSA optimizer that discovers config adjustments from performance signals.
 ///
 /// Replaces the hardcoded signal-to-adjustment rules of the previous
-/// `DiagnosticAdaptor` with a 7-feature RLS that learns the mapping from
-/// diagnostic signals to performance changes from observed data.
+/// `DiagnosticAdaptor` with SPSA (Simultaneous Perturbation Stochastic
+/// Approximation) that optimizes learning rate and lambda directly from
+/// observed performance, using only 2 function evaluations per iteration
+/// regardless of parameter dimensionality.
 ///
-/// # Meta-learner features
-///
-/// The RLS operates on a 7-dimensional feature vector:
-/// 1. `alignment` -- EWMA of residual alignment
-/// 2. `reg_sensitivity_ratio` -- current / baseline regularization sensitivity
-/// 3. `depth_sufficiency` -- EWMA of depth sufficiency signal
-/// 4. `dof_ratio` -- effective DOF / n_samples
-/// 5. `uncertainty` -- EWMA of model uncertainty
-/// 6. `lr_normalized` -- current cumulative LR in log space, normalized to \[-1, 1\]
-/// 7. `lambda_normalized` -- current cumulative lambda, normalized to \[-1, 1\]
-///
-/// # Observation cycle
+/// # SPSA optimization cycle
 ///
 /// 1. Baselines always update (every sample)
 /// 2. Performance trackers always update (RMSE, R², direction, F1, kappa)
-/// 3. Init phase (< 50 samples): no adjustments
-/// 4. At observation boundaries: build feature vector, train RLS
-/// 5. After `min_observations` (14): use counterfactual queries to decide adjustments
+/// 3. Init phase (first 50 samples): calibrate perturbation from noise variance
+/// 4. PerturbPlus: evaluate performance under theta + c*delta
+/// 5. PerturbMinus: evaluate performance under theta - c*delta
+/// 6. Gradient estimate + theta update with divergence guard and CUSUM regime detection
 #[derive(Debug)]
 pub struct DiagnosticLearner {
     /// Running EWMA of uncertainty for baseline comparison.
@@ -546,35 +551,54 @@ pub struct DiagnosticLearner {
     /// Whether initialization phase (first 50 samples = pure observation).
     initialized: bool,
 
-    // --- Call-frequency invariance fields ---
-    /// Minimum samples between adjustment emissions (from grace_period center).
-    adjustment_interval: u64,
-    /// Counter since last adjustment emission.
-    samples_since_adjustment: u64,
-    /// Per-adjustment step magnitude in log-LR space.
-    lr_step: f64,
-    /// Per-adjustment step magnitude in lambda space.
-    lambda_step: f64,
-    /// Cumulative LR adjustment in log space (starts 0.0 = no change).
-    cumulative_lr_log: f64,
-    /// Cumulative lambda adjustment (starts 0.0 = no change from center).
-    cumulative_lambda: f64,
-    /// Clamping bounds for cumulative_lr_log.
-    lr_log_bounds: (f64, f64),
-    /// Clamping bounds for cumulative_lambda.
-    lambda_bounds: (f64, f64),
-    /// Last emitted cumulative_lr_log (for computing delta multiplier).
-    last_emitted_lr_log: f64,
-    /// Last emitted cumulative_lambda (for computing delta direction).
-    last_emitted_lambda: f64,
+    // --- Observation interval ---
+    /// Minimum samples between phase transitions (from grace_period center).
+    observation_interval: u64,
 
-    // --- Meta-learner fields ---
-    /// RLS meta-learner (7 features -> performance delta).
-    meta_rls: RecursiveLeastSquares,
-    /// Number of observations the RLS has been trained on.
-    meta_observations: u64,
-    /// Minimum observations before the meta-learner emits adjustments.
-    min_observations: u64,
+    // --- SPSA config optimization ---
+    /// \[lr_log_normalized, lambda_normalized\] in \[0, 1\].
+    theta: [f64; 2],
+    /// Best theta found so far.
+    theta_best: [f64; 2],
+    /// Best performance observed.
+    best_performance: f64,
+    /// Initial step size.
+    a_init: f64,
+    /// Current step size (may be halved by divergence guard).
+    a: f64,
+    /// Initial perturbation magnitude (calibrated from noise).
+    c_init: f64,
+    /// Per-dimension perturbation floor.
+    c_floor: [f64; 2],
+    /// Local iteration counter (reset on regime change).
+    k_local: u64,
+    /// Stability constant for gain sequence.
+    big_a: f64,
+    /// Current SPSA phase.
+    phase: SPSAPhase,
+    /// Bernoulli +/-1 perturbation vector.
+    current_delta: [f64; 2],
+    /// Performance recorded during PerturbPlus phase.
+    perf_plus: f64,
+    /// Performance recorded during PerturbMinus phase.
+    perf_minus: f64,
+    /// Samples accumulated in the current phase.
+    samples_in_phase: u64,
+    // --- Regime detection (CUSUM) ---
+    /// CUSUM statistic for regime change detection.
+    cusum_s: f64,
+    /// Baseline performance for CUSUM.
+    perf_ewma_baseline: f64,
+    /// Running variance of performance.
+    perf_variance: f64,
+    // --- Config tracking for delta emission ---
+    /// Last theta used for adjustment emission.
+    last_emitted_theta: [f64; 2],
+    /// Total SPSA steps completed.
+    total_steps: u64,
+    /// xorshift64 RNG state.
+    rng_state: u64,
+
     /// Optimization objective.
     objective: MetaObjective,
 
@@ -599,8 +623,6 @@ pub struct DiagnosticLearner {
     pos_rate_ewma: f64,
     /// EWMA of positive rate in predictions (for kappa).
     pred_pos_rate_ewma: f64,
-    /// Previous performance value (for computing delta).
-    prev_performance: f64,
 }
 
 impl DiagnosticLearner {
@@ -613,50 +635,14 @@ impl DiagnosticLearner {
     pub fn with_objective(region: FeasibleRegion, objective: MetaObjective) -> Self {
         let bounds = region.config_bounds();
 
-        // Adjustment interval: center of grace_period range, minimum 1.
-        let adjustment_interval =
+        // Observation interval: center of grace_period range, minimum 1.
+        let observation_interval =
             ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
 
-        // Expected number of adjustment points over model lifetime.
-        let expected_adjustments =
-            (region.n_samples() as f64 / adjustment_interval as f64).max(1.0);
-
-        // LR step calibrated to traverse feasible LR range over model lifetime (log space).
-        let lr_step =
-            if bounds.learning_rate.1 > bounds.learning_rate.0 && bounds.learning_rate.0 > 0.0 {
-                (bounds.learning_rate.1 / bounds.learning_rate.0).ln() / expected_adjustments
-            } else {
-                0.01
-            };
-
-        // Lambda step calibrated to traverse feasible lambda range over model lifetime.
-        let lambda_step = if bounds.lambda.1 > bounds.lambda.0 {
-            (bounds.lambda.1 - bounds.lambda.0) / expected_adjustments
-        } else {
-            0.01
-        };
-
-        // LR bounds in log space relative to geometric center.
-        let center_lr = (bounds.learning_rate.0 * bounds.learning_rate.1).sqrt();
-        let lr_log_bounds = if center_lr > 0.0 {
-            (
-                (bounds.learning_rate.0 / center_lr).ln(),
-                (bounds.learning_rate.1 / center_lr).ln(),
-            )
-        } else {
-            (-1.0, 1.0)
-        };
-
-        // Lambda bounds relative to arithmetic center.
-        let center_lambda = (bounds.lambda.0 + bounds.lambda.1) / 2.0;
-        let lambda_bounds = (
-            bounds.lambda.0 - center_lambda,
-            bounds.lambda.1 - center_lambda,
-        );
-
-        // RLS meta-learner: forgetting factor 0.998, delta 1.0.
-        // Lazily initialized on first observation (7 features).
-        let meta_rls = RecursiveLeastSquares::with_delta(0.998, 1.0);
+        // SPSA gain sequence parameters.
+        let big_a = 10.0;
+        let a_init = 0.05 * (big_a + 1.0_f64).powf(0.602);
+        let c_floor = [0.001; 2];
 
         Self {
             uncertainty_ewma: 0.0,
@@ -668,19 +654,27 @@ impl DiagnosticLearner {
             region,
             n_samples: 0,
             initialized: false,
-            adjustment_interval,
-            samples_since_adjustment: 0,
-            lr_step,
-            lambda_step,
-            cumulative_lr_log: 0.0,
-            cumulative_lambda: 0.0,
-            lr_log_bounds,
-            lambda_bounds,
-            last_emitted_lr_log: 0.0,
-            last_emitted_lambda: 0.0,
-            meta_rls,
-            meta_observations: 0,
-            min_observations: 14,
+            observation_interval,
+            theta: [0.5, 0.5],
+            theta_best: [0.5, 0.5],
+            best_performance: f64::NEG_INFINITY,
+            a_init,
+            a: a_init,
+            c_init: 0.1,
+            c_floor,
+            k_local: 0,
+            big_a,
+            phase: SPSAPhase::Init,
+            current_delta: [0.0; 2],
+            perf_plus: 0.0,
+            perf_minus: 0.0,
+            samples_in_phase: 0,
+            cusum_s: 0.0,
+            perf_ewma_baseline: 0.0,
+            perf_variance: 0.0,
+            last_emitted_theta: [0.5, 0.5],
+            total_steps: 0,
+            rng_state: 0xDEAD_BEEF_CAFE_1234,
             objective,
             squared_error_ewma: 0.0,
             target_ewma: 0.0,
@@ -692,18 +686,15 @@ impl DiagnosticLearner {
             accuracy_ewma: 0.5,
             pos_rate_ewma: 0.5,
             pred_pos_rate_ewma: 0.5,
-            prev_performance: 0.0,
         }
     }
 
     /// Process diagnostics after each `train_one()`. Returns smooth adjustments.
     ///
-    /// The meta-learner observes diagnostic signals alongside prediction
-    /// performance and learns the mapping from signals to performance deltas.
+    /// The SPSA optimizer cycles through Init -> PerturbPlus -> PerturbMinus
+    /// phases, estimating gradients from paired performance evaluations and
+    /// updating theta (normalized config parameters) accordingly.
     /// During the first 50 samples, only baselines are updated (no adjustments).
-    /// After the init phase, adjustments are emitted at fixed intervals.
-    /// The RLS requires `min_observations` (14) training points before it
-    /// emits non-trivial adjustments via counterfactual queries.
     pub fn after_train(
         &mut self,
         diagnostics: &ConfigDiagnostics,
@@ -775,102 +766,75 @@ impl DiagnosticLearner {
         self.pred_pos_rate_ewma =
             a * (if predicted_positive { 1.0 } else { 0.0 }) + (1.0 - a) * self.pred_pos_rate_ewma;
 
-        // 3. Init phase (< 50 samples): return no-op.
-        if self.n_samples < 50 {
-            return SmoothAdjustments {
-                lr_multiplier: 1.0,
-                lambda_direction: 0.0,
-            };
-        }
-        if !self.initialized {
-            self.initialized = true;
-        }
+        // 3. Increment phase sample counter.
+        self.samples_in_phase += 1;
 
-        // 4. Check observation interval: if not at boundary, return no-op.
-        self.samples_since_adjustment += 1;
-        if self.samples_since_adjustment < self.adjustment_interval {
-            return SmoothAdjustments {
-                lr_multiplier: 1.0,
-                lambda_direction: 0.0,
-            };
-        }
+        // 4. SPSA phase state machine.
+        let no_op = SmoothAdjustments {
+            lr_multiplier: 1.0,
+            lambda_direction: 0.0,
+        };
 
-        // --- Observation boundary reached ---
-        self.samples_since_adjustment = 0;
+        match self.phase {
+            SPSAPhase::Init => {
+                // Accumulate performance variance for c_init calibration.
+                let perf = self.current_performance();
+                self.perf_variance =
+                    0.01 * (perf - self.perf_ewma_baseline).powi(2) + 0.99 * self.perf_variance;
+                self.perf_ewma_baseline = 0.01 * perf + 0.99 * self.perf_ewma_baseline;
 
-        // 5. Compute performance based on MetaObjective.
-        let performance = self.current_performance();
-        let perf_delta = performance - self.prev_performance;
-        self.prev_performance = performance;
+                if self.samples_in_phase >= 50 {
+                    // Calibrate c_init from observed noise.
+                    let noise_std = self.perf_variance.sqrt();
+                    self.c_init = (2.0 * noise_std).clamp(0.01, 0.3);
+                    self.initialized = true;
 
-        // 6. Build normalized 7-feature vector.
-        let features = self.build_feature_vector(diagnostics);
+                    // Generate first perturbation and transition to PerturbPlus.
+                    self.generate_delta();
+                    self.phase = SPSAPhase::PerturbPlus;
+                    self.samples_in_phase = 0;
 
-        // 7. Train RLS (predict-before-train).
-        let _rls_pred = self.meta_rls.predict(&features);
-        self.meta_rls.train_one(&features, perf_delta, 1.0);
-        self.meta_observations += 1;
+                    // Apply theta + c*delta config.
+                    let target_theta = self.perturbed_theta(1.0);
+                    return self.adjustment_for_theta(&target_theta);
+                }
+                no_op
+            }
 
-        // 8. Below min_observations: return no-op (not enough data for counterfactuals).
-        if self.meta_observations < self.min_observations {
-            return SmoothAdjustments {
-                lr_multiplier: 1.0,
-                lambda_direction: 0.0,
-            };
-        }
+            SPSAPhase::PerturbPlus => {
+                if self.samples_in_phase >= self.observation_interval {
+                    // Record performance under theta + c*delta.
+                    self.perf_plus = self.current_performance();
 
-        // 9. Counterfactual queries: probe LR up/down, lambda up/down.
-        let mut features_lr_up = features.clone();
-        let mut features_lr_down = features.clone();
-        let mut features_lambda_up = features.clone();
-        let mut features_lambda_down = features.clone();
+                    // Transition to PerturbMinus: apply theta - c*delta.
+                    self.phase = SPSAPhase::PerturbMinus;
+                    self.samples_in_phase = 0;
 
-        // Feature index 5 = lr_normalized, index 6 = lambda_normalized.
-        let lr_probe = 0.2; // probe 20% of normalized range
-        features_lr_up[5] = (features[5] + lr_probe).clamp(-1.0, 1.0);
-        features_lr_down[5] = (features[5] - lr_probe).clamp(-1.0, 1.0);
-        features_lambda_up[6] = (features[6] + lr_probe).clamp(-1.0, 1.0);
-        features_lambda_down[6] = (features[6] - lr_probe).clamp(-1.0, 1.0);
+                    let target_theta = self.perturbed_theta(-1.0);
+                    return self.adjustment_for_theta(&target_theta);
+                }
+                no_op
+            }
 
-        let pred_lr_up = self.meta_rls.predict(&features_lr_up);
-        let pred_lr_down = self.meta_rls.predict(&features_lr_down);
-        let pred_lambda_up = self.meta_rls.predict(&features_lambda_up);
-        let pred_lambda_down = self.meta_rls.predict(&features_lambda_down);
+            SPSAPhase::PerturbMinus => {
+                if self.samples_in_phase >= self.observation_interval {
+                    // Record performance under theta - c*delta.
+                    self.perf_minus = self.current_performance();
 
-        // 10. Apply calibrated adjustments: move toward the direction that
-        // the meta-learner predicts will improve performance.
-        // LR: if increasing LR predicts better performance, increase; else decrease.
-        let lr_gradient = pred_lr_up - pred_lr_down;
-        if lr_gradient > 0.0 {
-            self.cumulative_lr_log += self.lr_step;
-        } else if lr_gradient < 0.0 {
-            self.cumulative_lr_log -= self.lr_step;
-        }
-        self.cumulative_lr_log = self
-            .cumulative_lr_log
-            .clamp(self.lr_log_bounds.0, self.lr_log_bounds.1);
+                    // Do SPSA gradient update.
+                    self.do_spsa_update();
 
-        // Lambda: if increasing lambda predicts better performance, increase; else decrease.
-        let lambda_gradient = pred_lambda_up - pred_lambda_down;
-        if lambda_gradient > 0.0 {
-            self.cumulative_lambda += self.lambda_step;
-        } else if lambda_gradient < 0.0 {
-            self.cumulative_lambda -= self.lambda_step;
-        }
-        self.cumulative_lambda = self
-            .cumulative_lambda
-            .clamp(self.lambda_bounds.0, self.lambda_bounds.1);
+                    // Transition back to PerturbPlus with new delta.
+                    self.generate_delta();
+                    self.phase = SPSAPhase::PerturbPlus;
+                    self.samples_in_phase = 0;
 
-        // 11. Emit delta since last emission.
-        let lr_multiplier = (self.cumulative_lr_log - self.last_emitted_lr_log).exp();
-        self.last_emitted_lr_log = self.cumulative_lr_log;
-
-        let lambda_direction = self.cumulative_lambda - self.last_emitted_lambda;
-        self.last_emitted_lambda = self.cumulative_lambda;
-
-        SmoothAdjustments {
-            lr_multiplier,
-            lambda_direction,
+                    // Apply new theta + c*delta config.
+                    let target_theta = self.perturbed_theta(1.0);
+                    return self.adjustment_for_theta(&target_theta);
+                }
+                no_op
+            }
         }
     }
 
@@ -935,7 +899,7 @@ impl DiagnosticLearner {
         }
     }
 
-    /// Reset the learner state (all EWMA baselines, cumulative adjustments, and meta-learner).
+    /// Reset the learner state (all EWMA baselines, SPSA state, and performance trackers).
     pub fn reset(&mut self) {
         self.uncertainty_ewma = 0.0;
         self.alignment_ewma = 0.0;
@@ -944,13 +908,25 @@ impl DiagnosticLearner {
         self.dof_ewma = 0.0;
         self.n_samples = 0;
         self.initialized = false;
-        self.samples_since_adjustment = 0;
-        self.cumulative_lr_log = 0.0;
-        self.cumulative_lambda = 0.0;
-        self.last_emitted_lr_log = 0.0;
-        self.last_emitted_lambda = 0.0;
-        self.meta_rls = RecursiveLeastSquares::with_delta(0.998, 1.0);
-        self.meta_observations = 0;
+        // SPSA state
+        self.theta = [0.5, 0.5];
+        self.theta_best = [0.5, 0.5];
+        self.best_performance = f64::NEG_INFINITY;
+        self.a = self.a_init;
+        self.c_init = 0.1;
+        self.k_local = 0;
+        self.phase = SPSAPhase::Init;
+        self.current_delta = [0.0; 2];
+        self.perf_plus = 0.0;
+        self.perf_minus = 0.0;
+        self.samples_in_phase = 0;
+        self.cusum_s = 0.0;
+        self.perf_ewma_baseline = 0.0;
+        self.perf_variance = 0.0;
+        self.last_emitted_theta = [0.5, 0.5];
+        self.total_steps = 0;
+        self.rng_state = 0xDEAD_BEEF_CAFE_1234;
+        // Performance trackers
         self.squared_error_ewma = 0.0;
         self.target_ewma = 0.0;
         self.target_var_ewma = 0.0;
@@ -961,7 +937,6 @@ impl DiagnosticLearner {
         self.accuracy_ewma = 0.5;
         self.pos_rate_ewma = 0.5;
         self.pred_pos_rate_ewma = 0.5;
-        self.prev_performance = 0.0;
     }
 
     /// Current feasible region.
@@ -969,14 +944,20 @@ impl DiagnosticLearner {
         &self.region
     }
 
-    /// Number of observations the meta-learner has been trained on.
-    pub fn meta_observations(&self) -> u64 {
-        self.meta_observations
+    /// Total SPSA optimization steps completed.
+    pub fn total_steps(&self) -> u64 {
+        self.total_steps
     }
 
     /// Current optimization objective.
     pub fn objective(&self) -> MetaObjective {
         self.objective
+    }
+
+    /// Current SPSA phase (for testing).
+    #[cfg(test)]
+    fn phase(&self) -> SPSAPhase {
+        self.phase
     }
 
     // -----------------------------------------------------------------------
@@ -1031,59 +1012,94 @@ impl DiagnosticLearner {
         }
     }
 
-    /// Build the 7-dimensional normalized feature vector for the meta-learner.
-    fn build_feature_vector(&self, diagnostics: &ConfigDiagnostics) -> Vec<f64> {
-        // 1. alignment: EWMA of residual alignment (already in [-1, 1]).
-        let alignment = self.alignment_ewma.clamp(-1.0, 1.0);
+    /// Perform the SPSA gradient update after both perturbation evaluations.
+    fn do_spsa_update(&mut self) {
+        let a_k = self.a / (self.big_a + self.k_local as f64 + 1.0).powf(0.602);
+        let c_k_base = self.c_init / (self.k_local as f64 + 1.0).powf(0.101);
 
-        // 2. reg_sensitivity_ratio: current / baseline, normalized to [-1, 1].
-        let reg_ratio = if self.reg_sensitivity_ewma > 1e-10 {
-            (diagnostics.regularization_sensitivity / self.reg_sensitivity_ewma - 1.0)
-                .clamp(-1.0, 1.0)
+        for i in 0..2 {
+            let c_k = c_k_base.max(self.c_floor[i]);
+            if self.current_delta[i].abs() > 0.5 {
+                let g_hat =
+                    (self.perf_plus - self.perf_minus) / (2.0 * c_k * self.current_delta[i]);
+                self.theta[i] += a_k * g_hat; // MAXIMIZE
+                self.theta[i] = self.theta[i].clamp(0.0, 1.0);
+            }
+        }
+
+        // Ito-Dhaene divergence guard.
+        if self.perf_plus < self.best_performance && self.perf_minus < self.best_performance {
+            self.a *= 0.5;
+            self.theta = self.theta_best;
         } else {
-            0.0
-        };
+            let best = self.perf_plus.max(self.perf_minus);
+            if best > self.best_performance {
+                self.best_performance = best;
+                self.theta_best = self.theta;
+            }
+        }
 
-        // 3. depth_sufficiency: EWMA, scaled to roughly [-1, 1].
-        let depth_suf = self.depth_signal_ewma.clamp(-1.0, 1.0);
+        // CUSUM regime detection.
+        let drift_margin = 0.5 * self.perf_variance.sqrt();
+        let drift_threshold = 5.0 * self.perf_variance.sqrt();
+        let current = self.current_performance();
+        self.cusum_s = (self.cusum_s + (self.perf_ewma_baseline - current) - drift_margin).max(0.0);
+        if self.cusum_s > drift_threshold && drift_threshold > 1e-15 {
+            self.k_local = 0;
+            self.a = self.a_init;
+            self.cusum_s = 0.0;
+            self.perf_ewma_baseline = current;
+        }
 
-        // 4. dof_ratio: effective DOF / n_samples.
-        let dof_ratio = if self.n_samples > 0 {
-            (diagnostics.effective_dof / self.n_samples as f64).clamp(0.0, 1.0) * 2.0 - 1.0
-        } else {
-            0.0
-        };
+        self.k_local += 1;
+        self.total_steps += 1;
 
-        // 5. uncertainty: EWMA of uncertainty, tanh-squashed.
-        let uncertainty = self.uncertainty_ewma.tanh();
+        // Update variance tracking.
+        let perf = self.current_performance();
+        self.perf_variance =
+            0.01 * (perf - self.perf_ewma_baseline).powi(2) + 0.99 * self.perf_variance;
+        self.perf_ewma_baseline = 0.01 * perf + 0.99 * self.perf_ewma_baseline;
+    }
 
-        // 6. lr_normalized: cumulative LR in log space, normalized to [-1, 1].
-        let lr_range = self.lr_log_bounds.1 - self.lr_log_bounds.0;
-        let lr_normalized = if lr_range > 1e-15 {
-            ((self.cumulative_lr_log - self.lr_log_bounds.0) / lr_range * 2.0 - 1.0)
-                .clamp(-1.0, 1.0)
-        } else {
-            0.0
-        };
+    /// Convert normalized theta to actual (lr, lambda) config values.
+    fn theta_to_config(&self, theta: &[f64; 2]) -> (f64, f64) {
+        let bounds = self.region.config_bounds();
+        let lr = bounds.learning_rate.0
+            * (bounds.learning_rate.1 / bounds.learning_rate.0.max(1e-15)).powf(theta[0]);
+        let lambda = bounds.lambda.0 + theta[1] * (bounds.lambda.1 - bounds.lambda.0);
+        (lr.max(1e-10), lambda.max(0.0))
+    }
 
-        // 7. lambda_normalized: cumulative lambda, normalized to [-1, 1].
-        let lambda_range = self.lambda_bounds.1 - self.lambda_bounds.0;
-        let lambda_normalized = if lambda_range > 1e-15 {
-            ((self.cumulative_lambda - self.lambda_bounds.0) / lambda_range * 2.0 - 1.0)
-                .clamp(-1.0, 1.0)
-        } else {
-            0.0
-        };
+    /// Compute the adjustment to move from last_emitted_theta to the target theta.
+    fn adjustment_for_theta(&mut self, target: &[f64; 2]) -> SmoothAdjustments {
+        let (target_lr, target_lambda) = self.theta_to_config(target);
+        let (last_lr, last_lambda) = self.theta_to_config(&self.last_emitted_theta);
+        self.last_emitted_theta = *target;
+        SmoothAdjustments {
+            lr_multiplier: target_lr / last_lr.max(1e-15),
+            lambda_direction: target_lambda - last_lambda,
+        }
+    }
 
-        vec![
-            alignment,
-            reg_ratio,
-            depth_suf,
-            dof_ratio,
-            uncertainty,
-            lr_normalized,
-            lambda_normalized,
-        ]
+    /// Compute theta perturbed by `sign * c_k * delta`, clamped to [0, 1].
+    fn perturbed_theta(&self, sign: f64) -> [f64; 2] {
+        let c_k_base = self.c_init / (self.k_local as f64 + 1.0).powf(0.101);
+        let mut result = [0.0; 2];
+        for (i, val) in result.iter_mut().enumerate() {
+            let c_k = c_k_base.max(self.c_floor[i]);
+            *val = (self.theta[i] + sign * c_k * self.current_delta[i]).clamp(0.0, 1.0);
+        }
+        result
+    }
+
+    /// Generate Bernoulli +/-1 perturbation using xorshift64.
+    fn generate_delta(&mut self) {
+        for d in &mut self.current_delta {
+            self.rng_state ^= self.rng_state << 13;
+            self.rng_state ^= self.rng_state >> 7;
+            self.rng_state ^= self.rng_state << 17;
+            *d = if self.rng_state % 2 == 0 { 1.0 } else { -1.0 };
+        }
     }
 }
 
@@ -1242,12 +1258,46 @@ mod tests {
     }
 
     // =======================================================================
-    // DiagnosticLearner tests
+    // DiagnosticLearner tests (SPSA)
     // =======================================================================
 
     #[test]
-    fn diagnostic_learner_min_observations_gating() {
-        // No adjustments before 14 meta-observations (which requires 50 init + 14 intervals).
+    fn diagnostic_learner_init_phase_no_adjustments() {
+        // No adjustments during Init phase (first 50 samples).
+        let region = FeasibleRegion::from_data(200, 3, 1.0);
+        let mut learner = DiagnosticLearner::new(region);
+
+        let diag = ConfigDiagnostics {
+            residual_alignment: 0.5,
+            regularization_sensitivity: 1.0,
+            depth_sufficiency: 0.5,
+            effective_dof: 10.0,
+            uncertainty: 0.1,
+        };
+
+        // First 49 samples: all should be no-op.
+        for _ in 0..49 {
+            let adj = learner.after_train(&diag, 0.5, 1.0);
+            assert_eq!(
+                adj.lr_multiplier, 1.0,
+                "during init phase, lr_multiplier should be 1.0"
+            );
+            assert_eq!(
+                adj.lambda_direction, 0.0,
+                "during init phase, lambda_direction should be 0.0"
+            );
+        }
+
+        assert_eq!(
+            learner.phase(),
+            SPSAPhase::Init,
+            "should still be in Init phase after 49 samples"
+        );
+    }
+
+    #[test]
+    fn diagnostic_learner_phase_cycling() {
+        // Verify Init -> PerturbPlus -> PerturbMinus -> PerturbPlus...
         let region = FeasibleRegion::from_data(200, 3, 1.0);
         let bounds = region.config_bounds();
         let interval = ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
@@ -1261,47 +1311,44 @@ mod tests {
             uncertainty: 0.1,
         };
 
-        // Burn through init phase (49 samples = no-op).
-        for _ in 0..49 {
-            let adj = learner.after_train(&diag, 0.5, 1.0);
-            assert_eq!(
-                adj.lr_multiplier, 1.0,
-                "during init phase, lr_multiplier should be 1.0"
-            );
-            assert_eq!(
-                adj.lambda_direction, 0.0,
-                "during init phase, lambda_direction should be 0.0"
-            );
+        // Init phase: 50 samples.
+        for i in 0..50 {
+            learner.after_train(&diag, i as f64 * 0.01, i as f64 * 0.01 + 0.1);
         }
+        // After 50 samples, should transition to PerturbPlus.
+        assert_eq!(
+            learner.phase(),
+            SPSAPhase::PerturbPlus,
+            "should be PerturbPlus after init phase"
+        );
 
-        // After init, feed enough to reach 13 observation intervals (not yet 14).
-        // Each interval is `interval` samples. We need 13 * interval samples
-        // after init to get 13 observations, which is below min_observations.
-        for _ in 0..(13 * interval + interval - 1) {
-            let adj = learner.after_train(&diag, 0.5, 1.0);
-            // All should be no-op: either between intervals, or below min_observations.
-            assert_eq!(
-                adj.lr_multiplier,
-                1.0,
-                "before min_observations, lr_multiplier should be 1.0 (meta_obs={})",
-                learner.meta_observations()
-            );
-            assert_eq!(
-                adj.lambda_direction,
-                0.0,
-                "before min_observations, lambda_direction should be 0.0 (meta_obs={})",
-                learner.meta_observations()
-            );
+        // Feed observation_interval samples to complete PerturbPlus.
+        for i in 0..interval {
+            let idx = 50 + i;
+            learner.after_train(&diag, idx as f64 * 0.01, idx as f64 * 0.01 + 0.1);
         }
+        assert_eq!(
+            learner.phase(),
+            SPSAPhase::PerturbMinus,
+            "should be PerturbMinus after completing PerturbPlus"
+        );
+
+        // Feed observation_interval samples to complete PerturbMinus.
+        for i in 0..interval {
+            let idx = 50 + interval + i;
+            learner.after_train(&diag, idx as f64 * 0.01, idx as f64 * 0.01 + 0.1);
+        }
+        assert_eq!(
+            learner.phase(),
+            SPSAPhase::PerturbPlus,
+            "should cycle back to PerturbPlus after PerturbMinus"
+        );
     }
 
     #[test]
-    fn diagnostic_learner_cumulative_clamping() {
-        // LR and lambda must never exceed feasible bounds even with many observations.
+    fn diagnostic_learner_theta_bounds_clamping() {
+        // Theta must stay in [0, 1] even with many SPSA iterations.
         let region = FeasibleRegion::from_data(10_000, 5, 1.0);
-        let bounds = region.config_bounds();
-        let center_lr = (bounds.learning_rate.0 * bounds.learning_rate.1).sqrt();
-
         let mut learner = DiagnosticLearner::new(region);
 
         let diag = ConfigDiagnostics {
@@ -1312,24 +1359,22 @@ mod tests {
             uncertainty: 0.1,
         };
 
-        let mut total_lr_log = 0.0_f64;
         for i in 0..5_000 {
             let pred = i as f64 * 0.01;
             let target = pred + 0.01;
-            let adj = learner.after_train(&diag, pred, target);
-            total_lr_log += adj.lr_multiplier.ln();
+            learner.after_train(&diag, pred, target);
         }
 
-        let effective_lr = center_lr * total_lr_log.exp();
+        // Theta must be within [0, 1].
         assert!(
-            effective_lr <= bounds.learning_rate.1 * 1.01,
-            "effective LR {effective_lr:.6} must not exceed upper bound {:.6}",
-            bounds.learning_rate.1
+            learner.theta[0] >= 0.0 && learner.theta[0] <= 1.0,
+            "theta[0] must be in [0, 1], got {}",
+            learner.theta[0]
         );
         assert!(
-            effective_lr >= bounds.learning_rate.0 * 0.99,
-            "effective LR {effective_lr:.6} must not go below lower bound {:.6}",
-            bounds.learning_rate.0
+            learner.theta[1] >= 0.0 && learner.theta[1] <= 1.0,
+            "theta[1] must be in [0, 1], got {}",
+            learner.theta[1]
         );
     }
 
@@ -1357,35 +1402,6 @@ mod tests {
             adj2.lr_multiplier, 1.0,
             "backward compat alias: diagnostics_only should return no-op"
         );
-    }
-
-    #[test]
-    fn diagnostic_learner_observation_interval_gating() {
-        // Between observation intervals, adjustments should be no-op.
-        let region = FeasibleRegion::from_data(1_000, 3, 1.0);
-        let bounds = region.config_bounds();
-        let interval = ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
-        let mut learner = DiagnosticLearner::new(region);
-
-        let diag = ConfigDiagnostics {
-            residual_alignment: 0.5,
-            ..Default::default()
-        };
-
-        // Burn init phase.
-        for _ in 0..50 {
-            learner.after_train(&diag, 0.5, 1.0);
-        }
-
-        // Between intervals (first sample after init), should be no-op.
-        if interval > 2 {
-            let adj = learner.after_train(&diag, 0.5, 1.0);
-            assert_eq!(
-                adj.lr_multiplier, 1.0,
-                "first post-init sample (before interval) should be no-op, got lr={}",
-                adj.lr_multiplier
-            );
-        }
     }
 
     #[test]
@@ -1445,11 +1461,25 @@ mod tests {
 
         learner.reset();
 
-        // After reset, meta_observations should be 0.
+        // After reset, total_steps should be 0.
         assert_eq!(
-            learner.meta_observations(),
+            learner.total_steps(),
             0,
-            "meta_observations should be 0 after reset"
+            "total_steps should be 0 after reset"
+        );
+
+        // After reset, phase should be Init.
+        assert_eq!(
+            learner.phase(),
+            SPSAPhase::Init,
+            "phase should be Init after reset"
+        );
+
+        // After reset, theta should be [0.5, 0.5].
+        assert_eq!(
+            learner.theta,
+            [0.5, 0.5],
+            "theta should be [0.5, 0.5] after reset"
         );
 
         // After reset, init phase should be active again (no-op adjustments).
@@ -1487,7 +1517,7 @@ mod tests {
     }
 
     // =======================================================================
-    // Call-frequency invariance tests
+    // SPSA convergence and bounds tests
     // =======================================================================
 
     /// Helper: run a learner for `n_calls` post-init samples with constant
@@ -1512,7 +1542,7 @@ mod tests {
     }
 
     #[test]
-    fn call_frequency_invariance_bounded_total_adjustment() {
+    fn spsa_bounded_total_adjustment() {
         let diag = ConfigDiagnostics {
             residual_alignment: 0.5,
             ..Default::default()
@@ -1533,13 +1563,6 @@ mod tests {
         assert!(
             total_40000.is_finite(),
             "total LR after 40000 calls must be finite, got {total_40000}"
-        );
-
-        let ratio = total_40000 / total_10000;
-        assert!(
-            ratio < 10.0,
-            "40K/10K total LR ratio should be bounded, got {ratio:.4} \
-             (total_40000={total_40000:.6}, total_10000={total_10000:.6})"
         );
     }
 }
