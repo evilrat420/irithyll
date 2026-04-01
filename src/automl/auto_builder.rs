@@ -657,7 +657,7 @@ impl DiagnosticLearner {
             reg_sensitivity_ewma: 0.0,
             depth_signal_ewma: 0.0,
             dof_ewma: 0.0,
-            alpha: 0.01, // slow EWMA for stable baselines
+            alpha: 1.0 - (-2.0 / observation_interval as f64).exp(),
             region,
             n_samples: 0,
             initialized: false,
@@ -787,8 +787,8 @@ impl DiagnosticLearner {
                 // Accumulate performance variance for c_init calibration.
                 let perf = self.current_performance();
                 self.perf_variance =
-                    0.01 * (perf - self.perf_ewma_baseline).powi(2) + 0.99 * self.perf_variance;
-                self.perf_ewma_baseline = 0.01 * perf + 0.99 * self.perf_ewma_baseline;
+                    a * (perf - self.perf_ewma_baseline).powi(2) + (1.0 - a) * self.perf_variance;
+                self.perf_ewma_baseline = a * perf + (1.0 - a) * self.perf_ewma_baseline;
 
                 if self.samples_in_phase >= 50 {
                     // Calibrate c_init from observed noise.
@@ -1063,9 +1063,10 @@ impl DiagnosticLearner {
 
         // Update variance tracking.
         let perf = self.current_performance();
+        let a = self.alpha;
         self.perf_variance =
-            0.01 * (perf - self.perf_ewma_baseline).powi(2) + 0.99 * self.perf_variance;
-        self.perf_ewma_baseline = 0.01 * perf + 0.99 * self.perf_ewma_baseline;
+            a * (perf - self.perf_ewma_baseline).powi(2) + (1.0 - a) * self.perf_variance;
+        self.perf_ewma_baseline = a * perf + (1.0 - a) * self.perf_ewma_baseline;
     }
 
     /// Convert normalized theta to actual (lr, lambda) config values.

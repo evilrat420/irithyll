@@ -471,6 +471,20 @@ pub struct SGBTConfig {
     /// `None` (default) disables proactive pruning.
     #[serde(default)]
     pub proactive_prune_interval: Option<u64>,
+
+    /// Use accuracy-based pruning instead of variance-based.
+    ///
+    /// When `true`, proactive pruning tracks each tree's signed contribution
+    /// alignment with the ensemble residual. Trees that consistently push
+    /// predictions in the wrong direction get pruned first. Young trees
+    /// (below grace_period samples) are protected from pruning.
+    ///
+    /// When `false` (default), the original variance-based pruning selects
+    /// the tree with the smallest prediction variance for replacement.
+    ///
+    /// Only relevant when `proactive_prune_interval` is `Some`.
+    #[serde(default)]
+    pub accuracy_based_pruning: bool,
 }
 
 fn default_empirical_sigma_alpha() -> f64 {
@@ -526,6 +540,7 @@ impl Default for SGBTConfig {
             soft_routing: false,
             adaptive_mts: None,
             proactive_prune_interval: None,
+            accuracy_based_pruning: false,
         }
     }
 }
@@ -880,6 +895,15 @@ impl SGBTConfigBuilder {
     /// Enables contribution tracking automatically.
     pub fn proactive_prune_interval(mut self, interval: u64) -> Self {
         self.config.proactive_prune_interval = Some(interval);
+        self
+    }
+
+    /// Enable accuracy-based proactive pruning.
+    ///
+    /// When enabled, trees are pruned based on signed contribution alignment
+    /// with the ensemble residual instead of prediction variance.
+    pub fn accuracy_based_pruning(mut self, enabled: bool) -> Self {
+        self.config.accuracy_based_pruning = enabled;
         self
     }
 

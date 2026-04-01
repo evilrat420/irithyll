@@ -283,6 +283,10 @@ pub struct DistributionalSGBT {
     cached_depth_sufficiency: f64,
     /// Cached trace(H/(H+λ)) across all leaves.
     cached_effective_dof: f64,
+    /// Per-tree EWMA of signed contribution accuracy. Positive = helps, negative = hurts.
+    contribution_accuracy: Vec<f64>,
+    /// EWMA alpha for contribution accuracy tracking.
+    prune_alpha: f64,
 }
 
 impl Clone for DistributionalSGBT {
@@ -320,6 +324,8 @@ impl Clone for DistributionalSGBT {
             cached_reg_sensitivity: self.cached_reg_sensitivity,
             cached_depth_sufficiency: self.cached_depth_sufficiency,
             cached_effective_dof: self.cached_effective_dof,
+            contribution_accuracy: self.contribution_accuracy.clone(),
+            prune_alpha: self.prune_alpha,
         }
     }
 }
@@ -413,6 +419,13 @@ impl DistributionalSGBT {
         let scale_mode = config.scale_mode;
         let empirical_sigma_alpha = config.empirical_sigma_alpha;
         let packed_refresh_interval = config.packed_refresh_interval;
+        let n_steps = config.n_steps;
+        let prune_alpha = if let Some(interval) = config.proactive_prune_interval {
+            let interval = interval as f64;
+            1.0 - (-2.0 / interval).exp()
+        } else {
+            0.01
+        };
         Self {
             config,
             location_steps,
@@ -446,6 +459,8 @@ impl DistributionalSGBT {
             cached_reg_sensitivity: 0.0,
             cached_depth_sufficiency: 0.0,
             cached_effective_dof: 0.0,
+            contribution_accuracy: vec![0.0; n_steps],
+            prune_alpha,
         }
     }
 
@@ -538,22 +553,59 @@ impl DistributionalSGBT {
 
         // Proactive pruning: replace worst-contributing location tree every N samples.
         if let Some(interval) = self.config.proactive_prune_interval {
+            // Always update contribution accuracy EWMAs (used by accuracy-based pruning).
+            if self.config.accuracy_based_pruning {
+                let mut location_pred = self.location_base;
+                for step in self.location_steps.iter() {
+                    location_pred += self.config.learning_rate * step.predict(features);
+                }
+                let residual = target - location_pred;
+                let sign = residual.signum();
+                for (i, step) in self.location_steps.iter().enumerate() {
+                    let contribution = self.config.learning_rate * step.predict(features);
+                    let alignment = contribution * sign;
+                    self.contribution_accuracy[i] = self.prune_alpha * alignment
+                        + (1.0 - self.prune_alpha) * self.contribution_accuracy[i];
+                }
+            }
+
             if interval > 0 && self.samples_seen % interval == 0 && self.location_steps.len() > 1 {
-                // Find worst step by prediction variance (smallest = least contribution).
-                let worst_idx = self
-                    .location_steps
-                    .iter()
-                    .enumerate()
-                    .min_by(|(_, a), (_, b)| {
-                        let a_std = a.slot().prediction_std();
-                        let b_std = b.slot().prediction_std();
-                        a_std
-                            .partial_cmp(&b_std)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                self.location_steps[worst_idx].slot_mut().replace_active();
+                if self.config.accuracy_based_pruning {
+                    // Accuracy-based: prune tree with most negative contribution alignment.
+                    // Protects young trees (below grace_period) and only prunes if harmful.
+                    let grace_period = self.config.grace_period as u64;
+                    let worst = self
+                        .location_steps
+                        .iter()
+                        .enumerate()
+                        .zip(self.contribution_accuracy.iter())
+                        .filter(|((_, step), _)| step.slot().n_samples_seen() >= grace_period)
+                        .min_by(|((_, _), a), ((_, _), b)| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                    if let Some(((worst_idx, _), &worst_acc)) = worst {
+                        if worst_acc < 0.0 {
+                            self.location_steps[worst_idx].slot_mut().replace_active();
+                            self.contribution_accuracy[worst_idx] = 0.0;
+                        }
+                    }
+                } else {
+                    // Variance-based (default): prune tree with smallest prediction variance.
+                    let worst_idx = self
+                        .location_steps
+                        .iter()
+                        .enumerate()
+                        .min_by(|(_, a), (_, b)| {
+                            let a_std = a.slot().prediction_std();
+                            let b_std = b.slot().prediction_std();
+                            a_std
+                                .partial_cmp(&b_std)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.location_steps[worst_idx].slot_mut().replace_active();
+                }
             }
         }
 
@@ -1432,6 +1484,7 @@ impl DistributionalSGBT {
         self.cached_reg_sensitivity = 0.0;
         self.cached_depth_sufficiency = 0.0;
         self.cached_effective_dof = 0.0;
+        self.contribution_accuracy = vec![0.0; self.location_steps.len()];
     }
 
     /// Total samples trained.
@@ -1558,6 +1611,7 @@ impl DistributionalSGBT {
             self.location_steps.truncate(n);
             self.scale_steps.truncate(n);
         }
+        self.contribution_accuracy.resize(n, 0.0);
         self.config.n_steps = n;
     }
 
@@ -1989,6 +2043,13 @@ impl DistributionalSGBT {
         let scale_mode = state.config.scale_mode;
         let empirical_sigma_alpha = state.config.empirical_sigma_alpha;
         let packed_refresh_interval = state.config.packed_refresh_interval;
+        let n_location_steps = location_steps.len();
+        let prune_alpha = if let Some(interval) = state.config.proactive_prune_interval {
+            let interval = interval as f64;
+            1.0 - (-2.0 / interval).exp()
+        } else {
+            0.01
+        };
         Self {
             config: state.config,
             location_steps,
@@ -2022,6 +2083,8 @@ impl DistributionalSGBT {
             cached_reg_sensitivity: 0.0,
             cached_depth_sufficiency: 0.0,
             cached_effective_dof: 0.0,
+            contribution_accuracy: vec![0.0; n_location_steps],
+            prune_alpha,
         }
     }
 }
