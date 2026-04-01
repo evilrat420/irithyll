@@ -549,6 +549,7 @@ pub struct Factory {
     warmup: usize,
     complexity: usize,
     seed: u64,
+    accuracy_based_pruning: bool,
 }
 
 impl Factory {
@@ -603,6 +604,7 @@ impl Factory {
             warmup: 0,
             complexity: 500,
             seed: 42,
+            accuracy_based_pruning: false,
         }
     }
 
@@ -658,6 +660,7 @@ impl Factory {
             warmup: 0,
             complexity: 1000,
             seed: 42,
+            accuracy_based_pruning: false,
         }
     }
 
@@ -697,6 +700,7 @@ impl Factory {
             warmup: 50,
             complexity: 10000,
             seed: 42,
+            accuracy_based_pruning: false,
         }
     }
 
@@ -730,6 +734,7 @@ impl Factory {
             warmup: 10,
             complexity: 4000,
             seed: 42,
+            accuracy_based_pruning: false,
         }
     }
 
@@ -762,6 +767,7 @@ impl Factory {
             warmup: 10,
             complexity: 8000,
             seed: 42,
+            accuracy_based_pruning: false,
         }
     }
 
@@ -801,6 +807,7 @@ impl Factory {
             warmup: 20,
             complexity: 16000,
             seed: 42,
+            accuracy_based_pruning: false,
         }
     }
 
@@ -844,6 +851,7 @@ impl Factory {
             warmup: 20,
             complexity: 2000,
             seed: 42,
+            accuracy_based_pruning: false,
         }
     }
 
@@ -882,6 +890,7 @@ impl Factory {
             warmup: 10,
             complexity: 3000,
             seed: 42,
+            accuracy_based_pruning: false,
         }
     }
 
@@ -910,6 +919,16 @@ impl Factory {
     /// Override the default seed for algorithms that use one (ESN, SpikeNet).
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
+        self
+    }
+
+    /// Enable accuracy-based pruning for SGBT/Distributional factories.
+    ///
+    /// When enabled, proactive pruning replaces the tree with the most negative
+    /// contribution alignment instead of the tree with lowest prediction variance.
+    /// Has no effect on non-tree algorithms.
+    pub fn with_accuracy_based_pruning(mut self, enabled: bool) -> Self {
+        self.accuracy_based_pruning = enabled;
         self
     }
 
@@ -964,6 +983,7 @@ impl ModelFactory for Factory {
                     .lambda(lambda)
                     .feature_subsample_rate(feature_subsample_rate)
                     .grace_period(grace_period)
+                    .accuracy_based_pruning(self.accuracy_based_pruning)
                     .build()
                     .expect("Factory::create(Sgbt): invalid config from search space");
 
@@ -986,6 +1006,7 @@ impl ModelFactory for Factory {
                     .lambda(lambda)
                     .feature_subsample_rate(feature_subsample_rate)
                     .grace_period(grace_period)
+                    .accuracy_based_pruning(self.accuracy_based_pruning)
                     .build()
                     .expect("Factory::create(Distributional): invalid config from search space");
 
