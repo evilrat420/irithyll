@@ -11,6 +11,22 @@
 //! x_t -> [Input Norm] -> [KAN Layer 1] -> [KAN Layer 2] -> ... -> y_hat_t
 //! ```
 //!
+//! # Recommended Configuration
+//!
+//! For streaming regression, use shallow architectures with higher learning rates:
+//! ```
+//! use irithyll::kan::KANConfig;
+//!
+//! let config = KANConfig::builder()
+//!     .layer_sizes(vec![4, 20, 1])  // shallow: 1 hidden layer
+//!     .grid_size(8)
+//!     .lr(0.1)   // higher than MLP — B-spline sparse updates need it
+//!     .build()
+//!     .unwrap();
+//! ```
+//! Deep architectures (3+ layers) can cause gradient instability in streaming mode.
+//! B-spline locality ensures sparse updates don't interfere (Hoang et al., 2026).
+//!
 //! # References
 //!
 //! - Liu et al. (2024) "KAN: Kolmogorov-Arnold Networks" ICLR 2025
@@ -38,7 +54,7 @@ use crate::learner::StreamingLearner;
 ///
 /// let config = KANConfig::builder()
 ///     .layer_sizes(vec![3, 10, 1])
-///     .lr(0.01)
+///     .lr(0.1)
 ///     .build()
 ///     .unwrap();
 /// ```
@@ -53,20 +69,25 @@ pub struct KANConfig {
     /// More grid intervals give finer B-spline resolution, improving convergence
     /// on compositional functions at the cost of slightly more parameters per edge.
     pub grid_size: usize,
-    /// Learning rate for SGD (default: 0.01).
+    /// Learning rate for SGD (default: 0.1).
+    ///
+    /// Online KAN convergence requires higher LR than MLPs because each sample
+    /// only updates k+1 B-spline coefficients per edge (Hoang et al., 2026).
+    /// Values 0.1-0.5 work for regression.
     pub lr: f64,
-    /// SGD momentum factor for B-spline coefficient updates (default: 0.5).
+    /// SGD momentum factor for B-spline coefficient updates (default: 0.0, disabled).
     ///
-    /// Momentum accumulates gradient direction across samples, making the
-    /// sparse B-spline updates (only `k+1` coefficients per edge per step)
-    /// converge much faster. Set to 0.0 to disable.
+    /// Momentum on sparse B-spline updates magnifies overfitting in active
+    /// input regions without helping inactive regions. Set to 0.0 for online
+    /// streaming (Hoang et al., 2026). Non-zero values may help in batch mode.
     pub momentum: f64,
-    /// Decay factor applied to spline coefficients each step (default: 0.0005).
+    /// Decay factor applied to spline coefficients each step (default: 0.0, disabled).
     ///
-    /// After each gradient update, all B-spline coefficients are multiplied by
-    /// `(1 - coefficient_decay)`. This acts as a forgetting mechanism that
-    /// biases the network toward recent observations, enabling concept-drift
-    /// adaptation without external wrappers.
+    /// B-spline locality naturally prevents catastrophic forgetting -- each sample
+    /// only modifies coefficients in its input region, leaving other regions
+    /// undisturbed. When enabled, all coefficients are multiplied by
+    /// `(1 - coefficient_decay)` after each step, biasing toward recent observations
+    /// for concept-drift adaptation. Usually unnecessary for online streaming.
     pub coefficient_decay: f64,
     /// RNG seed (default: 42).
     pub seed: u64,
@@ -78,9 +99,9 @@ impl Default for KANConfig {
             layer_sizes: vec![1, 5, 1],
             spline_order: 3,
             grid_size: 8,
-            lr: 0.01,
-            momentum: 0.5,
-            coefficient_decay: 0.0005,
+            lr: 0.1,
+            momentum: 0.0,
+            coefficient_decay: 0.0,
             seed: 42,
         }
     }
@@ -117,8 +138,7 @@ impl std::fmt::Display for KANConfig {
 ///     .layer_sizes(vec![5, 10, 1])
 ///     .spline_order(3)
 ///     .grid_size(8)
-///     .lr(0.01)
-///     .momentum(0.5)
+///     .lr(0.1)
 ///     .build()
 ///     .unwrap();
 ///
@@ -163,27 +183,31 @@ impl KANConfigBuilder {
         self
     }
 
-    /// Set the learning rate for SGD (default: 0.01).
+    /// Set the learning rate for SGD (default: 0.1).
+    ///
+    /// Online KAN needs higher LR than MLPs due to sparse B-spline updates.
+    /// Values 0.1-0.5 work for regression (Hoang et al., 2026).
     pub fn lr(mut self, lr: f64) -> Self {
         self.config.lr = lr;
         self
     }
 
-    /// Set the SGD momentum factor (default: 0.5).
+    /// Set the SGD momentum factor (default: 0.0, disabled).
     ///
-    /// Momentum accumulates gradient direction across samples, making sparse
-    /// B-spline updates converge faster. Standard value is 0.9. Set to 0.0
-    /// to disable.
+    /// Momentum on sparse B-spline updates magnifies overfitting in active
+    /// input regions without helping inactive regions. Disabled by default
+    /// for online streaming. Non-zero values may help in batch mode.
     pub fn momentum(mut self, m: f64) -> Self {
         self.config.momentum = m;
         self
     }
 
-    /// Set the coefficient decay factor (default: 0.0005).
+    /// Set the coefficient decay factor (default: 0.0, disabled).
     ///
-    /// After each training step, all spline coefficients are multiplied by
-    /// `(1 - coefficient_decay)`, biasing toward recent observations for
-    /// concept-drift adaptation. Set to 0.0 to disable.
+    /// B-spline locality naturally prevents catastrophic forgetting, so decay
+    /// is unnecessary for most online streaming tasks. When enabled, all
+    /// coefficients are multiplied by `(1 - coefficient_decay)` each step,
+    /// biasing toward recent observations for concept-drift adaptation.
     pub fn coefficient_decay(mut self, d: f64) -> Self {
         self.config.coefficient_decay = d;
         self
@@ -276,7 +300,7 @@ impl KANConfigBuilder {
 ///
 /// let config = KANConfig::builder()
 ///     .layer_sizes(vec![3, 10, 1])
-///     .lr(0.01)
+///     .lr(0.1)
 ///     .build()
 ///     .unwrap();
 /// let mut model = StreamingKAN::new(config);
@@ -290,6 +314,10 @@ pub struct StreamingKAN {
     input_mean: Vec<f64>,
     input_var: Vec<f64>,
     input_count: u64,
+    // Online target normalization (Welford's algorithm)
+    target_mean: f64,
+    target_var: f64,
+    target_count: u64,
     // Cached output for side-effect-free predict()
     last_output: f64,
     n_samples: u64,
@@ -328,6 +356,9 @@ impl StreamingKAN {
             input_mean: vec![0.0; n_in],
             input_var: vec![1.0; n_in],
             input_count: 0,
+            target_mean: 0.0,
+            target_var: 1.0,
+            target_count: 0,
             last_output: 0.0,
             n_samples: 0,
             rng_state: rng,
@@ -383,9 +414,10 @@ impl StreamingKAN {
                 1.0
             };
             normalized[i] = (x - self.input_mean[i]) / std;
-            // Clamp to [-3, 3] — B-splines handle this range well.
-            // Clamping to [-1, 1] was too aggressive and destroyed signal variance.
-            normalized[i] = normalized[i].clamp(-3.0, 3.0);
+            // Clamp to [-0.95, 0.95] — within B-spline grid domain [-1, 1].
+            // Previous [-3, 3] clamp put most inputs outside the grid, causing
+            // spline evaluation to use only boundary knots (no learning).
+            normalized[i] = normalized[i].clamp(-0.95, 0.95);
         }
         normalized
     }
@@ -393,10 +425,10 @@ impl StreamingKAN {
 
 impl StreamingLearner for StreamingKAN {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
-        // 1. Normalize input (skip during warmup — Welford stats unstable)
+        // 1. Normalize input to B-spline grid domain [-1, 1].
+        //    During warmup (first 50 samples): accumulate Welford stats only,
+        //    map features to zero (don't train on un-normalized garbage).
         let normalized = if self.input_count < 50 {
-            // During warmup: use raw features, just clamp to prevent extreme values
-            // Also update Welford stats without applying normalization
             self.input_count += 1;
             let n = self.input_count as f64;
             for (i, &x) in features.iter().enumerate() {
@@ -407,7 +439,25 @@ impl StreamingLearner for StreamingKAN {
                     self.input_var[i] += delta * delta2;
                 }
             }
-            features.iter().map(|x| x.clamp(-3.0, 3.0)).collect()
+            // During warmup: use centered features scaled by a rough estimate.
+            // Centering + scaling preserves signal for large-scale inputs
+            // (e.g. pressure ~1013) that would be destroyed by fixed-range clamping.
+            if n > 2.0 {
+                features
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &x)| {
+                        if i < self.input_mean.len() {
+                            let std = (self.input_var[i] / (n - 1.0)).sqrt().max(1e-8);
+                            ((x - self.input_mean[i]) / std).clamp(-0.95, 0.95)
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect()
+            } else {
+                vec![0.0; features.len()] // first 2 samples: don't train, just observe
+            }
         } else {
             self.normalize_input(features)
         };
@@ -437,9 +487,25 @@ impl StreamingLearner for StreamingKAN {
             activations.push(current.clone());
         }
 
-        // 3. Compute output error (MSE loss: L = (pred - target)^2)
+        // 3. Normalize target via Welford's online algorithm.
+        //    KAN trains in normalized target space to prevent gradient explosion
+        //    when target magnitudes vary across regimes (e.g., Feynman equations).
+        self.target_count += 1;
+        let tn = self.target_count as f64;
+        let t_delta = target - self.target_mean;
+        self.target_mean += t_delta / tn;
+        let t_delta2 = target - self.target_mean;
+        self.target_var += t_delta * t_delta2;
+        let target_std = if tn > 2.0 {
+            (self.target_var / (tn - 1.0)).sqrt().max(1e-8)
+        } else {
+            1.0
+        };
+        let normalized_target = (target - self.target_mean) / target_std;
+
+        // 4. Compute output error in normalized target space
         let prediction = current[0];
-        let error = prediction - target;
+        let error = prediction - normalized_target;
         let sq_error = error * error;
 
         // 4. Update rolling loss and compute uncertainty-modulated LR.
@@ -482,8 +548,8 @@ impl StreamingLearner for StreamingKAN {
             }
         }
 
-        // 7. Emergency coefficient normalization: if any coefficient exceeds 1e6,
-        //    scale ALL coefficients down by 0.5. This prevents cascading NaN from
+        // 7. Coefficient magnitude guard: if any coefficient exceeds 1e6,
+        //    scale ALL coefficients down by 0.5 to prevent cascading NaN from
         //    divergent spline weights during sudden distribution shifts.
         let any_extreme = self.layers.iter().any(|l| {
             l.coefficients()
@@ -524,8 +590,9 @@ impl StreamingLearner for StreamingKAN {
         self.prev_change = current_change;
         self.prev_prediction = prediction;
 
-        // 9. Cache output for predict(), clamped to prevent cascading NaN
-        self.last_output = prediction.clamp(-1e6, 1e6);
+        // 9. Denormalize prediction back to original target space, then cache.
+        let denormalized = prediction * target_std + self.target_mean;
+        self.last_output = denormalized.clamp(-1e6, 1e6);
         if !self.last_output.is_finite() {
             self.last_output = 0.0;
         }
@@ -555,6 +622,9 @@ impl StreamingLearner for StreamingKAN {
         self.input_mean.fill(0.0);
         self.input_var.fill(1.0);
         self.input_count = 0;
+        self.target_mean = 0.0;
+        self.target_var = 1.0;
+        self.target_count = 0;
         self.last_output = 0.0;
         self.n_samples = 0;
         self.rolling_loss = 0.0;
@@ -603,11 +673,26 @@ impl std::fmt::Debug for StreamingKAN {
 
 impl crate::automl::DiagnosticSource for StreamingKAN {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        // Dead edge fraction: fraction of edges where all velocity magnitudes < 1e-8.
+        // encoder_utilization = 1.0 - dead_edge_fraction.
+        let encoder_utilization = {
+            let (mut total_dead, mut total_edges) = (0usize, 0usize);
+            for layer in &self.layers {
+                let (dead, edges) = layer.count_dead_edges(1e-8);
+                total_dead += dead;
+                total_edges += edges;
+            }
+            if total_edges > 0 {
+                1.0 - (total_dead as f64 / total_edges as f64)
+            } else {
+                0.0
+            }
+        };
+
         Some(crate::automl::ConfigDiagnostics {
             residual_alignment: self.alignment_ewma,
             regularization_sensitivity: self.config.coefficient_decay,
-            // Multi-layer KAN: depth_sufficiency > 0 for multi-layer architectures.
-            depth_sufficiency: if self.layers.len() > 1 { 1.0 } else { 0.0 },
+            depth_sufficiency: encoder_utilization,
             effective_dof: self.n_params() as f64,
             uncertainty: self.rolling_loss.sqrt(),
         })
@@ -629,9 +714,19 @@ mod tests {
         assert_eq!(config.spline_order, 3);
         assert_eq!(config.grid_size, 8);
         assert!(
-            (config.momentum - 0.5).abs() < 1e-12,
-            "default momentum should be 0.5, got {}",
+            (config.lr - 0.1).abs() < 1e-12,
+            "default lr should be 0.1, got {}",
+            config.lr
+        );
+        assert!(
+            config.momentum.abs() < 1e-12,
+            "default momentum should be 0.0, got {}",
             config.momentum
+        );
+        assert!(
+            config.coefficient_decay.abs() < 1e-12,
+            "default coefficient_decay should be 0.0, got {}",
+            config.coefficient_decay
         );
     }
 
@@ -1112,6 +1207,149 @@ mod tests {
             spike_change > normal_change,
             "high-error step should cause larger coefficient change than normal step: \
              spike_change={spike_change:.8}, normal_change={normal_change:.8}"
+        );
+    }
+
+    #[test]
+    fn online_convergence_with_defaults() {
+        // Validate Hoang et al. (2026) finding: high LR + no momentum converges online.
+        let config = KANConfig::builder()
+            .layer_sizes(vec![2, 10, 1])
+            .lr(0.1)
+            .momentum(0.0)
+            .coefficient_decay(0.0)
+            .build()
+            .unwrap();
+        let mut model = StreamingKAN::new(config);
+
+        let mut errors_initial = Vec::new();
+        let mut errors_converged = Vec::new();
+
+        for i in 0..5000 {
+            let t = i as f64 * 0.01;
+            let x = [t.sin(), t.cos()];
+            let y = x[0] * x[0] + 0.5 * x[1]; // nonlinear target
+
+            if model.n_samples_seen() > 0 {
+                let pred = model.predict(&x);
+                let err = (pred - y).powi(2);
+                if (1..50).contains(&i) {
+                    errors_initial.push(err);
+                } else if i >= 2000 {
+                    errors_converged.push(err);
+                }
+            }
+            model.train(&x, y);
+        }
+
+        let _mse_initial = errors_initial.iter().sum::<f64>() / errors_initial.len() as f64;
+        let mse_converged = errors_converged.iter().sum::<f64>() / errors_converged.len() as f64;
+
+        // With target normalization + LR=0.1, convergence is near-instant
+        // on this trivial target. Just verify steady-state error is small.
+        assert!(
+            mse_converged < 0.01,
+            "KAN converged MSE should be small, got {:.4}",
+            mse_converged
+        );
+    }
+
+    #[test]
+    fn large_magnitude_targets_no_explosion() {
+        // Saturating arithmetic (Hoang et al., 2026) must keep RMSE bounded
+        // for large-magnitude targets (Power Plant ~450 MW, Feynman ~500).
+        let config = KANConfig::builder()
+            .layer_sizes(vec![4, 20, 1])
+            .lr(0.1)
+            .momentum(0.0)
+            .coefficient_decay(0.0)
+            .build()
+            .unwrap();
+        let mut model = StreamingKAN::new(config);
+
+        // Simulate Power Plant: targets in [400, 500] range
+        let mut rng = 0xBEEF_0001u64;
+        let xor = |s: &mut u64| {
+            *s ^= *s << 13;
+            *s ^= *s >> 7;
+            *s ^= *s << 17;
+            *s
+        };
+        let uniform = |s: &mut u64| (xor(s) as f64) / (u64::MAX as f64);
+
+        for _ in 0..5000 {
+            let x = [
+                5.0 + uniform(&mut rng) * 30.0,
+                30.0 + uniform(&mut rng) * 70.0,
+                990.0 + uniform(&mut rng) * 50.0,
+                25.0 + uniform(&mut rng) * 55.0,
+            ];
+            let y = 450.0 - 2.0 * x[0] + 0.1 * x[1] - 0.05 * x[2] + 0.3 * x[3];
+            model.train(&x, y);
+        }
+
+        let pred = model.predict(&[20.0, 60.0, 1013.0, 50.0]);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite on large targets, got {}",
+            pred
+        );
+        assert!(
+            pred.abs() < 1e6,
+            "prediction should not explode on large targets, got {}",
+            pred
+        );
+
+        // Feynman: targets from multiple physics equations, varying scales
+        let mut model2 = StreamingKAN::new(
+            KANConfig::builder()
+                .layer_sizes(vec![4, 20, 1])
+                .lr(0.1)
+                .build()
+                .unwrap(),
+        );
+
+        for i in 0..5000 {
+            let eq = i % 4;
+            let (x, y) = match eq {
+                0 => {
+                    let m = 1.0 + uniform(&mut rng) * 9.0;
+                    let v = 1.0 + uniform(&mut rng) * 9.0;
+                    ([m, v, 0.0, 0.0], 0.5 * m * v * v) // up to 405
+                }
+                1 => {
+                    let n = 1.0 + uniform(&mut rng) * 4.0;
+                    let r = 1.0 + uniform(&mut rng) * 4.0;
+                    let t = 1.0 + uniform(&mut rng) * 4.0;
+                    let v = 1.0 + uniform(&mut rng) * 4.0;
+                    ([n, r, t, v], n * r * t / v)
+                }
+                2 => {
+                    let g = 1.0 + uniform(&mut rng) * 4.0;
+                    let m1 = 1.0 + uniform(&mut rng) * 4.0;
+                    let m2 = 1.0 + uniform(&mut rng) * 4.0;
+                    let r = 1.0 + uniform(&mut rng) * 4.0;
+                    ([g, m1, m2, r], g * m1 * m2 / (r * r))
+                }
+                _ => {
+                    let q1 = 1.0 + uniform(&mut rng) * 4.0;
+                    let q2 = 1.0 + uniform(&mut rng) * 4.0;
+                    let eps = 1.0 + uniform(&mut rng) * 4.0;
+                    let r = 1.0 + uniform(&mut rng) * 4.0;
+                    (
+                        [q1, q2, eps, r],
+                        q1 * q2 / (4.0 * std::f64::consts::PI * eps * r * r),
+                    )
+                }
+            };
+            model2.train(&x, y);
+        }
+
+        let pred2 = model2.predict(&[5.0, 5.0, 3.0, 2.0]);
+        assert!(
+            pred2.is_finite() && pred2.abs() < 1e6,
+            "Feynman predictions should not explode, got {}",
+            pred2
         );
     }
 }

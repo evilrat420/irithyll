@@ -1,2 +1,11 @@
 [target.thumbv6m-none-eabi]
+runner = "C:/Users/user-pc/qemu-arm/xpack-qemu-arm-9.2.4-1/bin/qemu-system-arm.exe -cpu cortex-m0 -machine lm3s6965evb -nographic -semihosting-config enable=on,target=native -kernel"
+rustflags = ["-C", "link-arg=-Tlink.x"]
+
+[target.thumbv7m-none-eabi]
+runner = "C:/Users/user-pc/qemu-arm/xpack-qemu-arm-9.2.4-1/bin/qemu-system-arm.exe -cpu cortex-m3 -machine lm3s6965evb -nographic -semihosting-config enable=on,target=native -kernel"
+rustflags = ["-C", "link-arg=-Tlink.x"]
+
+[target.thumbv7em-none-eabi]
+runner = "C:/Users/user-pc/qemu-arm/xpack-qemu-arm-9.2.4-1/bin/qemu-system-arm.exe -cpu cortex-m4 -machine lm3s6965evb -nographic -semihosting-config enable=on,target=native -kernel"
 rustflags = ["-C", "link-arg=-Tlink.x"]

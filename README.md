@@ -94,7 +94,7 @@ Three families of neural architectures, all implementing `StreamingLearner` -- t
 
 | Model | Description | Per-Sample Cost |
 |-------|-------------|-----------------|
-| [`StreamingMamba`](https://docs.rs/irithyll/latest/irithyll/ssm/struct.StreamingMamba.html) | Selective state space model with input-dependent B, C, Delta. ZOH discretization, diagonal A matrix. First streaming SSM implementation in Rust. Based on Gu & Dao 2023. | O(D * N) |
+| [`StreamingMamba`](https://docs.rs/irithyll/latest/irithyll/ssm/struct.StreamingMamba.html) | Selective state space model with input-dependent B, C, Delta. ZOH discretization, diagonal A matrix. Based on Gu & Dao 2023. | O(D * N) |
 | [`MambaPreprocessor`](https://docs.rs/irithyll/latest/irithyll/ssm/struct.MambaPreprocessor.html) | SSM temporal features feeding SGBT or other learners in a pipeline. | O(D * N) |
 
 ### Spiking Neural Networks (SNN / e-prop)
@@ -120,20 +120,33 @@ All neural models also have preprocessor variants (`ESNPreprocessor`, `MambaPrep
 
 ### When to Use Each Model
 
-| Use Case | Recommended Model | Why |
-|----------|-------------------|-----|
-| **General streaming (any data)** | `SGBT` / `DistributionalSGBT` | Built-in drift detection, tree replacement. Best all-rounder across 14 benchmarks. |
-| **Classification with drift** | `NeuralMoE` | Expert diversity handles distribution shift. 93% accuracy on drifting binary classification. |
-| **Chaotic time series** | `StreamingMamba` | SSM hidden state captures temporal dynamics. 0.046 RMSE on Mackey-Glass (2nd best). |
-| **Temporal / autoregressive data** | `EchoStateNetwork` | Reservoir provides rich temporal features. Best on temporal pattern benchmarks. |
-| **Linear / fast regression** | `RecursiveLeastSquares` | 7M samples/sec. Best on Mackey-Glass (0.035). Adaptive forgetting handles drift. |
-| **Symbolic / function regression** | `StreamingKAN` | B-spline edge activations learn compositional functions. Best at NARMA-10 (0.10). |
-| **Sequence adaptation** | `StreamingTTT` | Fast weights adapt per-sample via self-supervised reconstruction. Handles Lorenz attractor. |
-| **Energy-efficient / neuromorphic** | `SpikeNet` | e-prop online learning. Integer-only variant fits 22KB (Cortex-M0+). |
-| **Uncertainty quantification** | `DistributionalSGBT` | Gaussian N(mu, sigma) output with honest_sigma from tree contribution variance. |
-| **Automatic model selection** | `AutoTuner` | Tournament racing across all model families. Picks the best for your data. |
+**Production tier** -- pure streaming from sample 1:
 
-**Note on neural models and classification:** KAN, TTT, and Mamba are regression-focused architectures (Liu et al. 2024, Sun et al. 2024, Gu & Dao 2023). For classification tasks, use SGBT, NeuralMoE, or compose neural models as feature extractors in a `Pipeline` with a classification head.
+| Model | Use Case |
+|-------|----------|
+| `SGBT` / `DistributionalSGBT` | Tabular data, concept drift, streaming analytics. Default choice. `DistributionalSGBT` adds prediction intervals via `honest_sigma`. |
+| `EchoStateNetwork` | General temporal regression and classification. Fixed reservoir + RLS readout, no backprop. |
+| `NeuralMoE` | Heterogeneous data with regime shifts. Learned gating routes samples to specialized experts (trees + neural in one model). |
+| `RecursiveLeastSquares` | Linear baseline with confidence intervals. Exact online OLS via Sherman-Morrison, extremely fast throughput. |
+| `NextGenRC` | Nonlinear time series without reservoir overhead. Polynomial feature maps replace random projections. |
+| `AutoTuner` | Unknown data distribution or prototyping. Tournament racing across model families. |
+
+**Warmup-required** -- need initialization before streaming:
+
+| Model | Use Case |
+|-------|----------|
+| `StreamingTTT` | Adaptation layer for regime-shift scenarios. Call `pretrain_projections()` on warmup data before streaming. |
+| `StreamingMamba` | Long-sequence temporal feature extraction with selective memory. Input-dependent gating controls what the state retains. |
+
+**Research tier** -- correct implementation, online convergence or niche use unsolved:
+
+| Model | Use Case |
+|-------|----------|
+| `StreamingKAN` | Compositional physics, parameter-efficient nonlinear regression. B-spline online convergence is a research direction. |
+| `SpikeNet` | Event-driven sparse data, neuromorphic edge deployment. Integer-only variant fits in 22KB on Cortex-M0+. |
+| `StreamingAttention` | Streaming linear attention (7 modes). Specialized sequential tasks where full-sequence attention is too expensive. |
+
+**Note on classification:** For binary/multiclass classification, wrap any model with `binary_classifier()` or `multiclass_classifier()`. Uses bipolar {-1, +1} targets internally for proper MSE-based discrimination.
 
 ## Principled Streaming Adaptation
 
@@ -148,7 +161,7 @@ Principled streaming adaptation in gradient boosted ensembles:
 
 ## Streaming AutoML
 
-Online hyperparameter optimization via champion-challenger tournament racing -- the first streaming AutoML framework in Rust.
+Online hyperparameter optimization via champion-challenger tournament racing.
 
 | Component | Description |
 |-----------|-------------|

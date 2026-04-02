@@ -231,6 +231,30 @@ impl RecursiveLeastSquares {
         self.forgetting_factor = ff.clamp(0.95, 1.0);
     }
 
+    /// The inverse covariance (P) matrix, flattened row-major.
+    ///
+    /// Empty before the first training sample. The matrix is `d x d` where
+    /// `d` is the feature dimension.
+    #[inline]
+    pub fn p_matrix(&self) -> &[f64] {
+        &self.p_matrix
+    }
+
+    /// The initial P diagonal value (delta).
+    ///
+    /// P is initialised to `delta * I` at construction. This value is needed
+    /// for computing RLS saturation: `1 - trace(P) / (delta * d)`.
+    #[inline]
+    pub fn delta(&self) -> f64 {
+        self.delta
+    }
+
+    /// Feature dimensionality, `None` until first sample.
+    #[inline]
+    pub fn n_features(&self) -> Option<usize> {
+        self.n_features
+    }
+
     // -----------------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------------
@@ -452,12 +476,29 @@ impl StreamingLearner for RecursiveLeastSquares {
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
+        // RLS saturation: 1.0 - trace(P) / (delta * d).
+        let d = self.weights.len();
+        let depth_sufficiency = if d > 0 && self.delta > 0.0 {
+            let trace: f64 = (0..d).map(|i| self.p_matrix[i * d + i]).sum();
+            (1.0 - trace / (self.delta * d as f64)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // Weight magnitude: ||w||_2 / sqrt(d).
+        let effective_dof = if !self.weights.is_empty() {
+            let sq_sum: f64 = self.weights.iter().map(|w| w * w).sum();
+            sq_sum.sqrt() / (d as f64).sqrt()
+        } else {
+            0.0
+        };
+
         [
             0.0,                          // residual_alignment
             1.0 - self.forgetting_factor, // reg_sensitivity
-            0.0,                          // depth_sufficiency
-            self.weights.len() as f64,    // effective_dof
-            self.running_mse.sqrt(),      // uncertainty
+            depth_sufficiency,
+            effective_dof,
+            self.running_mse.sqrt(), // uncertainty
         ]
     }
 
@@ -925,11 +966,28 @@ impl fmt::Debug for LocallyWeightedRegression {
 
 impl crate::automl::DiagnosticSource for RecursiveLeastSquares {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        let d = self.weights().len();
+
+        // RLS saturation: 1.0 - trace(P) / (delta * d).
+        let depth_sufficiency = if d > 0 && self.delta > 0.0 {
+            let trace: f64 = (0..d).map(|i| self.p_matrix[i * d + i]).sum();
+            (1.0 - trace / (self.delta * d as f64)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        // Weight magnitude: ||w||_2 / sqrt(d).
+        let effective_dof = if d > 0 {
+            let sq_sum: f64 = self.weights.iter().map(|w| w * w).sum();
+            sq_sum.sqrt() / (d as f64).sqrt()
+        } else {
+            0.0
+        };
+
         Some(crate::automl::ConfigDiagnostics {
-            // Dimension not known until first sample.
-            effective_dof: self.weights().len() as f64,
+            depth_sufficiency,
+            effective_dof,
             regularization_sensitivity: 1.0 - self.forgetting_factor(),
-            // Prediction uncertainty: std dev of residuals.
             uncertainty: self.noise_variance().sqrt(),
             ..Default::default()
         })

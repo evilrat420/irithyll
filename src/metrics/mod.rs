@@ -20,6 +20,7 @@ pub mod quantile_tracker;
 pub mod regression;
 pub mod rolling;
 pub mod strongly_adaptive;
+pub mod temperature_scaling;
 
 pub use classification::ClassificationMetrics;
 pub use conformal::StepSchedule;
@@ -29,6 +30,7 @@ pub use platt_scaling::OnlinePlattScaling;
 pub use quantile_tracker::StreamingQuantileTracker;
 pub use regression::RegressionMetrics;
 pub use strongly_adaptive::StronglyAdaptiveConformal;
+pub use temperature_scaling::OnlineTemperatureScaling;
 
 /// Combined metric tracker that holds both regression and classification metrics.
 ///

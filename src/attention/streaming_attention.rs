@@ -82,6 +82,8 @@ pub struct StreamingAttentionModel {
     prev_prev_change: f64,
     /// EWMA of residual alignment signal.
     alignment_ewma: f64,
+    /// EWMA of maximum Frobenius squared norm of attention state for utilization ratio.
+    max_frob_sq_ewma: f64,
 }
 
 impl StreamingAttentionModel {
@@ -113,6 +115,7 @@ impl StreamingAttentionModel {
             prev_change: 0.0,
             prev_prev_change: 0.0,
             alignment_ewma: 0.0,
+            max_frob_sq_ewma: 0.0,
         }
     }
 
@@ -159,6 +162,18 @@ impl StreamingLearner for StreamingAttentionModel {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
         // 1. Forward through attention to get temporal features
         let attn_output = self.attention.forward(features);
+
+        // Track attention state Frobenius squared norm for utilization ratio.
+        {
+            let state = self.attention.state();
+            let frob_sq: f64 = state.iter().map(|s| s * s).sum();
+            const FROB_ALPHA: f64 = 0.001;
+            self.max_frob_sq_ewma = if frob_sq > self.max_frob_sq_ewma {
+                frob_sq
+            } else {
+                (1.0 - FROB_ALPHA) * self.max_frob_sq_ewma + FROB_ALPHA * frob_sq
+            };
+        }
 
         // 2. Update residual alignment tracking (acceleration-based).
         let current_pred = self.readout.predict(&attn_output);
@@ -229,6 +244,7 @@ impl StreamingLearner for StreamingAttentionModel {
         self.prev_change = 0.0;
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
+        self.max_frob_sq_ewma = 0.0;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -252,11 +268,45 @@ impl StreamingLearner for StreamingAttentionModel {
 
 impl crate::automl::DiagnosticSource for StreamingAttentionModel {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        // RLS saturation: 1.0 - trace(P) / (delta * d).
+        let rls_saturation = {
+            let p = self.readout.p_matrix();
+            let d = self.readout.weights().len();
+            if d > 0 && self.readout.delta() > 0.0 {
+                let trace: f64 = (0..d).map(|i| p[i * d + i]).sum();
+                (1.0 - trace / (self.readout.delta() * d as f64)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+
+        // Attention state Frobenius ratio: current ||S||_F^2 / max(||S||_F^2).
+        let state_frob_ratio = {
+            let state = self.attention.state();
+            let frob_sq: f64 = state.iter().map(|s| s * s).sum();
+            if self.max_frob_sq_ewma > 1e-15 {
+                (frob_sq / self.max_frob_sq_ewma).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+
+        let depth_sufficiency = 0.5 * rls_saturation + 0.5 * state_frob_ratio;
+
+        // Weight magnitude: ||w||_2 / sqrt(d).
+        let w = self.readout.weights();
+        let effective_dof = if !w.is_empty() {
+            let sq_sum: f64 = w.iter().map(|wi| wi * wi).sum();
+            sq_sum.sqrt() / (w.len() as f64).sqrt()
+        } else {
+            0.0
+        };
+
         Some(crate::automl::ConfigDiagnostics {
             residual_alignment: self.alignment_ewma,
             regularization_sensitivity: 1.0 - self.config.forgetting_factor,
-            depth_sufficiency: 0.0, // Single attention layer + linear readout.
-            effective_dof: (self.config.d_model * self.config.n_heads) as f64,
+            depth_sufficiency,
+            effective_dof,
             uncertainty: self.prediction_uncertainty(),
         })
     }

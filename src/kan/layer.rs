@@ -220,7 +220,12 @@ impl KANLayer {
         debug_assert_eq!(output_grad.len(), self.n_out, "output_grad length mismatch");
 
         let mut input_grad = vec![0.0; self.n_in];
-        const GRAD_CLIP: f64 = 1e3;
+        // Clip incoming gradient AND per-coefficient update magnitude.
+        // The incoming clip prevents extreme deltas from large-magnitude targets.
+        // The update clip (saturating arithmetic) matches Hoang et al. (2026)
+        // hardware implementation — prevents coefficient explosion on any data scale.
+        const GRAD_CLIP: f64 = 10.0;
+        const UPDATE_CLIP: f64 = 0.5;
 
         for (j, &delta_j_raw) in output_grad.iter().enumerate() {
             // Clip incoming gradient for stability
@@ -267,8 +272,12 @@ impl KANLayer {
                             if grad.is_finite() {
                                 // dL/dc_g = delta_j * w_s * B_g(x)
                                 let vi = coeff_base + coeff_idx;
-                                self.velocity[vi] = self.momentum * self.velocity[vi] + lr * grad;
-                                self.coefficients[vi] -= self.velocity[vi];
+                                let update = self.momentum * self.velocity[vi] + lr * grad;
+                                // Saturating arithmetic: clip update magnitude
+                                // (Hoang et al., 2026 — prevents explosion on any data scale)
+                                let clipped = update.clamp(-UPDATE_CLIP, UPDATE_CLIP);
+                                self.velocity[vi] = clipped;
+                                self.coefficients[vi] -= clipped;
                             }
                         }
                     }
@@ -278,14 +287,16 @@ impl KANLayer {
                 // dL/dw_b = delta_j * SiLU(x)
                 let wb_grad = delta_j * silu(x);
                 if wb_grad.is_finite() {
-                    self.w_b[edge] -= lr * wb_grad;
+                    let wb_update = (lr * wb_grad).clamp(-UPDATE_CLIP, UPDATE_CLIP);
+                    self.w_b[edge] -= wb_update;
                 }
 
                 // --- Update w_s ---
                 // dL/dw_s = delta_j * spline_val
                 let ws_grad = delta_j * spline_val;
                 if ws_grad.is_finite() {
-                    self.w_s[edge] -= lr * ws_grad;
+                    let ws_update = (lr * ws_grad).clamp(-UPDATE_CLIP, UPDATE_CLIP);
+                    self.w_s[edge] -= ws_update;
                 }
 
                 // --- Input gradient ---
@@ -353,6 +364,25 @@ impl KANLayer {
     #[inline]
     pub fn coefficients_mut(&mut self) -> &mut [f64] {
         &mut self.coefficients
+    }
+
+    /// Count edges where all velocity magnitudes are below threshold (dead edges).
+    ///
+    /// An edge is "dead" if none of its B-spline coefficient velocities exceed
+    /// the threshold, meaning no meaningful gradient has flowed through it recently.
+    pub fn count_dead_edges(&self, threshold: f64) -> (usize, usize) {
+        let n_edges = self.n_out * self.n_in;
+        let mut dead = 0;
+        for edge in 0..n_edges {
+            let base = edge * self.n_coeffs;
+            let all_dead = self.velocity[base..base + self.n_coeffs]
+                .iter()
+                .all(|v| v.abs() < threshold);
+            if all_dead {
+                dead += 1;
+            }
+        }
+        (dead, n_edges)
     }
 }
 

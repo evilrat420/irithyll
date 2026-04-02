@@ -255,9 +255,9 @@ impl<L: Loss> SGBT<L> {
         let initial_target_count = config.initial_target_count;
         let n = config.n_steps;
         let has_pruning = config.quality_prune_alpha.is_some();
-        let prune_alpha = if let Some(interval) = config.proactive_prune_interval {
-            let interval = interval as f64;
-            1.0 - (-2.0 / interval).exp()
+        let prune_alpha = if config.proactive_prune_interval.is_some() {
+            let gp = config.grace_period.max(1) as f64;
+            1.0 - (-2.0 / gp).exp()
         } else {
             0.01
         };
@@ -427,42 +427,9 @@ impl<L: Loss> SGBT<L> {
                 }
             }
 
-            if interval > 0 && self.samples_seen % interval == 0 && self.steps.len() > 1 {
-                if self.config.accuracy_based_pruning {
-                    // Accuracy-based: prune tree with most negative contribution alignment.
-                    let grace_period = self.config.grace_period as u64;
-                    let worst = self
-                        .steps
-                        .iter()
-                        .enumerate()
-                        .zip(self.contribution_accuracy.iter())
-                        .filter(|((_, step), _)| step.slot().n_samples_seen() >= grace_period)
-                        .min_by(|((_, _), a), ((_, _), b)| {
-                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                    if let Some(((worst_idx, _), &worst_acc)) = worst {
-                        if worst_acc < 0.0 {
-                            self.steps[worst_idx].slot_mut().replace_active();
-                            self.contribution_accuracy[worst_idx] = 0.0;
-                        }
-                    }
-                } else {
-                    // Variance-based (default): prune tree with smallest prediction variance.
-                    let worst_idx = self
-                        .steps
-                        .iter()
-                        .enumerate()
-                        .min_by(|(_, a), (_, b)| {
-                            let a_std = a.slot().prediction_std();
-                            let b_std = b.slot().prediction_std();
-                            a_std
-                                .partial_cmp(&b_std)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.steps[worst_idx].slot_mut().replace_active();
-                }
+            // Interval-based fallback: fire prune check every N samples.
+            if interval > 0 && self.samples_seen % interval == 0 {
+                self.check_proactive_prune();
             }
         }
 
@@ -1002,6 +969,57 @@ impl<L: Loss> SGBT<L> {
         self.steps.iter().map(|s| s.slot().replacements()).sum()
     }
 
+    /// Manually trigger a proactive prune check.
+    ///
+    /// Finds the worst mature tree (past grace period) and replaces it if its
+    /// contribution accuracy is negative (accuracy-based) or its prediction
+    /// variance is minimal (variance-based). The contribution accuracy EWMAs
+    /// are updated every sample inside `train_one()`; this method only performs
+    /// the replacement decision.
+    ///
+    /// Returns `true` if a tree was replaced, `false` otherwise.
+    pub fn check_proactive_prune(&mut self) -> bool {
+        if self.steps.len() <= 1 {
+            return false;
+        }
+        if self.config.accuracy_based_pruning {
+            let grace_period = self.config.grace_period as u64;
+            let worst = self
+                .steps
+                .iter()
+                .enumerate()
+                .zip(self.contribution_accuracy.iter())
+                .filter(|((_, step), _)| step.slot().n_samples_seen() >= grace_period)
+                .min_by(|((_, _), a), ((_, _), b)| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            if let Some(((worst_idx, _), &worst_acc)) = worst {
+                if worst_acc < 0.0 {
+                    self.steps[worst_idx].slot_mut().replace_active();
+                    self.contribution_accuracy[worst_idx] = 0.0;
+                    return true;
+                }
+            }
+            false
+        } else {
+            let worst_idx = self
+                .steps
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    let a_std = a.slot().prediction_std();
+                    let b_std = b.slot().prediction_std();
+                    a_std
+                        .partial_cmp(&b_std)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.steps[worst_idx].slot_mut().replace_active();
+            true
+        }
+    }
+
     /// Immutable access to the boosting steps.
     ///
     /// Useful for model inspection and export (e.g., ONNX serialization).
@@ -1458,9 +1476,9 @@ impl SGBT<Box<dyn Loss>> {
             Vec::new()
         };
 
-        let prune_alpha = if let Some(interval) = state.config.proactive_prune_interval {
-            let interval = interval as f64;
-            1.0 - (-2.0 / interval).exp()
+        let prune_alpha = if state.config.proactive_prune_interval.is_some() {
+            let gp = state.config.grace_period.max(1) as f64;
+            1.0 - (-2.0 / gp).exp()
         } else {
             0.01
         };

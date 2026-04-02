@@ -94,6 +94,8 @@ pub struct NextGenRC {
     prev_prev_change: f64,
     /// EWMA of residual alignment signal.
     alignment_ewma: f64,
+    /// Per-feature EWMA of |feature[i]| for feature utilization entropy.
+    state_activity_ewma: Vec<f64>,
 }
 
 impl NextGenRC {
@@ -121,6 +123,7 @@ impl NextGenRC {
             prev_change: 0.0,
             prev_prev_change: 0.0,
             alignment_ewma: 0.0,
+            state_activity_ewma: Vec::new(),
         }
     }
 
@@ -195,6 +198,15 @@ impl StreamingLearner for NextGenRC {
 
         // If warm, build features and train the RLS readout.
         if let Some(feat_vec) = self.build_features() {
+            // Update per-feature activity EWMA for utilization entropy.
+            const STATE_ALPHA: f64 = 0.01;
+            if self.state_activity_ewma.len() != feat_vec.len() {
+                self.state_activity_ewma = vec![0.0; feat_vec.len()];
+            }
+            for (ewma, &f) in self.state_activity_ewma.iter_mut().zip(feat_vec.iter()) {
+                *ewma = (1.0 - STATE_ALPHA) * *ewma + STATE_ALPHA * f.abs();
+            }
+
             // Update residual alignment tracking (acceleration-based).
             let current_pred = self.rls.predict(&feat_vec);
             let current_change = current_pred - self.prev_prediction;
@@ -255,6 +267,7 @@ impl StreamingLearner for NextGenRC {
         self.prev_change = 0.0;
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
+        self.state_activity_ewma.clear();
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -292,15 +305,53 @@ impl fmt::Debug for NextGenRC {
 
 impl crate::automl::DiagnosticSource for NextGenRC {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
-        // Effective DOF is the RLS weight dimension (polynomial feature count).
-        // Before first sample, weights are empty -- fall back to 0.
-        let dof = self.rls.weights().len() as f64;
+        // RLS saturation: 1.0 - trace(P) / (delta * d).
+        let rls_saturation = {
+            let p = self.rls.p_matrix();
+            let d = self.rls.weights().len();
+            if d > 0 && self.rls.delta() > 0.0 {
+                let trace: f64 = (0..d).map(|i| p[i * d + i]).sum();
+                (1.0 - trace / (self.rls.delta() * d as f64)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+
+        // Feature utilization entropy: normalized Shannon entropy of per-feature activity.
+        let feature_entropy = {
+            let sum: f64 = self.state_activity_ewma.iter().sum();
+            if sum > 1e-15 && self.state_activity_ewma.len() > 1 {
+                let n = self.state_activity_ewma.len();
+                let ln_n = (n as f64).ln();
+                let mut h = 0.0;
+                for &a in &self.state_activity_ewma {
+                    let p_i = a / sum;
+                    if p_i > 1e-15 {
+                        h -= p_i * p_i.ln();
+                    }
+                }
+                (h / ln_n).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+
+        let depth_sufficiency = 0.5 * rls_saturation + 0.5 * feature_entropy;
+
+        // Weight magnitude: ||w||_2 / sqrt(d).
+        let w = self.rls.weights();
+        let effective_dof = if !w.is_empty() {
+            let sq_sum: f64 = w.iter().map(|wi| wi * wi).sum();
+            sq_sum.sqrt() / (w.len() as f64).sqrt()
+        } else {
+            0.0
+        };
+
         Some(crate::automl::ConfigDiagnostics {
             residual_alignment: self.alignment_ewma,
             regularization_sensitivity: 1.0 - self.config.forgetting_factor,
-            depth_sufficiency: 0.0, // Single polynomial expansion + linear readout.
-            effective_dof: dof,
-            // Prediction uncertainty: std dev of RLS residuals.
+            depth_sufficiency,
+            effective_dof,
             uncertainty: self.rls.noise_variance().sqrt(),
         })
     }

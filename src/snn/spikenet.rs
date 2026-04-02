@@ -80,6 +80,8 @@ pub struct SpikeNet {
     prev_prev_change: f64,
     /// EWMA of residual alignment signal.
     alignment_ewma: f64,
+    /// EWMA of spike rate (spikes_this_step / total_neurons) for utilization.
+    spike_rate_ewma: f64,
 }
 
 // SpikeNet is Send + Sync because SpikeNetFixed is Send + Sync and all
@@ -108,6 +110,7 @@ impl SpikeNet {
             prev_change: 0.0,
             prev_prev_change: 0.0,
             alignment_ewma: 0.0,
+            spike_rate_ewma: 0.0,
         }
     }
 
@@ -270,6 +273,17 @@ impl StreamingLearner for SpikeNet {
                 net.train_step(&self.quantized_input, &self.quantized_target);
             }
             // weight ~0 means skip training for this sample
+
+            // Track spike rate EWMA after the step.
+            let spikes = net.hidden_spikes();
+            let n_total = spikes.len();
+            if n_total > 0 {
+                let n_spiking = spikes.iter().filter(|&&s| s > 0).count();
+                let rate = n_spiking as f64 / n_total as f64;
+                const SPIKE_ALPHA: f64 = 0.01;
+                self.spike_rate_ewma =
+                    (1.0 - SPIKE_ALPHA) * self.spike_rate_ewma + SPIKE_ALPHA * rate;
+            }
         }
 
         self.n_samples += 1;
@@ -310,6 +324,7 @@ impl StreamingLearner for SpikeNet {
         self.prev_change = 0.0;
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
+        self.spike_rate_ewma = 0.0;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -350,11 +365,14 @@ impl crate::automl::DiagnosticSource for SpikeNet {
             None => 0.0, // Not yet initialized.
         };
 
+        // Spike rate EWMA as depth_sufficiency: healthy SNN activity indicates
+        // the network is being utilized. Range [0, 1], healthy is 0.1-0.3.
+        let depth_sufficiency = self.spike_rate_ewma.clamp(0.0, 1.0);
+
         Some(crate::automl::ConfigDiagnostics {
             residual_alignment: self.alignment_ewma,
-            // Learning rate as regularization sensitivity (controls update magnitude).
             regularization_sensitivity: self.config.eta,
-            depth_sufficiency: 0.0, // Single hidden layer SNN.
+            depth_sufficiency,
             effective_dof: self.config.n_hidden as f64,
             uncertainty,
         })

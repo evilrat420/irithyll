@@ -86,6 +86,7 @@ pub mod sample;
 
 pub mod drift;
 pub mod ensemble;
+pub mod generators;
 pub mod histogram;
 pub mod kan;
 pub mod loss;
@@ -166,7 +167,10 @@ pub use metrics::conformal::AdaptiveConformalInterval;
 pub use metrics::ewma::{EwmaClassificationMetrics, EwmaRegressionMetrics};
 pub use metrics::kappa::{CohenKappa, KappaM, KappaT};
 pub use metrics::rolling::{RollingClassificationMetrics, RollingRegressionMetrics};
-pub use metrics::{ClassificationMetrics, FeatureImportance, MetricSet, RegressionMetrics};
+pub use metrics::{
+    ClassificationMetrics, FeatureImportance, MetricSet, OnlineTemperatureScaling,
+    RegressionMetrics,
+};
 
 // Re-exports -- evaluation
 pub use evaluation::{
@@ -181,7 +185,7 @@ pub use clustering::{
 
 // Re-exports -- classification
 pub use ensemble::adaptive_forest::AdaptiveRandomForest;
-pub use learners::{BernoulliNB, MultinomialNB};
+pub use learners::{BernoulliNB, ClassificationMode, ClassificationWrapper, MultinomialNB};
 pub use tree::hoeffding_classifier::HoeffdingTreeClassifier;
 
 // Re-exports -- anomaly detection
@@ -739,4 +743,49 @@ pub fn streaming_attention(
 /// ```
 pub fn auto_tune(factory: impl automl::ModelFactory + 'static) -> automl::AutoTuner {
     automl::AutoTuner::builder().factory(factory).build()
+}
+
+/// Wrap any streaming learner for binary classification.
+///
+/// The inner model is trained with {0, 1} targets. At prediction time,
+/// sigmoid is applied to the raw output and thresholded at 0.5.
+///
+/// ```
+/// use irithyll::{binary_classifier, rls, StreamingLearner};
+///
+/// let mut clf = binary_classifier(rls(0.99));
+/// clf.train(&[1.0, 2.0], 1.0);
+/// clf.train(&[-1.0, -2.0], 0.0);
+/// let pred = clf.predict(&[1.0, 2.0]);
+/// assert!(pred == 0.0 || pred == 1.0);
+/// ```
+pub fn binary_classifier(model: impl StreamingLearner + 'static) -> ClassificationWrapper {
+    ClassificationWrapper::binary(Box::new(model))
+}
+
+/// Wrap any streaming learner for multiclass classification.
+///
+/// Creates K independent scalar heads (the inner model as head 0, plus
+/// K-1 additional RLS heads). Predictions are softmax-normalized across
+/// all heads and the argmax class index is returned.
+///
+/// # Panics
+///
+/// Panics if `n_classes < 2`.
+///
+/// ```
+/// use irithyll::{multiclass_classifier, rls, StreamingLearner};
+///
+/// let mut clf = multiclass_classifier(rls(0.99), 3);
+/// for i in 0..60 {
+///     clf.train(&[(i % 3) as f64, 1.0], (i % 3) as f64);
+/// }
+/// let pred = clf.predict(&[1.0, 1.0]);
+/// assert!(pred >= 0.0 && pred < 3.0);
+/// ```
+pub fn multiclass_classifier(
+    model: impl StreamingLearner + 'static,
+    n_classes: usize,
+) -> ClassificationWrapper {
+    ClassificationWrapper::multiclass(Box::new(model), n_classes)
 }

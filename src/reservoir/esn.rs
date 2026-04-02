@@ -91,6 +91,8 @@ pub struct EchoStateNetwork {
     prev_prev_change: f64,
     /// EWMA of residual alignment signal.
     alignment_ewma: f64,
+    /// Per-neuron EWMA of |state[i]| for reservoir utilization entropy.
+    state_activity_ewma: Vec<f64>,
 }
 
 impl EchoStateNetwork {
@@ -120,6 +122,7 @@ impl EchoStateNetwork {
             prev_change: 0.0,
             prev_prev_change: 0.0,
             alignment_ewma: 0.0,
+            state_activity_ewma: Vec::new(),
         }
     }
 
@@ -186,6 +189,7 @@ impl EchoStateNetwork {
                 self.config.bias_scaling,
                 self.config.seed,
             );
+            self.state_activity_ewma = vec![0.0; self.config.n_reservoir];
         }
     }
 }
@@ -198,6 +202,13 @@ impl StreamingLearner for EchoStateNetwork {
         // Drive the reservoir forward one step.
         self.reservoir.update(features);
         self.total_seen += 1;
+
+        // Update per-neuron state activity EWMA for utilization entropy.
+        const STATE_ALPHA: f64 = 0.01;
+        let state = self.reservoir.state();
+        for (ewma, &s) in self.state_activity_ewma.iter_mut().zip(state.iter()) {
+            *ewma = (1.0 - STATE_ALPHA) * *ewma + STATE_ALPHA * s.abs();
+        }
 
         // After warmup, train the RLS readout.
         if self.past_warmup() {
@@ -256,6 +267,7 @@ impl StreamingLearner for EchoStateNetwork {
         self.prev_change = 0.0;
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
+        self.state_activity_ewma.fill(0.0);
         // Keep n_inputs and reservoir weights — reset only resets learned state,
         // not the architecture. If the user wants a fresh reservoir, they should
         // construct a new ESN.
@@ -296,11 +308,53 @@ impl fmt::Debug for EchoStateNetwork {
 
 impl crate::automl::DiagnosticSource for EchoStateNetwork {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        // RLS saturation: 1.0 - trace(P) / (delta * d).
+        let rls_saturation = {
+            let p = self.rls.p_matrix();
+            let d = self.rls.weights().len();
+            if d > 0 && self.rls.delta() > 0.0 {
+                let trace: f64 = (0..d).map(|i| p[i * d + i]).sum();
+                (1.0 - trace / (self.rls.delta() * d as f64)).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+
+        // Reservoir state entropy: normalized Shannon entropy of per-neuron activity.
+        let reservoir_entropy = {
+            let sum: f64 = self.state_activity_ewma.iter().sum();
+            if sum > 1e-15 && self.state_activity_ewma.len() > 1 {
+                let n = self.state_activity_ewma.len();
+                let ln_n = (n as f64).ln();
+                let mut h = 0.0;
+                for &a in &self.state_activity_ewma {
+                    let p = a / sum;
+                    if p > 1e-15 {
+                        h -= p * p.ln();
+                    }
+                }
+                (h / ln_n).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
+
+        let depth_sufficiency = 0.5 * rls_saturation + 0.5 * reservoir_entropy;
+
+        // Weight magnitude: ||w||_2 / sqrt(d).
+        let w = self.rls.weights();
+        let effective_dof = if !w.is_empty() {
+            let sq_sum: f64 = w.iter().map(|wi| wi * wi).sum();
+            sq_sum.sqrt() / (w.len() as f64).sqrt()
+        } else {
+            0.0
+        };
+
         Some(crate::automl::ConfigDiagnostics {
             residual_alignment: self.alignment_ewma,
             regularization_sensitivity: 1.0 - self.config.forgetting_factor,
-            depth_sufficiency: 0.0, // Single-layer readout.
-            effective_dof: self.rls.weights().len() as f64,
+            depth_sufficiency,
+            effective_dof,
             uncertainty: self.prediction_uncertainty(),
         })
     }

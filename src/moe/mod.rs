@@ -115,6 +115,8 @@ pub struct NeuralMoE {
     prev_prev_change: f64,
     /// EWMA of residual alignment signal.
     alignment_ewma: f64,
+    /// EWMA of normalized gating entropy for expert utilization.
+    gate_entropy_ewma: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +240,7 @@ impl NeuralMoEBuilder {
             prev_change: 0.0,
             prev_prev_change: 0.0,
             alignment_ewma: 0.0,
+            gate_entropy_ewma: 0.0,
         }
     }
 }
@@ -406,6 +409,24 @@ impl StreamingLearner for NeuralMoE {
             slot.utilization_ewma = util_alpha * p + (1.0 - util_alpha) * slot.utilization_ewma;
         }
 
+        // Track gating entropy: H = -sum(p_k * ln(p_k)) / ln(K).
+        {
+            let k_experts = probs.len();
+            if k_experts > 1 {
+                let ln_k = (k_experts as f64).ln();
+                let mut h = 0.0;
+                for &p in &probs {
+                    if p > 1e-15 {
+                        h -= p * p.ln();
+                    }
+                }
+                let normalized_h = (h / ln_k).clamp(0.0, 1.0);
+                const GATE_ALPHA: f64 = 0.01;
+                self.gate_entropy_ewma =
+                    (1.0 - GATE_ALPHA) * self.gate_entropy_ewma + GATE_ALPHA * normalized_h;
+            }
+        }
+
         // 7. Check for dead experts (only after enough samples)
         if self.config.reset_dead && self.n_samples > self.config.utilization_span as u64 {
             self.reset_dead_experts();
@@ -444,6 +465,7 @@ impl StreamingLearner for NeuralMoE {
         self.prev_change = 0.0;
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
+        self.gate_entropy_ewma = 0.0;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -486,13 +508,16 @@ impl NeuralMoE {
 
 impl crate::automl::DiagnosticSource for NeuralMoE {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        // Gating entropy EWMA as depth_sufficiency: measures how evenly the
+        // router distributes load across experts. 1.0 = uniform utilization,
+        // 0.0 = single expert dominates.
+        let depth_sufficiency = self.gate_entropy_ewma.clamp(0.0, 1.0);
+
         Some(crate::automl::ConfigDiagnostics {
             residual_alignment: self.alignment_ewma,
             regularization_sensitivity: self.config.load_balance_rate,
-            depth_sufficiency: 0.0, // MoE is flat (experts are peers, not stacked).
+            depth_sufficiency,
             effective_dof: self.n_experts() as f64,
-            // Expert disagreement: real prediction-based uncertainty signal
-            // cached from the most recent train_one call.
             uncertainty: self.cached_disagreement,
         })
     }

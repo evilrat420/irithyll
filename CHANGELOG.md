@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.8.5] - 2026-04-01
+
+### Added
+
+- **`ClassificationWrapper`** — wraps any `StreamingLearner` for binary or multiclass
+  classification. Uses bipolar {-1, +1} targets internally for proper MSE-based
+  discrimination (standard in ESN/reservoir literature). Binary: threshold at 0.0.
+  Multiclass: K one-vs-rest heads with stable softmax. Factory functions:
+  `binary_classifier()`, `multiclass_classifier()`.
+- **`OnlineTemperatureScaling`** — single-parameter (T) multiclass calibration via
+  gradient descent on NLL. Companion to `OnlinePlattScaling`.
+- **9 synthetic stream generators** — `SEA`, `Agrawal`, `Hyperplane`, `LED`, `Waveform`,
+  `RandomRBF`, `Friedman`, `MackeyGlass`, `Lorenz`. All implement `StreamGenerator` trait
+  with deterministic seeded PRNG. Covers sudden, gradual, and recurring drift.
+- **Real capacity utilization diagnostics** for all neural models:
+  - RLS saturation (`1 - trace(P)/trace(P₀)`) replaces `depth_sufficiency: 0.0` stubs
+  - ESN/NGRC: reservoir state entropy (normalized Shannon entropy of per-neuron activity)
+  - Mamba/Attention/TTT: state Frobenius norm ratio
+  - KAN: dead edge fraction via `count_dead_edges()`
+  - SpikeNet: spike rate EWMA
+  - NeuralMoE: gating entropy
+- **Expanded benchmark suite** — 25 datasets (5 binary clf, 3 multiclass, 17 regression),
+  8+ algorithms with proper classification wrappers. Cohen's Kappa and Kappa-Temporal
+  metrics for classification evaluation. Neural showcase datasets for TTT, Mamba, KAN.
+- **QEMU Cortex-M3/M4** — `thumbv7m-none-eabi` and `thumbv7em-none-eabi` targets with
+  runners in `.cargo/config.toml`. All embedded examples check clean on M3.
+- **`SGBT::check_proactive_prune()`** / **`DistributionalSGBT::check_proactive_prune()`** —
+  public method to trigger prune check externally. Interval-based path remains as fallback.
+- **`Factory::with_proactive_prune_interval()`** — wire proactive pruning through AutoML.
+- **`Factory::with_accuracy_based_pruning()`** — wire accuracy-based pruning through AutoML.
+- RLS accessors: `p_matrix()`, `delta()`, `n_features()`.
+
+### Fixed
+
+- **Mamba readout fix** — RLS readout now uses SSM output only (d_in dims) instead of
+  mean-pooled hidden state. The C matrix in SelectiveSSM IS the learned projection
+  (`y = C @ h + D * x`). Mean-pooling destroyed information: n_state=64 performed
+  worse than n_state=32. Now larger state properly improves performance.
+- **TTT projection pretraining** — `StreamingTTT::pretrain_projections()` runs outer-loop
+  backprop on W_K, W_V, W_Q using a warmup data buffer. Like MTS for trees but for
+  projection weights. W_Q gradient through prediction loss, W_K/W_V through reconstruction
+  loss. L2-normalized keys and queries (Titans). Gradient clipping prevents explosion.
+- **KAN marked as research tier** — online B-spline convergence remains unsolved (each
+  sample updates only 1/grid_size of coefficients).
+- **Proactive prune alpha decoupled from interval** — now derived from `grace_period`
+  (`1 - exp(-2/grace_period)`) instead of prune interval. Accuracy tracking responsiveness
+  is tied to tree maturity, not check frequency.
+
 ## [9.8.4] - 2026-03-30
 
 ### Added

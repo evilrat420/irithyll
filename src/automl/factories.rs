@@ -550,6 +550,7 @@ pub struct Factory {
     complexity: usize,
     seed: u64,
     accuracy_based_pruning: bool,
+    proactive_prune_interval: Option<u64>,
 }
 
 impl Factory {
@@ -605,6 +606,7 @@ impl Factory {
             complexity: 500,
             seed: 42,
             accuracy_based_pruning: false,
+            proactive_prune_interval: None,
         }
     }
 
@@ -661,6 +663,7 @@ impl Factory {
             complexity: 1000,
             seed: 42,
             accuracy_based_pruning: false,
+            proactive_prune_interval: None,
         }
     }
 
@@ -701,6 +704,7 @@ impl Factory {
             complexity: 10000,
             seed: 42,
             accuracy_based_pruning: false,
+            proactive_prune_interval: None,
         }
     }
 
@@ -735,6 +739,7 @@ impl Factory {
             complexity: 4000,
             seed: 42,
             accuracy_based_pruning: false,
+            proactive_prune_interval: None,
         }
     }
 
@@ -768,6 +773,7 @@ impl Factory {
             complexity: 8000,
             seed: 42,
             accuracy_based_pruning: false,
+            proactive_prune_interval: None,
         }
     }
 
@@ -808,6 +814,7 @@ impl Factory {
             complexity: 16000,
             seed: 42,
             accuracy_based_pruning: false,
+            proactive_prune_interval: None,
         }
     }
 
@@ -852,6 +859,7 @@ impl Factory {
             complexity: 2000,
             seed: 42,
             accuracy_based_pruning: false,
+            proactive_prune_interval: None,
         }
     }
 
@@ -891,6 +899,7 @@ impl Factory {
             complexity: 3000,
             seed: 42,
             accuracy_based_pruning: false,
+            proactive_prune_interval: None,
         }
     }
 
@@ -929,6 +938,15 @@ impl Factory {
     /// Has no effect on non-tree algorithms.
     pub fn with_accuracy_based_pruning(mut self, enabled: bool) -> Self {
         self.accuracy_based_pruning = enabled;
+        self
+    }
+
+    /// Set the proactive prune interval for SGBT/Distributional factories.
+    ///
+    /// Every `interval` samples, the worst-contributing tree is replaced.
+    /// Has no effect on non-tree algorithms. `None` (default) disables proactive pruning.
+    pub fn with_proactive_prune_interval(mut self, interval: u64) -> Self {
+        self.proactive_prune_interval = Some(interval);
         self
     }
 
@@ -975,7 +993,7 @@ impl ModelFactory for Factory {
                 let feature_subsample_rate = config.get(5);
                 let grace_period = config.get(6) as usize;
 
-                let sgbt_config = SGBTConfig::builder()
+                let mut builder = SGBTConfig::builder()
                     .learning_rate(learning_rate)
                     .n_steps(n_steps)
                     .max_depth(max_depth)
@@ -983,7 +1001,11 @@ impl ModelFactory for Factory {
                     .lambda(lambda)
                     .feature_subsample_rate(feature_subsample_rate)
                     .grace_period(grace_period)
-                    .accuracy_based_pruning(self.accuracy_based_pruning)
+                    .accuracy_based_pruning(self.accuracy_based_pruning);
+                if let Some(interval) = self.proactive_prune_interval {
+                    builder = builder.proactive_prune_interval(interval);
+                }
+                let sgbt_config = builder
                     .build()
                     .expect("Factory::create(Sgbt): invalid config from search space");
 
@@ -998,7 +1020,7 @@ impl ModelFactory for Factory {
                 let feature_subsample_rate = config.get(5);
                 let grace_period = config.get(6) as usize;
 
-                let sgbt_config = SGBTConfig::builder()
+                let mut builder = SGBTConfig::builder()
                     .learning_rate(learning_rate)
                     .n_steps(n_steps)
                     .max_depth(max_depth)
@@ -1006,7 +1028,11 @@ impl ModelFactory for Factory {
                     .lambda(lambda)
                     .feature_subsample_rate(feature_subsample_rate)
                     .grace_period(grace_period)
-                    .accuracy_based_pruning(self.accuracy_based_pruning)
+                    .accuracy_based_pruning(self.accuracy_based_pruning);
+                if let Some(interval) = self.proactive_prune_interval {
+                    builder = builder.proactive_prune_interval(interval);
+                }
+                let sgbt_config = builder
                     .build()
                     .expect("Factory::create(Distributional): invalid config from search space");
 

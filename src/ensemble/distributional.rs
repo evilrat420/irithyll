@@ -420,9 +420,9 @@ impl DistributionalSGBT {
         let empirical_sigma_alpha = config.empirical_sigma_alpha;
         let packed_refresh_interval = config.packed_refresh_interval;
         let n_steps = config.n_steps;
-        let prune_alpha = if let Some(interval) = config.proactive_prune_interval {
-            let interval = interval as f64;
-            1.0 - (-2.0 / interval).exp()
+        let prune_alpha = if config.proactive_prune_interval.is_some() {
+            let gp = config.grace_period.max(1) as f64;
+            1.0 - (-2.0 / gp).exp()
         } else {
             0.01
         };
@@ -569,43 +569,9 @@ impl DistributionalSGBT {
                 }
             }
 
-            if interval > 0 && self.samples_seen % interval == 0 && self.location_steps.len() > 1 {
-                if self.config.accuracy_based_pruning {
-                    // Accuracy-based: prune tree with most negative contribution alignment.
-                    // Protects young trees (below grace_period) and only prunes if harmful.
-                    let grace_period = self.config.grace_period as u64;
-                    let worst = self
-                        .location_steps
-                        .iter()
-                        .enumerate()
-                        .zip(self.contribution_accuracy.iter())
-                        .filter(|((_, step), _)| step.slot().n_samples_seen() >= grace_period)
-                        .min_by(|((_, _), a), ((_, _), b)| {
-                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                        });
-                    if let Some(((worst_idx, _), &worst_acc)) = worst {
-                        if worst_acc < 0.0 {
-                            self.location_steps[worst_idx].slot_mut().replace_active();
-                            self.contribution_accuracy[worst_idx] = 0.0;
-                        }
-                    }
-                } else {
-                    // Variance-based (default): prune tree with smallest prediction variance.
-                    let worst_idx = self
-                        .location_steps
-                        .iter()
-                        .enumerate()
-                        .min_by(|(_, a), (_, b)| {
-                            let a_std = a.slot().prediction_std();
-                            let b_std = b.slot().prediction_std();
-                            a_std
-                                .partial_cmp(&b_std)
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.location_steps[worst_idx].slot_mut().replace_active();
-                }
+            // Interval-based fallback: fire prune check every N samples.
+            if interval > 0 && self.samples_seen % interval == 0 {
+                self.check_proactive_prune();
             }
         }
 
@@ -1624,6 +1590,53 @@ impl DistributionalSGBT {
             .sum()
     }
 
+    /// Manually trigger a proactive prune check on the location chain.
+    ///
+    /// Same semantics as [`crate::ensemble::SGBT::check_proactive_prune`]: finds the worst
+    /// mature tree and replaces it if harmful (accuracy-based) or stale
+    /// (variance-based). Returns `true` if a tree was replaced.
+    pub fn check_proactive_prune(&mut self) -> bool {
+        if self.location_steps.len() <= 1 {
+            return false;
+        }
+        if self.config.accuracy_based_pruning {
+            let grace_period = self.config.grace_period as u64;
+            let worst = self
+                .location_steps
+                .iter()
+                .enumerate()
+                .zip(self.contribution_accuracy.iter())
+                .filter(|((_, step), _)| step.slot().n_samples_seen() >= grace_period)
+                .min_by(|((_, _), a), ((_, _), b)| {
+                    a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            if let Some(((worst_idx, _), &worst_acc)) = worst {
+                if worst_acc < 0.0 {
+                    self.location_steps[worst_idx].slot_mut().replace_active();
+                    self.contribution_accuracy[worst_idx] = 0.0;
+                    return true;
+                }
+            }
+            false
+        } else {
+            let worst_idx = self
+                .location_steps
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| {
+                    let a_std = a.slot().prediction_std();
+                    let b_std = b.slot().prediction_std();
+                    a_std
+                        .partial_cmp(&b_std)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.location_steps[worst_idx].slot_mut().replace_active();
+            true
+        }
+    }
+
     /// Access the location boosting steps (for export/inspection).
     pub fn location_steps(&self) -> &[BoostingStep] {
         &self.location_steps
@@ -2044,9 +2057,9 @@ impl DistributionalSGBT {
         let empirical_sigma_alpha = state.config.empirical_sigma_alpha;
         let packed_refresh_interval = state.config.packed_refresh_interval;
         let n_location_steps = location_steps.len();
-        let prune_alpha = if let Some(interval) = state.config.proactive_prune_interval {
-            let interval = interval as f64;
-            1.0 - (-2.0 / interval).exp()
+        let prune_alpha = if state.config.proactive_prune_interval.is_some() {
+            let gp = state.config.grace_period.max(1) as f64;
+            1.0 - (-2.0 / gp).exp()
         } else {
             0.01
         };
