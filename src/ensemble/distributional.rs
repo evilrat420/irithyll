@@ -2157,6 +2157,10 @@ impl StreamingLearner for DistributionalSGBT {
     fn replacement_count(&self) -> u64 {
         self.total_replacements()
     }
+
+    fn check_proactive_prune(&mut self) -> bool {
+        DistributionalSGBT::check_proactive_prune(self)
+    }
 }
 
 // ---------------------------------------------------------------------------

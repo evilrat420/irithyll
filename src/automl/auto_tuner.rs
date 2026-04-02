@@ -496,6 +496,11 @@ impl AutoTuner {
         self.effective_n_initial
     }
 
+    /// Delegate proactive prune check to the champion model.
+    pub fn check_proactive_prune(&mut self) -> bool {
+        self.champion.check_proactive_prune()
+    }
+
     /// Take a diagnostic snapshot of the current state.
     ///
     /// Returns a complete picture of the champion, all candidates,

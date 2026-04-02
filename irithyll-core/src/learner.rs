@@ -145,4 +145,12 @@ pub trait StreamingLearner: Send + Sync {
     fn replacement_count(&self) -> u64 {
         0
     }
+
+    /// Manually trigger a proactive prune check.
+    ///
+    /// Returns `true` if an internal component was pruned/replaced.
+    /// Default: no-op (returns `false`).
+    fn check_proactive_prune(&mut self) -> bool {
+        false
+    }
 }

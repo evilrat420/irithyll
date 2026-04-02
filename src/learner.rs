@@ -230,6 +230,10 @@ impl<L: Loss> StreamingLearner for SGBTLearner<L> {
     fn replacement_count(&self) -> u64 {
         self.inner.total_replacements()
     }
+
+    fn check_proactive_prune(&mut self) -> bool {
+        self.inner.check_proactive_prune()
+    }
 }
 
 // ---------------------------------------------------------------------------
