@@ -501,6 +501,11 @@ impl AutoTuner {
         self.champion.check_proactive_prune()
     }
 
+    /// Delegate prune half-life update to the champion model.
+    pub fn set_prune_half_life(&mut self, hl: usize) {
+        self.champion.set_prune_half_life(hl);
+    }
+
     /// Take a diagnostic snapshot of the current state.
     ///
     /// Returns a complete picture of the champion, all candidates,

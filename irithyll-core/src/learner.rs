@@ -153,4 +153,10 @@ pub trait StreamingLearner: Send + Sync {
     fn check_proactive_prune(&mut self) -> bool {
         false
     }
+
+    /// Dynamically set the contribution accuracy EWMA half-life.
+    ///
+    /// Recomputes `prune_alpha` so each correction batch contributes equally
+    /// regardless of size. Default: no-op.
+    fn set_prune_half_life(&mut self, _hl: usize) {}
 }

@@ -223,7 +223,7 @@ impl KANLayer {
         // Clip incoming gradient AND per-coefficient update magnitude.
         // The incoming clip prevents extreme deltas from large-magnitude targets.
         // The update clip (saturating arithmetic) matches Hoang et al. (2026)
-        // hardware implementation — prevents coefficient explosion on any data scale.
+        // hardware implementation — bounds coefficient magnitude across data scales.
         const GRAD_CLIP: f64 = 10.0;
         const UPDATE_CLIP: f64 = 0.5;
 
@@ -274,7 +274,7 @@ impl KANLayer {
                                 let vi = coeff_base + coeff_idx;
                                 let update = self.momentum * self.velocity[vi] + lr * grad;
                                 // Saturating arithmetic: clip update magnitude
-                                // (Hoang et al., 2026 — prevents explosion on any data scale)
+                                // (Hoang et al., 2026 — bounds update magnitude across data scales)
                                 let clipped = update.clamp(-UPDATE_CLIP, UPDATE_CLIP);
                                 self.velocity[vi] = clipped;
                                 self.coefficients[vi] -= clipped;

@@ -234,6 +234,10 @@ impl<L: Loss> StreamingLearner for SGBTLearner<L> {
     fn check_proactive_prune(&mut self) -> bool {
         self.inner.check_proactive_prune()
     }
+
+    fn set_prune_half_life(&mut self, hl: usize) {
+        self.inner.set_prune_half_life(hl);
+    }
 }
 
 // ---------------------------------------------------------------------------

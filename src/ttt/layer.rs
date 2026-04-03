@@ -234,7 +234,7 @@ impl TTTLayer {
             }
         }
 
-        // 4. Update fast weights (with gradient clipping to prevent explosion)
+        // 4. Update fast weights (with per-element gradient clipping)
         //    In batch_mode: accumulate clipped gradients for later flush.
         //    Otherwise: apply immediately (legacy online behavior).
         if self.batch_mode {

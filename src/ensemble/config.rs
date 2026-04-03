@@ -341,7 +341,7 @@ pub struct SGBTConfig {
     /// Maximum absolute leaf output value.
     ///
     /// When `Some(max)`, leaf predictions are clamped to `[-max, max]`.
-    /// Prevents runaway leaf weights from causing prediction explosions
+    /// Bounds leaf weight magnitude to maintain prediction stability
     /// in feedback loops. `None` (default) means no clamping.
     #[serde(default)]
     pub max_leaf_output: Option<f64>,
@@ -485,6 +485,15 @@ pub struct SGBTConfig {
     /// Only relevant when `proactive_prune_interval` is `Some`.
     #[serde(default)]
     pub accuracy_based_pruning: bool,
+
+    /// Half-life (in samples) for the contribution accuracy EWMA.
+    ///
+    /// Controls how many recent samples influence the pruning decision.
+    /// `None` (default): auto-derived from tree lifetime — uses `adaptive_mts`
+    /// base if set, else `max_tree_samples` if set, else `grace_period`.
+    /// `Some(n)`: explicit half-life for fine-grained control.
+    #[serde(default)]
+    pub prune_half_life: Option<usize>,
 }
 
 fn default_empirical_sigma_alpha() -> f64 {
@@ -541,6 +550,7 @@ impl Default for SGBTConfig {
             adaptive_mts: None,
             proactive_prune_interval: None,
             accuracy_based_pruning: false,
+            prune_half_life: None,
         }
     }
 }
@@ -802,7 +812,7 @@ impl SGBTConfigBuilder {
     /// Set the maximum absolute leaf output value.
     ///
     /// Clamps leaf predictions to `[-max, max]`, breaking feedback loops
-    /// that cause prediction explosions.
+    /// that cause unbounded prediction growth.
     pub fn max_leaf_output(mut self, max: f64) -> Self {
         self.config.max_leaf_output = Some(max);
         self
@@ -904,6 +914,14 @@ impl SGBTConfigBuilder {
     /// with the ensemble residual instead of prediction variance.
     pub fn accuracy_based_pruning(mut self, enabled: bool) -> Self {
         self.config.accuracy_based_pruning = enabled;
+        self
+    }
+
+    /// Set the half-life for the contribution accuracy EWMA used by proactive pruning.
+    ///
+    /// Overrides the automatic derivation (adaptive_mts base → max_tree_samples → grace_period).
+    pub fn prune_half_life(mut self, n: usize) -> Self {
+        self.config.prune_half_life = Some(n);
         self
     }
 

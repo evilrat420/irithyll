@@ -421,8 +421,16 @@ impl DistributionalSGBT {
         let packed_refresh_interval = config.packed_refresh_interval;
         let n_steps = config.n_steps;
         let prune_alpha = if config.proactive_prune_interval.is_some() {
-            let gp = config.grace_period.max(1) as f64;
-            1.0 - (-2.0 / gp).exp()
+            let hl = config.prune_half_life.unwrap_or_else(|| {
+                if let Some((base_mts, _)) = config.adaptive_mts {
+                    base_mts as usize
+                } else if let Some(mts) = config.max_tree_samples {
+                    mts as usize
+                } else {
+                    config.grace_period.max(1)
+                }
+            });
+            1.0 - (-2.0 / hl.max(1) as f64).exp()
         } else {
             0.01
         };
@@ -1637,6 +1645,14 @@ impl DistributionalSGBT {
         }
     }
 
+    /// Dynamically set the contribution accuracy EWMA half-life.
+    ///
+    /// Recomputes `prune_alpha` from the given half-life so each correction
+    /// batch contributes equally regardless of size.
+    pub fn set_prune_half_life(&mut self, hl: usize) {
+        self.prune_alpha = 1.0 - (-2.0 / hl.max(1) as f64).exp();
+    }
+
     /// Access the location boosting steps (for export/inspection).
     pub fn location_steps(&self) -> &[BoostingStep] {
         &self.location_steps
@@ -2058,8 +2074,16 @@ impl DistributionalSGBT {
         let packed_refresh_interval = state.config.packed_refresh_interval;
         let n_location_steps = location_steps.len();
         let prune_alpha = if state.config.proactive_prune_interval.is_some() {
-            let gp = state.config.grace_period.max(1) as f64;
-            1.0 - (-2.0 / gp).exp()
+            let hl = state.config.prune_half_life.unwrap_or_else(|| {
+                if let Some((base_mts, _)) = state.config.adaptive_mts {
+                    base_mts as usize
+                } else if let Some(mts) = state.config.max_tree_samples {
+                    mts as usize
+                } else {
+                    state.config.grace_period.max(1)
+                }
+            });
+            1.0 - (-2.0 / hl.max(1) as f64).exp()
         } else {
             0.01
         };
@@ -2160,6 +2184,10 @@ impl StreamingLearner for DistributionalSGBT {
 
     fn check_proactive_prune(&mut self) -> bool {
         DistributionalSGBT::check_proactive_prune(self)
+    }
+
+    fn set_prune_half_life(&mut self, hl: usize) {
+        DistributionalSGBT::set_prune_half_life(self, hl);
     }
 }
 

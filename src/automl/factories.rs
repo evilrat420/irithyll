@@ -551,6 +551,7 @@ pub struct Factory {
     seed: u64,
     accuracy_based_pruning: bool,
     proactive_prune_interval: Option<u64>,
+    prune_half_life: Option<usize>,
 }
 
 impl Factory {
@@ -607,6 +608,7 @@ impl Factory {
             seed: 42,
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
+            prune_half_life: None,
         }
     }
 
@@ -664,6 +666,7 @@ impl Factory {
             seed: 42,
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
+            prune_half_life: None,
         }
     }
 
@@ -705,6 +708,7 @@ impl Factory {
             seed: 42,
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
+            prune_half_life: None,
         }
     }
 
@@ -740,6 +744,7 @@ impl Factory {
             seed: 42,
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
+            prune_half_life: None,
         }
     }
 
@@ -774,6 +779,7 @@ impl Factory {
             seed: 42,
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
+            prune_half_life: None,
         }
     }
 
@@ -815,6 +821,7 @@ impl Factory {
             seed: 42,
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
+            prune_half_life: None,
         }
     }
 
@@ -860,6 +867,7 @@ impl Factory {
             seed: 42,
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
+            prune_half_life: None,
         }
     }
 
@@ -900,6 +908,7 @@ impl Factory {
             seed: 42,
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
+            prune_half_life: None,
         }
     }
 
@@ -947,6 +956,15 @@ impl Factory {
     /// Has no effect on non-tree algorithms. `None` (default) disables proactive pruning.
     pub fn with_proactive_prune_interval(mut self, interval: u64) -> Self {
         self.proactive_prune_interval = Some(interval);
+        self
+    }
+
+    /// Set the prune half-life for the contribution accuracy EWMA.
+    ///
+    /// Overrides the automatic derivation used by proactive pruning.
+    /// Has no effect on non-tree algorithms.
+    pub fn with_prune_half_life(mut self, hl: usize) -> Self {
+        self.prune_half_life = Some(hl);
         self
     }
 
@@ -1005,6 +1023,9 @@ impl ModelFactory for Factory {
                 if let Some(interval) = self.proactive_prune_interval {
                     builder = builder.proactive_prune_interval(interval);
                 }
+                if let Some(hl) = self.prune_half_life {
+                    builder = builder.prune_half_life(hl);
+                }
                 let sgbt_config = builder
                     .build()
                     .expect("Factory::create(Sgbt): invalid config from search space");
@@ -1031,6 +1052,9 @@ impl ModelFactory for Factory {
                     .accuracy_based_pruning(self.accuracy_based_pruning);
                 if let Some(interval) = self.proactive_prune_interval {
                     builder = builder.proactive_prune_interval(interval);
+                }
+                if let Some(hl) = self.prune_half_life {
+                    builder = builder.prune_half_life(hl);
                 }
                 let sgbt_config = builder
                     .build()

@@ -488,7 +488,7 @@ impl StreamingLearner for StreamingKAN {
         }
 
         // 3. Normalize target via Welford's online algorithm.
-        //    KAN trains in normalized target space to prevent gradient explosion
+        //    KAN trains in normalized target space for stable gradient magnitudes
         //    when target magnitudes vary across regimes (e.g., Feynman equations).
         self.target_count += 1;
         let tn = self.target_count as f64;
@@ -548,9 +548,9 @@ impl StreamingLearner for StreamingKAN {
             }
         }
 
-        // 7. Coefficient magnitude guard: if any coefficient exceeds 1e6,
-        //    scale ALL coefficients down by 0.5 to prevent cascading NaN from
-        //    divergent spline weights during sudden distribution shifts.
+        // 7. Coefficient magnitude guard: reset non-finite coefficients to zero
+        //    and scale remaining by 0.5 when any exceed 1e6. Divergent coefficients
+        //    typically signal a configuration issue (learning rate, input normalization).
         let any_extreme = self.layers.iter().any(|l| {
             l.coefficients()
                 .iter()

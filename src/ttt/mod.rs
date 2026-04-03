@@ -490,7 +490,7 @@ impl StreamingTTT {
                 *g /= n;
             }
 
-            // Clip gradients (prevent explosion).
+            // Clip gradients to bound update magnitude.
             let max_norm = 1.0;
             for grads in [&mut acc_grad_wq, &mut acc_grad_wk, &mut acc_grad_wv] {
                 let norm: f64 = grads.iter().map(|g| g * g).sum::<f64>().sqrt();

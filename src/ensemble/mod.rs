@@ -256,8 +256,16 @@ impl<L: Loss> SGBT<L> {
         let n = config.n_steps;
         let has_pruning = config.quality_prune_alpha.is_some();
         let prune_alpha = if config.proactive_prune_interval.is_some() {
-            let gp = config.grace_period.max(1) as f64;
-            1.0 - (-2.0 / gp).exp()
+            let hl = config.prune_half_life.unwrap_or_else(|| {
+                if let Some((base_mts, _)) = config.adaptive_mts {
+                    base_mts as usize
+                } else if let Some(mts) = config.max_tree_samples {
+                    mts as usize
+                } else {
+                    config.grace_period.max(1)
+                }
+            });
+            1.0 - (-2.0 / hl.max(1) as f64).exp()
         } else {
             0.01
         };
@@ -1020,6 +1028,14 @@ impl<L: Loss> SGBT<L> {
         }
     }
 
+    /// Dynamically set the contribution accuracy EWMA half-life.
+    ///
+    /// Recomputes `prune_alpha` from the given half-life so each correction
+    /// batch contributes equally regardless of size.
+    pub fn set_prune_half_life(&mut self, hl: usize) {
+        self.prune_alpha = 1.0 - (-2.0 / hl.max(1) as f64).exp();
+    }
+
     /// Immutable access to the boosting steps.
     ///
     /// Useful for model inspection and export (e.g., ONNX serialization).
@@ -1477,8 +1493,16 @@ impl SGBT<Box<dyn Loss>> {
         };
 
         let prune_alpha = if state.config.proactive_prune_interval.is_some() {
-            let gp = state.config.grace_period.max(1) as f64;
-            1.0 - (-2.0 / gp).exp()
+            let hl = state.config.prune_half_life.unwrap_or_else(|| {
+                if let Some((base_mts, _)) = state.config.adaptive_mts {
+                    base_mts as usize
+                } else if let Some(mts) = state.config.max_tree_samples {
+                    mts as usize
+                } else {
+                    state.config.grace_period.max(1)
+                }
+            });
+            1.0 - (-2.0 / hl.max(1) as f64).exp()
         } else {
             0.01
         };

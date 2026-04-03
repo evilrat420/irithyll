@@ -325,7 +325,7 @@ impl RecursiveLeastSquares {
     ///
     /// Called internally when the P matrix becomes ill-conditioned (extreme
     /// diagonal values or NaN). This is a numerical safety guard that prevents
-    /// the RLS readout from exploding after sudden distribution shifts.
+    /// the RLS readout from diverging after sudden distribution shifts.
     fn reset_covariance(&mut self) {
         if let Some(d) = self.n_features {
             // Reset P to delta * I
@@ -445,7 +445,7 @@ impl StreamingLearner for RecursiveLeastSquares {
         outer_subtract_scaled(&mut self.p_matrix, &k, &px, effective_ff, n);
 
         // Numerical stability guard: re-regularize if P becomes ill-conditioned.
-        // This prevents the covariance matrix from exploding after sudden
+        // This prevents the covariance matrix from diverging after sudden
         // distribution shifts (concept drift).
         self.check_covariance_health();
 
