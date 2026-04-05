@@ -545,7 +545,8 @@ impl DistributionalSGBT {
             } else {
                 1.0
             };
-            let effective_mts = (base_mts as f64 / (1.0 + k * sigma_ratio)).max(100.0) as u64;
+            let floor = (base_mts as f64 * self.config.adaptive_mts_floor).max(100.0);
+            let effective_mts = (base_mts as f64 / (1.0 + k * sigma_ratio)).max(floor) as u64;
             for step in &mut self.location_steps {
                 step.slot_mut().set_max_tree_samples(Some(effective_mts));
             }
@@ -1845,7 +1846,8 @@ impl DistributionalSGBT {
             } else {
                 1.0
             };
-            (base_mts as f64 / (1.0 + k * sigma_ratio)).max(100.0) as u64
+            let floor = (base_mts as f64 * self.config.adaptive_mts_floor).max(100.0);
+            (base_mts as f64 / (1.0 + k * sigma_ratio)).max(floor) as u64
         });
 
         crate::ensemble::diagnostics::DistributionalDiagnostics {

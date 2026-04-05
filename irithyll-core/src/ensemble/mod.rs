@@ -293,8 +293,9 @@ impl<L: Loss> SGBT<L> {
                 1.0
             };
             let factor = 1.0 / (1.0 + k * normalized);
-            let effective_mts =
-                ((base_mts as f64) * factor).max(self.config.grace_period as f64 * 2.0) as u64;
+            let floor = (base_mts as f64 * self.config.adaptive_mts_floor)
+                .max(self.config.grace_period as f64 * 2.0);
+            let effective_mts = ((base_mts as f64) * factor).max(floor) as u64;
             for step in &mut self.steps {
                 step.slot_mut().set_max_tree_samples(Some(effective_mts));
             }

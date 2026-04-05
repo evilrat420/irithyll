@@ -210,6 +210,18 @@ pub struct SGBTConfig {
     #[cfg_attr(feature = "serde", serde(default))]
     pub adaptive_mts: Option<(u64, f64)>,
 
+    /// Minimum effective MTS as a fraction of `base_mts`.
+    ///
+    /// When adaptive MTS is active, the effective tree lifetime can shrink
+    /// aggressively under high uncertainty. This floor prevents runaway
+    /// replacement by clamping `effective_mts >= base_mts * fraction`.
+    ///
+    /// The hard floor (grace_period * 2) still applies beneath this.
+    ///
+    /// Default: `0.0` (only the hard floor applies).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub adaptive_mts_floor: f64,
+
     /// Proactive tree pruning interval.
     ///
     /// Every `interval` training samples, the tree with the lowest EWMA
@@ -512,6 +524,7 @@ impl Default for SGBTConfig {
             leaf_half_life: None,
             max_tree_samples: None,
             adaptive_mts: None,
+            adaptive_mts_floor: 0.0,
             proactive_prune_interval: None,
             split_reeval_interval: None,
             feature_names: None,
@@ -679,6 +692,18 @@ impl SGBTConfigBuilder {
     /// Overrides `max_tree_samples` when set.
     pub fn adaptive_mts(mut self, base_mts: u64, k: f64) -> Self {
         self.config.adaptive_mts = Some((base_mts, k));
+        self
+    }
+
+    /// Set a minimum effective MTS as a fraction of `base_mts`.
+    ///
+    /// Prevents adaptive MTS from shrinking tree lifetime below
+    /// `base_mts * fraction`. For example, `0.25` ensures effective MTS
+    /// never drops below 25% of `base_mts`.
+    ///
+    /// Only meaningful when `adaptive_mts` is also set.
+    pub fn adaptive_mts_floor(mut self, fraction: f64) -> Self {
+        self.config.adaptive_mts_floor = fraction;
         self
     }
 
@@ -976,6 +1001,14 @@ impl SGBTConfigBuilder {
             if k <= 0.0 {
                 return Err(ConfigError::out_of_range("adaptive_mts.k", "must be > 0", k).into());
             }
+        }
+        if !(0.0..=1.0).contains(&c.adaptive_mts_floor) {
+            return Err(ConfigError::out_of_range(
+                "adaptive_mts_floor",
+                "must be in [0.0, 1.0]",
+                c.adaptive_mts_floor,
+            )
+            .into());
         }
         if let Some(interval) = c.proactive_prune_interval {
             if interval < 100 {

@@ -460,6 +460,18 @@ pub struct SGBTConfig {
     #[serde(default)]
     pub adaptive_mts: Option<(u64, f64)>,
 
+    /// Minimum effective MTS as a fraction of `base_mts`.
+    ///
+    /// When adaptive MTS is active, the effective tree lifetime can shrink
+    /// aggressively under high uncertainty. This floor prevents runaway
+    /// replacement by clamping `effective_mts >= base_mts * fraction`.
+    ///
+    /// The hard floor of 100 samples still applies beneath this.
+    ///
+    /// Default: `0.0` (only the hard floor of 100 applies).
+    #[serde(default)]
+    pub adaptive_mts_floor: f64,
+
     /// Proactive pruning interval.
     ///
     /// Every `interval` samples, the worst-contributing tree is identified
@@ -548,6 +560,7 @@ impl Default for SGBTConfig {
             packed_refresh_interval: 0,
             soft_routing: false,
             adaptive_mts: None,
+            adaptive_mts_floor: 0.0,
             proactive_prune_interval: None,
             accuracy_based_pruning: false,
             prune_half_life: None,
@@ -899,6 +912,18 @@ impl SGBTConfigBuilder {
         self
     }
 
+    /// Set a minimum effective MTS as a fraction of `base_mts`.
+    ///
+    /// Prevents adaptive MTS from shrinking tree lifetime below
+    /// `base_mts * fraction`. For example, `0.25` ensures effective MTS
+    /// never drops below 25% of `base_mts`.
+    ///
+    /// Only meaningful when `adaptive_mts` is also set.
+    pub fn adaptive_mts_floor(mut self, fraction: f64) -> Self {
+        self.config.adaptive_mts_floor = fraction;
+        self
+    }
+
     /// Set proactive pruning interval.
     ///
     /// Every `interval` samples, the worst-contributing tree is replaced.
@@ -1173,6 +1198,14 @@ impl SGBTConfigBuilder {
             if k <= 0.0 {
                 return Err(ConfigError::out_of_range("adaptive_mts.k", "must be > 0", k).into());
             }
+        }
+        if !(0.0..=1.0).contains(&c.adaptive_mts_floor) {
+            return Err(ConfigError::out_of_range(
+                "adaptive_mts_floor",
+                "must be in [0.0, 1.0]",
+                c.adaptive_mts_floor,
+            )
+            .into());
         }
 
         // -- Proactive prune interval --
