@@ -2191,6 +2191,22 @@ impl StreamingLearner for DistributionalSGBT {
     fn set_prune_half_life(&mut self, hl: usize) {
         DistributionalSGBT::set_prune_half_life(self, hl);
     }
+
+    fn tree_structure(&self) -> Vec<(usize, usize, f64, f64, u64)> {
+        let diag = self.diagnostics();
+        diag.trees
+            .iter()
+            .map(|t| {
+                (
+                    t.max_depth_reached,
+                    t.n_leaves,
+                    t.leaf_weight_stats.2,
+                    t.leaf_weight_stats.3,
+                    t.samples_seen,
+                )
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -159,4 +159,12 @@ pub trait StreamingLearner: Send + Sync {
     /// Recomputes `prune_alpha` so each correction batch contributes equally
     /// regardless of size. Default: no-op.
     fn set_prune_half_life(&mut self, _hl: usize) {}
+
+    /// Optional tree-level structure diagnostics.
+    ///
+    /// Returns per-tree: `(depth, n_leaves, leaf_weight_mean, leaf_weight_std, samples_seen)`.
+    /// Default: empty vec (model has no trees).
+    fn tree_structure(&self) -> Vec<(usize, usize, f64, f64, u64)> {
+        Vec::new()
+    }
 }

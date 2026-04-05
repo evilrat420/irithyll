@@ -238,6 +238,14 @@ impl<L: Loss> StreamingLearner for SGBTLearner<L> {
     fn set_prune_half_life(&mut self, hl: usize) {
         self.inner.set_prune_half_life(hl);
     }
+
+    fn tree_structure(&self) -> Vec<(usize, usize, f64, f64, u64)> {
+        let diag = self.inner.diagnostics_overview();
+        diag.trees
+            .iter()
+            .map(|t| (t.max_depth, t.n_leaves, 0.0, 0.0, t.n_samples))
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------

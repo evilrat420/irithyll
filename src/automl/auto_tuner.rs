@@ -699,6 +699,10 @@ impl StreamingLearner for AutoTuner {
         self.last_replacement_count = 0;
         self.start_tournament();
     }
+
+    fn tree_structure(&self) -> Vec<(usize, usize, f64, f64, u64)> {
+        self.champion.tree_structure()
+    }
 }
 
 // ===========================================================================
