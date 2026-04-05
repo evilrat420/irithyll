@@ -260,6 +260,10 @@ impl StreamingLearner for StreamingAttentionModel {
             None => [0.0; 5],
         }
     }
+
+    fn readout_weights(&self) -> Option<&[f64]> {
+        self.readout.readout_weights()
+    }
 }
 
 // ---------------------------------------------------------------------------

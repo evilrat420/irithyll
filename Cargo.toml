@@ -3,7 +3,7 @@ members = [".", "irithyll-python", "irithyll-core", "irithyll-cli"]
 
 [package]
 name = "irithyll"
-version = "9.8.5"
+version = "9.9.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Streaming ML in Rust -- gradient boosted trees, neural architectures (TTT/KAN/MoE/Mamba/SNN), AutoML, kernel methods, and composable pipelines"
@@ -24,7 +24,7 @@ serde_json = { version = "1.0", optional = true }
 bincode = { version = "2", features = ["serde"], optional = true }
 thiserror = "2.0"
 tracing = "0.1"
-irithyll-core = { path = "irithyll-core", version = "0.9.1", features = ["std", "serde"] }
+irithyll-core = { path = "irithyll-core", version = "0.9.2", features = ["std", "serde"] }
 
 # Optional acceleration dependencies (activated via feature flags)
 rayon = { version = "1.10", optional = true }

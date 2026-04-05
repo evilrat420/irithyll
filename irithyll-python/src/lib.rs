@@ -2226,6 +2226,278 @@ impl PyNeuralMoE {
 }
 
 // ---------------------------------------------------------------------------
+// ProjectionConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for online projection learning (PAST subspace tracker).
+///
+/// Wraps the Rust ``ProjectionConfig`` builder with validated defaults.
+///
+/// Example::
+///
+///     config = ProjectionConfig(rank=8, lambda_=0.9999, warmup=200)
+///
+#[pyclass(name = "ProjectionConfig")]
+#[derive(Clone)]
+struct PyProjectionConfig {
+    rank: usize,
+    lambda_: f64,
+    delta: f64,
+    warmup: usize,
+    seed: u64,
+    supervised_lr: f64,
+}
+
+#[pymethods]
+impl PyProjectionConfig {
+    /// Create a projection configuration.
+    ///
+    /// Args:
+    ///     rank: projection rank / output dimension (default: 8)
+    ///     lambda_: PAST forgetting factor (default: 0.9999)
+    ///     delta: initial P diagonal scaling (default: 100.0)
+    ///     warmup: warmup samples before PAST updates (default: 200)
+    ///     seed: RNG seed for Xavier init (default: 42)
+    ///     supervised_lr: supervised projection gradient LR (default: 0.001)
+    #[new]
+    #[pyo3(signature = (rank=8, lambda_=0.9999, delta=100.0, warmup=200, seed=42, supervised_lr=0.001))]
+    fn new(
+        rank: usize,
+        lambda_: f64,
+        delta: f64,
+        warmup: usize,
+        seed: u64,
+        supervised_lr: f64,
+    ) -> Self {
+        Self {
+            rank,
+            lambda_,
+            delta,
+            warmup,
+            seed,
+            supervised_lr,
+        }
+    }
+
+    #[getter]
+    fn rank(&self) -> usize {
+        self.rank
+    }
+
+    #[getter]
+    fn lambda_(&self) -> f64 {
+        self.lambda_
+    }
+
+    #[getter]
+    fn delta(&self) -> f64 {
+        self.delta
+    }
+
+    #[getter]
+    fn warmup(&self) -> usize {
+        self.warmup
+    }
+
+    #[getter]
+    fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    #[getter]
+    fn supervised_lr(&self) -> f64 {
+        self.supervised_lr
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ProjectionConfig(rank={}, lambda_={}, delta={}, warmup={}, seed={}, supervised_lr={})",
+            self.rank, self.lambda_, self.delta, self.warmup, self.seed, self.supervised_lr
+        )
+    }
+}
+
+impl PyProjectionConfig {
+    /// Build the Rust `ProjectionConfig`, validating all parameters.
+    fn build_config(&self) -> PyResult<irithyll::ProjectionConfig> {
+        irithyll::ProjectionConfig::builder()
+            .rank(self.rank)
+            .lambda(self.lambda_)
+            .delta(self.delta)
+            .warmup(self.warmup)
+            .seed(self.seed)
+            .supervised_lr(self.supervised_lr)
+            .build()
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ProjectedLearner
+// ---------------------------------------------------------------------------
+
+/// Online projection wrapper for any streaming learner.
+///
+/// Normalizes raw inputs, projects them through an adaptive PAST subspace
+/// tracker, and feeds the reduced features to the inner model. The inner
+/// model always sees ``rank``-dimensional features.
+///
+/// When the inner model exposes RLS readout weights, the projection uses
+/// supervised gradient updates. Otherwise it falls back to unsupervised
+/// streaming PCA.
+///
+/// Supported inner model types: ``"rls"``, ``"linear"``, ``"esn"``,
+/// ``"mamba"``, ``"spikenet"``, ``"gla"``, ``"ttt"``, ``"kan"``, ``"sgbt"``.
+///
+/// Example::
+///
+///     config = ProjectionConfig(rank=8, warmup=100)
+///     model = ProjectedLearner("rls", d_in=50, config=config)
+///     model.train([1.0] * 50, 3.0)
+///     pred = model.predict([1.0] * 50)
+///
+#[pyclass(name = "ProjectedLearner")]
+struct PyProjectedLearner {
+    inner: irithyll::ProjectedLearner,
+}
+
+#[pymethods]
+impl PyProjectedLearner {
+    /// Create a projected learner wrapping the given model type.
+    ///
+    /// The inner model is configured for ``rank``-dimensional input (the
+    /// projection output dimension), not ``d_in``.
+    ///
+    /// Args:
+    ///     model_type: one of "rls", "linear", "esn", "mamba", "spikenet",
+    ///         "gla", "ttt", "kan", "sgbt"
+    ///     d_in: original input dimensionality (before projection)
+    ///     config: ProjectionConfig (default: rank=8, lambda_=0.9999)
+    ///     learning_rate: learning rate for "linear" (default: 0.01)
+    ///     forgetting_factor: forgetting factor for "rls" (default: 0.99)
+    ///     n_reservoir: reservoir size for "esn" (default: 50)
+    ///     n_hidden: hidden neurons for "spikenet" (default: 64)
+    ///     n_steps: boosting steps for "sgbt" (default: 50)
+    #[new]
+    #[pyo3(signature = (model_type, d_in, config=None, learning_rate=0.01, forgetting_factor=0.99, n_reservoir=50, n_hidden=64, n_steps=50))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        model_type: &str,
+        d_in: usize,
+        config: Option<PyProjectionConfig>,
+        learning_rate: f64,
+        forgetting_factor: f64,
+        n_reservoir: usize,
+        n_hidden: usize,
+        n_steps: usize,
+    ) -> PyResult<Self> {
+        let proj_config = match config {
+            Some(c) => c.build_config()?,
+            None => irithyll::ProjectionConfig::builder()
+                .build()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+        };
+
+        let rank = proj_config.rank;
+
+        let learner: Box<dyn irithyll::StreamingLearner> = match model_type {
+            "rls" => Box::new(irithyll::rls(forgetting_factor)),
+            "linear" => Box::new(irithyll::linear(learning_rate)),
+            "esn" => Box::new(irithyll::esn(n_reservoir, 0.9)),
+            "mamba" => Box::new(irithyll::StreamingMamba::new(
+                irithyll::MambaConfig::builder()
+                    .d_in(rank)
+                    .build()
+                    .map_err(|e| PyValueError::new_err(e.to_string()))?,
+            )),
+            "spikenet" => Box::new(irithyll::spikenet(n_hidden)),
+            "gla" => Box::new(irithyll::attention::gla(rank, 1)),
+            "ttt" => Box::new(irithyll::ttt::StreamingTTT::new(
+                irithyll::ttt::TTTConfig::builder()
+                    .d_model(rank)
+                    .build()
+                    .map_err(|e| PyValueError::new_err(format!("{e}")))?,
+            )),
+            "kan" => Box::new(irithyll::kan::StreamingKAN::new(
+                irithyll::kan::KANConfig::builder()
+                    .layer_sizes(vec![rank, rank * 2, 1])
+                    .build()
+                    .map_err(|e| PyValueError::new_err(format!("{e}")))?,
+            )),
+            "sgbt" => Box::new(irithyll::sgbt(n_steps, learning_rate)),
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown model_type '{}': expected 'rls', 'linear', 'esn', 'mamba', \
+                     'spikenet', 'gla', 'ttt', 'kan', or 'sgbt'",
+                    other
+                )));
+            }
+        };
+
+        let inner = irithyll::ProjectedLearner::new(learner, d_in, proj_config);
+        Ok(Self { inner })
+    }
+
+    /// Train on a single sample.
+    ///
+    /// Args:
+    ///     features: list/array of raw features (length ``d_in``)
+    ///     target: target value (float)
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    ///
+    /// Args:
+    ///     features: list/array of raw features (length ``d_in``)
+    ///
+    /// Returns:
+    ///     float: prediction
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    /// Whether the warmup period has completed.
+    #[getter]
+    fn warmup_complete(&self) -> bool {
+        self.inner.warmup_complete()
+    }
+
+    /// Raw diagnostic signals for adaptive tuning.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::StreamingLearner;
+        self.inner.diagnostics_array()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!(
+            "ProjectedLearner(d_in={}, rank={}, samples={}, warmup_complete={})",
+            self.inner.tracker().d_in(),
+            self.inner.config().rank,
+            self.inner.n_samples_seen(),
+            self.inner.warmup_complete()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AutoTuner
 // ---------------------------------------------------------------------------
 
@@ -2270,6 +2542,18 @@ impl PyAutoTuner {
             "ttt" => irithyll::automl::Factory::ttt(n_features),
             "spikenet" | "spike_net" => irithyll::automl::Factory::spike_net(),
             "attention" => irithyll::automl::Factory::attention(n_features),
+            "projected_mamba" => {
+                irithyll::automl::Factory::projected_mamba(n_features, n_features / 2)
+            }
+            "projected_ttt" => irithyll::automl::Factory::projected_ttt(n_features, n_features / 2),
+            "projected_kan" => irithyll::automl::Factory::projected_kan(n_features, n_features / 2),
+            "projected_sgbt" => {
+                irithyll::automl::Factory::projected_sgbt(n_features, n_features / 2)
+            }
+            "projected_esn" => irithyll::automl::Factory::projected_esn(n_features, n_features / 2),
+            "projected_attention" => {
+                irithyll::automl::Factory::projected_attention(n_features, n_features / 2)
+            }
             _ => {
                 return Err(PyValueError::new_err(format!(
                     "Unknown algorithm: {algorithm}"
@@ -2378,6 +2662,8 @@ fn irithyll_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStreamingTTT>()?;
     m.add_class::<PyStreamingKAN>()?;
     m.add_class::<PyNeuralMoE>()?;
+    m.add_class::<PyProjectionConfig>()?;
+    m.add_class::<PyProjectedLearner>()?;
     m.add_class::<PyAutoTuner>()?;
     Ok(())
 }

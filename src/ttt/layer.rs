@@ -5,8 +5,9 @@
 //! feedback is available:
 //!
 //! - **With prediction feedback** (after warmup): the fast weight update is
-//!   directed by the prediction error projected onto the query space. This
-//!   makes W_fast directly minimize prediction loss rather than reconstruction.
+//!   directed by the prediction error projected onto the query space:
+//!   `residual = -pred_err * q` (q is L2-normalized, no /d scaling needed).
+//!   This makes W_fast directly minimize prediction loss.
 //! - **Without prediction feedback** (during warmup): falls back to the
 //!   self-supervised reconstruction loss `L = ||W * k_t - (v_t - k_t)||^2`.
 //!
@@ -67,17 +68,17 @@ fn standard_normal(state: &mut u64) -> f64 {
 /// 1. Project: `k = W_K · x`, `v = W_V · x`, `q = W_Q · x`
 /// 2. Inner forward: `z = W_fast · k`
 /// 3. Gradient: compute residual, then `grad = residual · k^T`
-///    - With prediction feedback: `residual = -pred_err * q / d` (prediction-directed)
+///    - With prediction feedback: `residual = -pred_err * q` (prediction-directed)
 ///    - Without (warmup): `residual = z - (v - k)` (reconstruction)
-/// 4. Update: apply or accumulate gradient (see `batch_mode`)
-/// 5. Output: `q + LN(GELU(q + W_fast · q))` (nonlinear with residual)
+/// 4. Update: apply gradient immediately (single-sample streaming)
+/// 5. Output: `q + LN(GELU(q + W_fast · k))` (nonlinear with residual)
 ///
 /// # Mini-batch mode
 ///
-/// When `batch_mode` is true, gradients are accumulated instead of applied
-/// immediately. Call [`flush_batch`] to apply the averaged gradient as a
-/// single update. Sun et al. (2024) prove b=16 gives 1.7 perplexity
-/// improvement over b=1 (online).
+/// When `batch_mode` is true (batch_size > 1), gradients are accumulated
+/// instead of applied immediately. Call [`flush_batch`] to apply the averaged
+/// gradient as a single update. Default is single-sample streaming (batch_size=1)
+/// for maximum responsiveness to regime changes.
 ///
 /// # References
 ///
@@ -118,7 +119,8 @@ pub(crate) struct TTTLayer {
     /// External prediction error signal for prediction-directed fast weight updates.
     ///
     /// When non-zero, replaces the reconstruction residual with a prediction-
-    /// directed residual: `-pred_err * q[i] / d`. This makes the fast weight
+    /// directed residual: `-pred_err * q[i]`. The query vector q is already
+    /// L2-normalized, so no /d scaling is needed. This makes the fast weight
     /// update directly minimize prediction loss instead of reconstruction loss.
     /// Falls back to reconstruction during warmup (before first prediction).
     pub prediction_feedback: f64,
@@ -182,10 +184,10 @@ impl TTTLayer {
     /// 1. Project: `k = W_K · x`, `v = W_V · x`, `q = W_Q · x`
     /// 2. Inner forward: `z = W_fast · k`
     /// 3. Gradient: compute residual, then `grad = residual · k^T`
-    ///    - With prediction feedback: `residual = -pred_err * q / d` (prediction-directed)
+    ///    - With prediction feedback: `residual = -pred_err * q` (prediction-directed)
     ///    - Without (warmup): `residual = z - (v - k)` (reconstruction)
-    /// 4. Update: apply or accumulate gradient (batch_mode controls behavior)
-    /// 5. Output: `q + LN(GELU(q + W_fast · q))` (nonlinear with residual)
+    /// 4. Update: apply gradient immediately or accumulate (batch_mode)
+    /// 5. Output: `q + LN(GELU(q + W_fast · k))` (nonlinear with residual)
     #[allow(clippy::needless_range_loop)]
     pub fn forward(&mut self, features: &[f64]) -> Vec<f64> {
         self.ensure_init(features.len());
@@ -221,9 +223,11 @@ impl TTTLayer {
             // Prediction-directed: use prediction error projected onto query space.
             // d(pred_err^2)/dW_fast ∝ -pred_err * q (for the output dimension).
             // This makes W_fast directly minimize prediction loss.
+            // No /d division: q is already L2-normalized (unit norm), so the
+            // gradient magnitude is proportional to the prediction error.
             let pred_err = self.prediction_feedback;
             for i in 0..d {
-                residual[i] = -pred_err * q[i] / (d as f64);
+                residual[i] = -pred_err * q[i];
             }
         } else {
             // Fallback to reconstruction during warmup (before first prediction).
@@ -284,17 +288,20 @@ impl TTTLayer {
             }
         }
 
-        // 5. Output: q + LN(GELU(q + W_fast * q))
+        // 5. Output: q + LN(GELU(q + W_fast * k))
+        //    The fast weight mapping W_fast is trained on k→(v-k) reconstruction,
+        //    so the readout must also apply W_fast to k (not q) for consistency.
+        //    The query q provides the residual connection and output base (attention
+        //    readout convention), while W_fast * k retrieves the learned mapping.
         //    GELU nonlinearity replaces tanh — Zhang et al. (2025, LaCT) proved
-        //    nonlinear fast weights >> linear. GELU is smoother than ReLU and matches
-        //    the transformer FFN convention. LayerNorm stabilizes the activated output,
-        //    and the residual connection preserves the query signal through the layer.
-        let wq = fast_mat_vec(&self.w_fast, &q, d);
+        //    nonlinear fast weights >> linear. LayerNorm stabilizes the activated
+        //    output, and the residual connection preserves the query signal.
+        let wk = fast_mat_vec(&self.w_fast, &k, d);
 
-        // Apply GELU activation to (q + W_fast * q)
+        // Apply GELU activation to (q + W_fast * k)
         let mut activated = vec![0.0; d];
         for i in 0..d {
-            activated[i] = gelu(q[i] + wq[i]);
+            activated[i] = gelu(q[i] + wk[i]);
         }
 
         // Layer normalization (zero mean, unit variance)
@@ -309,7 +316,74 @@ impl TTTLayer {
             *a = (*a - mean) * std_inv;
         }
 
-        // Residual connection: output = q + LN(GELU(q + W_fast * q))
+        // Residual connection: output = q + LN(GELU(q + W_fast * k))
+        let mut output = vec![0.0; d];
+        for i in 0..d {
+            output[i] = q[i] + activated[i];
+        }
+
+        output
+    }
+
+    /// Prediction-only forward pass: project input and compute output WITHOUT
+    /// updating fast weights, momentum, or batch accumulators.
+    ///
+    /// This is the read-only counterpart of [`forward`]. It runs:
+    /// 1. L2 normalize input
+    /// 2. Project: `k = W_K · x`, `q = W_Q · x` (no v needed)
+    /// 3. L2 normalize k and q
+    /// 4. Compute `W_fast · k` using current (frozen) fast weights
+    /// 5. Output: `q + LN(GELU(q + W_fast · k))`
+    ///
+    /// Takes `&self` (not `&mut self`), making it truly side-effect-free.
+    /// Returns `d_state`-dimensional output, or zeros if not yet initialized.
+    pub fn forward_predict(&self, features: &[f64]) -> Vec<f64> {
+        if !self.initialized {
+            return vec![0.0; self.d_state];
+        }
+
+        let d = self.d_state;
+
+        // Normalize input (same as forward)
+        let input_norm: f64 = features.iter().map(|x| x * x).sum::<f64>().sqrt().max(1.0);
+        let normalized: Vec<f64> = features.iter().map(|x| x / input_norm).collect();
+
+        // Project: k and q (no v needed — we skip gradient computation)
+        let mut k = mat_vec_mul(&self.w_k, &normalized, d);
+        let mut q = mat_vec_mul(&self.w_q, &normalized, d);
+
+        // L2 normalize keys and queries (same as forward)
+        let k_norm = k.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-8);
+        for ki in k.iter_mut() {
+            *ki /= k_norm;
+        }
+        let q_norm = q.iter().map(|x| x * x).sum::<f64>().sqrt().max(1e-8);
+        for qi in q.iter_mut() {
+            *qi /= q_norm;
+        }
+
+        // W_fast * k (read-only access to current fast weights)
+        let wk = fast_mat_vec(&self.w_fast, &k, d);
+
+        // GELU activation on (q + W_fast * k)
+        let mut activated = vec![0.0; d];
+        for i in 0..d {
+            activated[i] = gelu(q[i] + wk[i]);
+        }
+
+        // Layer normalization (zero mean, unit variance)
+        let mean = activated.iter().sum::<f64>() / d as f64;
+        let var = activated
+            .iter()
+            .map(|x| (x - mean) * (x - mean))
+            .sum::<f64>()
+            / d as f64;
+        let std_inv = 1.0 / (var + 1e-8).sqrt();
+        for a in activated.iter_mut() {
+            *a = (*a - mean) * std_inv;
+        }
+
+        // Residual connection: output = q + LN(GELU(q + W_fast * k))
         let mut output = vec![0.0; d];
         for i in 0..d {
             output[i] = q[i] + activated[i];
@@ -365,8 +439,8 @@ impl TTTLayer {
     /// Flush the accumulated mini-batch gradient and apply it as a single update.
     ///
     /// Averages the accumulated rank-1 gradients over the batch and applies one
-    /// update to W_fast. Sun et al. (2024) prove that batch averaging (b=16)
-    /// gives better-conditioned updates than applying 16 individual rank-1 steps.
+    /// update to W_fast. Only used when `batch_size > 1` (non-default). With the
+    /// default `batch_size = 1`, gradients are applied immediately per sample.
     ///
     /// No-op if no gradients have been accumulated.
     pub(crate) fn flush_batch(&mut self) {

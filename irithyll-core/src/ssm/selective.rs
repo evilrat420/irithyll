@@ -31,7 +31,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::math;
-use crate::ssm::init::mamba_init;
+use crate::ssm::init::s4d_inv_real;
 use crate::ssm::projection::{dot, mat_vec, softplus, Xorshift64};
 use crate::ssm::SSMLayer;
 
@@ -93,8 +93,10 @@ impl SelectiveSSM {
     ///
     /// Weights are initialized from a small normal distribution (scale 0.1)
     /// using the provided seed for reproducibility. A is initialized via the
-    /// Mamba strategy (A_n = -(n+1)). Skip connections (D) are initialized
-    /// to 1.0 to enable input passthrough by default.
+    /// S4D-Inv (HiPPO-inspired) strategy: `A_n = -(0.5 + n/N)`, which gives
+    /// a bounded spectrum of decay rates that remain meaningful at all state
+    /// sizes. Skip connections (D) are initialized to 1.0 to enable input
+    /// passthrough by default.
     ///
     /// # Arguments
     ///
@@ -110,7 +112,7 @@ impl SelectiveSSM {
     /// let ssm = SelectiveSSM::new(4, 16, 42);
     /// ```
     pub fn new(d_in: usize, n_state: usize, seed: u64) -> Self {
-        let log_a = mamba_init(n_state);
+        let log_a = s4d_inv_real(n_state);
         let mut rng = Xorshift64(seed);
         let scale = 0.1;
 
@@ -185,7 +187,7 @@ impl SelectiveSSM {
                 let a_bar = math::exp(delta * a_n);
 
                 // B_bar = (A_bar - 1) / A_n * B_t[n]
-                // Handle A_n ~ 0 (shouldn't happen with mamba_init, but be safe)
+                // Handle A_n ~ 0 (shouldn't happen with s4d_inv, but be safe)
                 let b_bar = if math::abs(a_n) < 1e-12 {
                     delta * b_t[n]
                 } else {

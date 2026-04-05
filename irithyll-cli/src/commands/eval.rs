@@ -38,7 +38,7 @@ pub struct EvalArgs {
     #[arg(long)]
     pub max_depth: Option<usize>,
 
-    /// Model type: sgbt (default), distributional, multiclass, bagged, ngrc, esn, mamba, spikenet, gla, deltanet, hawk, retnet, ttt, kan
+    /// Model type: sgbt (default), distributional, multiclass, bagged, ngrc, esn, mamba, spikenet, gla, deltanet, hawk, retnet, ttt, kan, factory
     #[arg(long, default_value = "sgbt")]
     pub model_type: String,
 
@@ -49,6 +49,11 @@ pub struct EvalArgs {
     /// Rolling window size for metrics
     #[arg(long, default_value = "1000")]
     pub window: usize,
+
+    /// Comma-separated list of factories to race (default: sgbt,esn,mamba).
+    /// Available: sgbt, esn, mamba, ttt, kan, spikenet, attention, distributional
+    #[arg(long, default_value = "sgbt,esn,mamba")]
+    pub factories: String,
 
     /// Launch TUI dashboard
     #[arg(long)]
@@ -104,6 +109,7 @@ pub fn run(args: EvalArgs) -> Result<()> {
         ModelType::RetNet => run_neural_eval_retnet(&cli_config, &dataset),
         ModelType::Ttt => run_neural_eval_ttt(&cli_config, &dataset),
         ModelType::Kan => run_neural_eval_kan(&cli_config, &dataset),
+        ModelType::Factory => run_neural_eval_factory(&args, &dataset),
     }
 }
 
@@ -439,6 +445,44 @@ fn run_neural_eval_kan(cli_config: &CliConfig, dataset: &Dataset) -> Result<()> 
 
     let mut model = irithyll::streaming_kan(&[dataset.n_features, hidden, 1], lr);
     run_neural_eval_headless(&mut model, dataset, "kan")
+}
+
+fn run_neural_eval_factory(args: &EvalArgs, dataset: &Dataset) -> Result<()> {
+    use irithyll::automl::Factory;
+    use irithyll::{AutoTuner, AutoTunerBuilder};
+
+    let n_features = dataset.n_features;
+    let factory_names: Vec<&str> = args.factories.split(',').map(|s| s.trim()).collect();
+
+    let mut builder: Option<AutoTunerBuilder> = None;
+    for name in &factory_names {
+        let factory = match *name {
+            "sgbt" => Factory::sgbt(n_features),
+            "esn" => Factory::esn(),
+            "mamba" => Factory::mamba(n_features),
+            "ttt" => Factory::ttt(n_features),
+            "kan" => Factory::kan(n_features),
+            "spikenet" => Factory::spike_net(),
+            "attention" => Factory::attention(n_features),
+            "distributional" => Factory::distributional(n_features),
+            _ => return Err(eyre!(
+                "unknown factory '{}'. available: sgbt, esn, mamba, ttt, kan, spikenet, attention, distributional",
+                name
+            )),
+        };
+        builder = Some(match builder {
+            None => AutoTuner::builder().factory(factory),
+            Some(b) => b.add_factory(factory),
+        });
+    }
+
+    let mut model = builder
+        .ok_or_else(|| eyre!("--factories must specify at least one factory"))?
+        .build();
+
+    println!("Racing factories: {}", factory_names.join(" + "),);
+
+    run_neural_eval_headless(&mut model, dataset, "factory")
 }
 
 // ---------------------------------------------------------------------------

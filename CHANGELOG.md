@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.9.0] - 2026-04-05
+
+### Added
+
+- **`ProjectedLearner`** — online projection learning wrapper for any `StreamingLearner`.
+  Two-path projection update: supervised gradient when inner model exposes RLS readout
+  weights, unsupervised PAST (streaming PCA) otherwise. Configurable rank, forgetting
+  factor, warmup, supervised LR with ramp.
+- **`SubspaceTracker`** — PAST algorithm (Yang 1995) for online subspace tracking.
+  `supervised_update()` with periodic Gram-Schmidt reorthogonalization for
+  prediction-gradient-directed projection.
+- **`ProjectionConfig`** with builder pattern. `supervised_lr` decoupled from PAST
+  forgetting factor.
+- **`readout_weights()`** method on `StreamingLearner` trait — enables supervised
+  projection path. Overridden in RLS, ESN, NGRC, Mamba, TTT, Attention.
+- **Factory projection integration** — `Factory::projected_mamba()`, `projected_ttt()`,
+  `projected_kan()`, `projected_esn()`, `projected_sgbt()`, `projected_attention()`.
+  `.with_projection(d_in, rank, lambda)` builder.
+- **ESN readout projection** — JL random projection for large reservoirs (auto-default
+  for n>200). Prevents RLS readout from blowing up with high-dimensional reservoir state.
+- **5 standalone examples** — `factory_racing`, `neural_moe`, `projected_learner`,
+  `streaming_ttt`, `streaming_kan`.
+- **Python bindings** — `ProjectionConfig`, `ProjectedLearner` pyclasses. 6 projected
+  factory variants in `AutoTuner`.
+- **CLI `--model factory`** — automated model selection via Factory racing (SGBT + ESN
+  + Mamba).
+
+### Fixed
+
+- **Mamba readout architecture** — state energy readout (per-channel L2 norm) replaces
+  mean-pooled hidden state. `n_state` scaling now correct (64 >= 32 >= 16). S4D-Inv
+  A-matrix initialization replaces `mamba_init` for bounded spectrum across all state sizes.
+- **TTT predict()** — real forward pass on current features instead of returning stale
+  cached output. Single-sample fast weight updates (batch_size=1).
+  Prediction-directed residual no longer divided by d. Output uses `W_fast*k`
+  consistently with training. Drift detection warmup prevents destructive early resets.
+- **KAN convergence** — Adagrad adaptive per-coefficient LR replaces hard `UPDATE_CLIP`.
+  Input domain widened to full B-spline grid `[-1+eps, 1-eps]`. `predict()` runs real
+  forward pass.
+- **PAST update signal** — pure unsupervised reconstruction (no scalar residual scaling).
+  Eliminates covariance warping when wrapping neural models.
+- **Graduated sibling interpolation** as default prediction path for SGBT and
+  DistributionalSGBT trait implementations. Continuous output instead of discrete leaf
+  snapping.
+
+### Changed
+
+- `TTTConfig` defaults: `eta` 0.01→0.1, `alpha` 0.005→0.001, `batch_size` 16→1.
+
 ## [9.8.5] - 2026-04-01
 
 ### Added

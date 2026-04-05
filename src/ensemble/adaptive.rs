@@ -207,7 +207,7 @@ impl<L: Loss> StreamingLearner for AdaptiveSGBT<L> {
     }
 
     fn predict(&self, features: &[f64]) -> f64 {
-        self.inner.predict(features)
+        self.inner.predict_graduated_sibling_interpolated(features)
     }
 
     fn n_samples_seen(&self) -> u64 {

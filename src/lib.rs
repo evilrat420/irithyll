@@ -108,6 +108,7 @@ pub mod learner;
 pub mod learners;
 pub mod pipeline;
 pub mod preprocessing;
+pub mod projection;
 pub mod reservoir;
 pub mod serde_support;
 pub mod snn;
@@ -248,6 +249,9 @@ pub use attention::{
 
 // Re-exports -- neural moe
 pub use moe::{NeuralMoE, NeuralMoEBuilder, NeuralMoEConfig};
+
+// Re-exports -- projection
+pub use projection::{ProjectedLearner, ProjectionConfig, ProjectionConfigBuilder};
 
 // Re-exports -- automl
 #[allow(deprecated)]
@@ -665,7 +669,7 @@ pub fn spikenet(n_hidden: usize) -> snn::SpikeNet {
 /// ```no_run
 /// use irithyll::{streaming_ttt, StreamingLearner};
 ///
-/// let mut model = streaming_ttt(16, 0.01);
+/// let mut model = streaming_ttt(16, 0.1);
 /// model.train(&[1.0, 2.0], 3.0);
 /// let pred = model.predict(&[1.0, 2.0]);
 /// ```

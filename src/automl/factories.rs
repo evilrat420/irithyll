@@ -8,6 +8,7 @@ use crate::automl::{ConfigSpace, HyperConfig, HyperParam, ModelFactory};
 use crate::ensemble::config::SGBTConfig;
 use crate::ensemble::distributional::DistributionalSGBT;
 use crate::learner::SGBTLearner;
+use crate::projection::{ProjectedLearner, ProjectionConfig};
 use crate::reservoir::{ESNConfig, EchoStateNetwork};
 use crate::snn::{SpikeNet, SpikeNetConfig};
 use crate::ssm::{MambaConfig, StreamingMamba};
@@ -552,6 +553,9 @@ pub struct Factory {
     accuracy_based_pruning: bool,
     proactive_prune_interval: Option<u64>,
     prune_half_life: Option<usize>,
+    /// Optional PAST projection wrapping: (d_in, config).
+    /// When set, `create()` wraps the inner model in a [`ProjectedLearner`].
+    projection: Option<(usize, ProjectionConfig)>,
 }
 
 impl Factory {
@@ -609,6 +613,7 @@ impl Factory {
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
             prune_half_life: None,
+            projection: None,
         }
     }
 
@@ -667,6 +672,7 @@ impl Factory {
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
             prune_half_life: None,
+            projection: None,
         }
     }
 
@@ -709,6 +715,7 @@ impl Factory {
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
             prune_half_life: None,
+            projection: None,
         }
     }
 
@@ -745,6 +752,7 @@ impl Factory {
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
             prune_half_life: None,
+            projection: None,
         }
     }
 
@@ -780,6 +788,7 @@ impl Factory {
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
             prune_half_life: None,
+            projection: None,
         }
     }
 
@@ -822,6 +831,7 @@ impl Factory {
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
             prune_half_life: None,
+            projection: None,
         }
     }
 
@@ -868,6 +878,7 @@ impl Factory {
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
             prune_half_life: None,
+            projection: None,
         }
     }
 
@@ -909,6 +920,7 @@ impl Factory {
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
             prune_half_life: None,
+            projection: None,
         }
     }
 
@@ -972,6 +984,99 @@ impl Factory {
     pub fn algorithm(&self) -> Algorithm {
         self.algorithm
     }
+
+    // -----------------------------------------------------------------------
+    // Projection wrapping
+    // -----------------------------------------------------------------------
+
+    /// Wrap the factory's output model in a PAST-based projection learner.
+    ///
+    /// The projection reduces the input to `rank` dimensions using online
+    /// subspace tracking (PAST algorithm). The wrapped model sees
+    /// `rank`-dimensional features instead of the original input.
+    ///
+    /// For algorithms that require an explicit input dimension (Mamba, Attention,
+    /// KAN, TTT), this method also resets the inner model's `n_features` to
+    /// `rank` so the inner model is configured for the projected input size.
+    ///
+    /// # Arguments
+    /// * `d_in` -- original input dimension (before projection)
+    /// * `rank` -- projection dimension (what the inner model sees)
+    /// * `lambda` -- PAST forgetting factor (0.999 typical)
+    pub fn with_projection(mut self, d_in: usize, rank: usize, lambda: f64) -> Self {
+        let config = ProjectionConfig {
+            rank,
+            lambda,
+            ..ProjectionConfig::default()
+        };
+        self.projection = Some((d_in, config));
+        // Inner model sees rank-dimensional features, not d_in.
+        self.n_features = rank;
+        self
+    }
+
+    /// Wrap with projection, providing a full [`ProjectionConfig`].
+    ///
+    /// Like [`with_projection`](Self::with_projection) but allows control
+    /// over all PAST parameters (delta, warmup, seed).
+    pub fn with_projection_config(mut self, d_in: usize, config: ProjectionConfig) -> Self {
+        let rank = config.rank;
+        self.projection = Some((d_in, config));
+        self.n_features = rank;
+        self
+    }
+
+    // -----------------------------------------------------------------------
+    // Projected convenience constructors
+    // -----------------------------------------------------------------------
+
+    /// Create a projected Mamba factory.
+    ///
+    /// Equivalent to `Factory::mamba(rank).with_projection(d_in, rank, 0.999)`.
+    /// The inner Mamba sees `rank`-dimensional projected features.
+    pub fn projected_mamba(d_in: usize, rank: usize) -> Self {
+        Factory::mamba(rank).with_projection(d_in, rank, 0.999)
+    }
+
+    /// Create a projected TTT factory.
+    ///
+    /// Equivalent to `Factory::ttt(rank).with_projection(d_in, rank, 0.999)`.
+    /// The inner TTT sees `rank`-dimensional projected features.
+    pub fn projected_ttt(d_in: usize, rank: usize) -> Self {
+        Factory::ttt(rank).with_projection(d_in, rank, 0.999)
+    }
+
+    /// Create a projected KAN factory.
+    ///
+    /// Equivalent to `Factory::kan(rank).with_projection(d_in, rank, 0.999)`.
+    /// The inner KAN sees `rank`-dimensional projected features.
+    pub fn projected_kan(d_in: usize, rank: usize) -> Self {
+        Factory::kan(rank).with_projection(d_in, rank, 0.999)
+    }
+
+    /// Create a projected Attention factory.
+    ///
+    /// Equivalent to `Factory::attention(rank).with_projection(d_in, rank, 0.999)`.
+    /// `rank` must be divisible by all candidate `n_heads` values (1, 2, 4, 8).
+    pub fn projected_attention(d_in: usize, rank: usize) -> Self {
+        Factory::attention(rank).with_projection(d_in, rank, 0.999)
+    }
+
+    /// Create a projected ESN factory.
+    ///
+    /// Equivalent to `Factory::esn().with_projection(d_in, rank, 0.999)`.
+    /// The inner ESN sees `rank`-dimensional projected features.
+    pub fn projected_esn(d_in: usize, rank: usize) -> Self {
+        Factory::esn().with_projection(d_in, rank, 0.999)
+    }
+
+    /// Create a projected SGBT factory.
+    ///
+    /// Equivalent to `Factory::sgbt(rank).with_projection(d_in, rank, 0.999)`.
+    /// The inner SGBT sees `rank`-dimensional projected features.
+    pub fn projected_sgbt(d_in: usize, rank: usize) -> Self {
+        Factory::sgbt(rank).with_projection(d_in, rank, 0.999)
+    }
 }
 
 impl ModelFactory for Factory {
@@ -980,15 +1085,28 @@ impl ModelFactory for Factory {
     }
 
     fn name(&self) -> &str {
-        match self.algorithm {
-            Algorithm::Sgbt => "SGBT",
-            Algorithm::Distributional => "Distributional",
-            Algorithm::Esn => "ESN",
-            Algorithm::Mamba => "Mamba",
-            Algorithm::Attention => "Attention",
-            Algorithm::SpikeNet => "SpikeNet",
-            Algorithm::Kan => "KAN",
-            Algorithm::Ttt => "TTT",
+        if self.projection.is_some() {
+            match self.algorithm {
+                Algorithm::Sgbt => "Projected<SGBT>",
+                Algorithm::Distributional => "Projected<Distributional>",
+                Algorithm::Esn => "Projected<ESN>",
+                Algorithm::Mamba => "Projected<Mamba>",
+                Algorithm::Attention => "Projected<Attention>",
+                Algorithm::SpikeNet => "Projected<SpikeNet>",
+                Algorithm::Kan => "Projected<KAN>",
+                Algorithm::Ttt => "Projected<TTT>",
+            }
+        } else {
+            match self.algorithm {
+                Algorithm::Sgbt => "SGBT",
+                Algorithm::Distributional => "Distributional",
+                Algorithm::Esn => "ESN",
+                Algorithm::Mamba => "Mamba",
+                Algorithm::Attention => "Attention",
+                Algorithm::SpikeNet => "SpikeNet",
+                Algorithm::Kan => "KAN",
+                Algorithm::Ttt => "TTT",
+            }
         }
     }
 
@@ -1001,7 +1119,7 @@ impl ModelFactory for Factory {
     }
 
     fn create(&self, config: &HyperConfig) -> Box<dyn irithyll_core::learner::StreamingLearner> {
-        match self.algorithm {
+        let inner: Box<dyn irithyll_core::learner::StreamingLearner> = match self.algorithm {
             Algorithm::Sgbt => {
                 let learning_rate = config.get(0);
                 let n_steps = config.get(1) as usize;
@@ -1162,6 +1280,13 @@ impl ModelFactory for Factory {
 
                 Box::new(crate::ttt::StreamingTTT::new(ttt_config))
             }
+        };
+
+        // Wrap in ProjectedLearner if projection is configured.
+        if let Some((d_in, ref proj_config)) = self.projection {
+            Box::new(ProjectedLearner::new(inner, d_in, proj_config.clone()))
+        } else {
+            inner
         }
     }
 }
@@ -1834,6 +1959,211 @@ mod tests {
         assert!(
             pred.is_finite(),
             "multi-factory racing (SGBT+KAN+TTT) should produce finite prediction, got {pred}"
+        );
+    }
+
+    // ===================================================================
+    // Projected factory tests
+    // ===================================================================
+
+    /// Factory::projected_mamba creates a projected model that trains and predicts.
+    #[test]
+    fn projected_mamba_factory_create_and_predict() {
+        let factory = Factory::projected_mamba(8, 4);
+        assert_eq!(
+            factory.name(),
+            "Projected<Mamba>",
+            "projected mamba factory name should include Projected<>"
+        );
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        // Feed 8-dim input; inner Mamba sees 4-dim projected features.
+        for i in 0..100 {
+            let x: Vec<f64> = (0..8).map(|j| (i * j) as f64 * 0.01).collect();
+            model.train(&x, i as f64 * 0.1);
+        }
+        let x: Vec<f64> = (0..8).map(|j| j as f64 * 0.05).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "projected Mamba prediction should be finite, got {pred}"
+        );
+    }
+
+    /// Factory::projected_ttt creates a projected model that trains and predicts.
+    #[test]
+    fn projected_ttt_factory_create_and_predict() {
+        let factory = Factory::projected_ttt(8, 4);
+        assert_eq!(
+            factory.name(),
+            "Projected<TTT>",
+            "projected TTT factory name should include Projected<>"
+        );
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..100 {
+            let x: Vec<f64> = (0..8).map(|j| (i * j) as f64 * 0.01).collect();
+            model.train(&x, i as f64 * 0.1);
+        }
+        let x: Vec<f64> = (0..8).map(|j| j as f64 * 0.05).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "projected TTT prediction should be finite, got {pred}"
+        );
+    }
+
+    /// Factory::projected_kan creates a projected model that trains and predicts.
+    #[test]
+    fn projected_kan_factory_create_and_predict() {
+        let factory = Factory::projected_kan(8, 4);
+        assert_eq!(
+            factory.name(),
+            "Projected<KAN>",
+            "projected KAN factory name should include Projected<>"
+        );
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..100 {
+            let x: Vec<f64> = (0..8).map(|j| (i * j) as f64 * 0.01).collect();
+            model.train(&x, i as f64 * 0.1);
+        }
+        let x: Vec<f64> = (0..8).map(|j| j as f64 * 0.05).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "projected KAN prediction should be finite, got {pred}"
+        );
+    }
+
+    /// Factory::projected_sgbt creates a projected model that trains and predicts.
+    #[test]
+    fn projected_sgbt_factory_create_and_predict() {
+        let factory = Factory::projected_sgbt(8, 4);
+        assert_eq!(
+            factory.name(),
+            "Projected<SGBT>",
+            "projected SGBT factory name should include Projected<>"
+        );
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..100 {
+            let x: Vec<f64> = (0..8).map(|j| (i * j) as f64 * 0.01).collect();
+            model.train(&x, i as f64 * 0.1);
+        }
+        let x: Vec<f64> = (0..8).map(|j| j as f64 * 0.05).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "projected SGBT prediction should be finite, got {pred}"
+        );
+    }
+
+    /// with_projection builder applies to any algorithm.
+    #[test]
+    fn with_projection_builder_on_esn() {
+        let factory = Factory::esn().with_projection(10, 4, 0.998);
+        assert_eq!(
+            factory.name(),
+            "Projected<ESN>",
+            "with_projection on ESN should give Projected<ESN> name"
+        );
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..100 {
+            let x: Vec<f64> = (0..10).map(|j| (i * j) as f64 * 0.01).collect();
+            model.train(&x, i as f64 * 0.1);
+        }
+        let x: Vec<f64> = (0..10).map(|j| j as f64 * 0.05).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "projected ESN prediction should be finite, got {pred}"
+        );
+    }
+
+    /// with_projection_config allows full ProjectionConfig control.
+    #[test]
+    fn with_projection_config_builder() {
+        let proj_cfg = ProjectionConfig {
+            rank: 3,
+            lambda: 0.995,
+            warmup: 20,
+            ..ProjectionConfig::default()
+        };
+        let factory = Factory::mamba(3).with_projection_config(8, proj_cfg);
+        assert_eq!(
+            factory.name(),
+            "Projected<Mamba>",
+            "with_projection_config should give Projected<Mamba> name"
+        );
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..60 {
+            let x: Vec<f64> = (0..8).map(|j| (i * j) as f64 * 0.01).collect();
+            model.train(&x, i as f64 * 0.1);
+        }
+        let x: Vec<f64> = (0..8).map(|j| j as f64 * 0.05).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "projected Mamba (full config) prediction should be finite, got {pred}"
+        );
+    }
+
+    /// Projected factory works inside AutoTuner.
+    #[test]
+    fn projected_factory_in_auto_tuner() {
+        let mut tuner = crate::auto_tune(Factory::projected_mamba(8, 4));
+        for i in 0..200 {
+            let x: Vec<f64> = (0..8).map(|j| (i * j) as f64 * 0.01).collect();
+            tuner.train(&x, i as f64 * 0.1);
+        }
+        let x: Vec<f64> = (0..8).map(|j| j as f64 * 0.05).collect();
+        let pred = tuner.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "auto_tune with projected Mamba should produce finite prediction, got {pred}"
+        );
+    }
+
+    /// Multi-factory racing with projected and non-projected factories.
+    #[test]
+    fn multi_factory_with_projected() {
+        let mut tuner = crate::automl::AutoTuner::builder()
+            .factory(Factory::sgbt(8))
+            .add_factory(Factory::projected_mamba(8, 4))
+            .add_factory(Factory::projected_kan(8, 4))
+            .build();
+
+        for i in 0..200 {
+            let x: Vec<f64> = (0..8).map(|j| (i * j) as f64 * 0.01).collect();
+            let y = x[0] * 3.0 + x[1];
+            tuner.train(&x, y);
+        }
+        let x: Vec<f64> = (0..8).map(|j| j as f64 * 0.05).collect();
+        let pred = tuner.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "multi-factory with projected should produce finite prediction, got {pred}"
         );
     }
 }

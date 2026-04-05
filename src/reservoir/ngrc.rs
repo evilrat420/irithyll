@@ -283,6 +283,10 @@ impl StreamingLearner for NextGenRC {
             None => [0.0; 5],
         }
     }
+
+    fn readout_weights(&self) -> Option<&[f64]> {
+        self.rls.readout_weights()
+    }
 }
 
 impl fmt::Debug for NextGenRC {

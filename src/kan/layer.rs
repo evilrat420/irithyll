@@ -93,6 +93,12 @@ pub(crate) struct KANLayer {
     /// Accumulates gradient direction across samples for faster convergence
     /// on sparse B-spline updates.
     velocity: Vec<f64>,
+    /// RMSProp accumulator: exponential moving average of squared gradients
+    /// per coefficient. Used to adaptively scale the learning rate so that
+    /// frequently-updated coefficients get smaller steps (stability) while
+    /// rarely-activated B-spline regions get larger steps (convergence).
+    /// Same layout as `coefficients`.
+    grad_sq_accum: Vec<f64>,
     /// Residual bypass weights, `[n_out * n_in]`.
     w_b: Vec<f64>,
     /// Spline scale weights, `[n_out * n_in]`.
@@ -142,6 +148,10 @@ impl KANLayer {
         // Velocity: zero-initialized (same layout as coefficients)
         let velocity = vec![0.0; total_coeffs];
 
+        // RMSProp accumulator: initialized to small positive value to avoid
+        // division by zero on the first step.
+        let grad_sq_accum = vec![1e-6; total_coeffs];
+
         // Residual bypass: 1/n_in (scaled initialization)
         let w_b_val = 1.0 / n_in as f64;
         let w_b = vec![w_b_val; n_edges];
@@ -152,6 +162,7 @@ impl KANLayer {
         Self {
             coefficients,
             velocity,
+            grad_sq_accum,
             w_b,
             w_s,
             grid,
@@ -220,12 +231,15 @@ impl KANLayer {
         debug_assert_eq!(output_grad.len(), self.n_out, "output_grad length mismatch");
 
         let mut input_grad = vec![0.0; self.n_in];
-        // Clip incoming gradient AND per-coefficient update magnitude.
-        // The incoming clip prevents extreme deltas from large-magnitude targets.
-        // The update clip (saturating arithmetic) matches Hoang et al. (2026)
-        // hardware implementation — bounds coefficient magnitude across data scales.
+        // GRAD_CLIP: bounds incoming output gradient to prevent blowup from
+        // large-magnitude targets. 10.0 is sufficient for z-scored targets.
+        // UPDATE_CLIP: safety net for w_b/w_s scale weight updates to prevent
+        // positive-feedback loops. Not applied to B-spline coefficients
+        // (Adagrad handles their adaptive scaling instead).
+        // ADAGRAD_EPS: prevents division by zero in adaptive LR denominator.
         const GRAD_CLIP: f64 = 10.0;
         const UPDATE_CLIP: f64 = 0.5;
+        const ADAGRAD_EPS: f64 = 1e-8;
 
         for (j, &delta_j_raw) in output_grad.iter().enumerate() {
             // Clip incoming gradient for stability
@@ -261,8 +275,12 @@ impl KANLayer {
 
                 // --- Update coefficients (SPARSE: only k+1 per edge) ---
                 // NaN/Inf guard: skip coefficient updates if any gradient is non-finite.
-                // Per-edge momentum: velocity accumulates gradient direction across
-                // samples, making sparse B-spline updates converge much faster.
+                // Adagrad: adaptively scale each coefficient's learning rate by the
+                // inverse root of its cumulative sum of squared gradients.
+                // This is ideal for B-spline sparsity: rarely-activated coefficients
+                // accumulate smaller grad_sq_sum, getting proportionally larger
+                // effective LR when activated. Unlike RMSProp, the accumulator never
+                // decays, so the per-coefficient activation history is preserved.
                 let coeff_grad_base = delta_j * self.w_s[edge];
                 if coeff_grad_base.is_finite() {
                     for (b, &basis_val) in bases.iter().enumerate() {
@@ -272,12 +290,18 @@ impl KANLayer {
                             if grad.is_finite() {
                                 // dL/dc_g = delta_j * w_s * B_g(x)
                                 let vi = coeff_base + coeff_idx;
-                                let update = self.momentum * self.velocity[vi] + lr * grad;
-                                // Saturating arithmetic: clip update magnitude
-                                // (Hoang et al., 2026 — bounds update magnitude across data scales)
-                                let clipped = update.clamp(-UPDATE_CLIP, UPDATE_CLIP);
-                                self.velocity[vi] = clipped;
-                                self.coefficients[vi] -= clipped;
+
+                                // Adagrad: accumulate squared gradient
+                                self.grad_sq_accum[vi] += grad * grad;
+
+                                // Adaptive learning rate: lr / sqrt(accum + eps)
+                                let adaptive_lr =
+                                    lr / (self.grad_sq_accum[vi].sqrt() + ADAGRAD_EPS);
+
+                                // Momentum on the adapted gradient
+                                let update = self.momentum * self.velocity[vi] + adaptive_lr * grad;
+                                self.velocity[vi] = update;
+                                self.coefficients[vi] -= update;
                             }
                         }
                     }
@@ -321,6 +345,9 @@ impl KANLayer {
         }
         for v in &mut self.velocity {
             *v = 0.0;
+        }
+        for a in &mut self.grad_sq_accum {
+            *a = 1e-6;
         }
         let w_b_val = 1.0 / self.n_in as f64;
         for w in &mut self.w_b {

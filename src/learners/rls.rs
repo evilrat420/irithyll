@@ -506,6 +506,14 @@ impl StreamingLearner for RecursiveLeastSquares {
         // Scale the forgetting factor. Clamp to (0, 1].
         self.forgetting_factor = (self.forgetting_factor * lr_multiplier).clamp(1e-6, 1.0);
     }
+
+    fn readout_weights(&self) -> Option<&[f64]> {
+        if self.weights.is_empty() {
+            None
+        } else {
+            Some(&self.weights)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

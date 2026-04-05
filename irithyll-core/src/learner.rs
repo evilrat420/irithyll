@@ -50,6 +50,7 @@ use alloc::vec::Vec;
 /// | [`adjust_config`](Self::adjust_config) | Apply smooth LR/lambda adjustments (no-op by default) |
 /// | [`apply_structural_change`](Self::apply_structural_change) | Apply depth/steps changes at replacement boundaries (no-op by default) |
 /// | [`replacement_count`](Self::replacement_count) | Total internal model replacements (0 by default) |
+/// | [`readout_weights`](Self::readout_weights) | RLS readout weights for supervised projection (`None` by default) |
 pub trait StreamingLearner: Send + Sync {
     /// Train on a single observation with explicit sample weight.
     ///
@@ -159,4 +160,21 @@ pub trait StreamingLearner: Send + Sync {
     /// Recomputes `prune_alpha` so each correction batch contributes equally
     /// regardless of size. Default: no-op.
     fn set_prune_half_life(&mut self, _hl: usize) {}
+
+    /// Return the readout weight vector for supervised projection, if available.
+    ///
+    /// Models with an RLS readout layer return `Some(&weights)`. Models
+    /// without (KAN, SpikeNet, SGBT, etc.) return `None`. Used by
+    /// `ProjectedLearner` for supervised projection updates.
+    fn readout_weights(&self) -> Option<&[f64]> {
+        None
+    }
+
+    /// Optional tree-level structure diagnostics.
+    ///
+    /// Returns per-tree: `(depth, n_leaves, leaf_weight_mean, leaf_weight_std, samples_seen)`.
+    /// Default: empty vec (model has no trees).
+    fn tree_structure(&self) -> Vec<(usize, usize, f64, f64, u64)> {
+        Vec::new()
+    }
 }

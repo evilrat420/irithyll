@@ -59,6 +59,15 @@ pub struct ESNConfig {
     pub warmup: usize,
     /// Whether to concatenate raw input to reservoir state for readout (default: true).
     pub passthrough_input: bool,
+    /// Maximum readout feature dimension. When set, reservoir features are
+    /// projected to this dimension via a fixed random matrix before the RLS
+    /// readout. This prevents the O(d^2) RLS covariance from blowing up
+    /// with large reservoirs. When `None`, all reservoir + input features
+    /// are fed directly to RLS (original behavior).
+    ///
+    /// Auto-set: if `None` and `n_reservoir > 64`, defaults to
+    /// `min(n_reservoir / 3, 64)` to keep readout tractable.
+    pub readout_dim: Option<usize>,
 }
 
 impl Default for ESNConfig {
@@ -74,6 +83,7 @@ impl Default for ESNConfig {
             seed: 42,
             warmup: 50,
             passthrough_input: true,
+            readout_dim: None,
         }
     }
 }
@@ -159,12 +169,22 @@ impl ESNConfigBuilder {
         self
     }
 
+    /// Set the readout projection dimension.
+    ///
+    /// When set, reservoir features are projected to this dimension via a
+    /// fixed random matrix before the RLS readout. Pass `0` or leave unset
+    /// for auto-defaulting based on reservoir size.
+    pub fn readout_dim(mut self, dim: usize) -> Self {
+        self.config.readout_dim = Some(dim);
+        self
+    }
+
     /// Validate and build the configuration.
     ///
     /// # Errors
     ///
     /// Returns `ConfigError` if any parameter is out of range.
-    pub fn build(self) -> Result<ESNConfig> {
+    pub fn build(mut self) -> Result<ESNConfig> {
         let c = &self.config;
 
         if c.n_reservoir < 1 {
@@ -217,6 +237,14 @@ impl ESNConfigBuilder {
             )));
         }
 
+        // Auto-default readout_dim for large reservoirs.
+        // Threshold at 200: RLS can handle ~200 features in typical streaming
+        // workloads (20K+ samples). Below this, full reservoir features give
+        // better performance than random projection.
+        if self.config.readout_dim.is_none() && self.config.n_reservoir > 200 {
+            self.config.readout_dim = Some(self.config.n_reservoir.div_ceil(3).min(64));
+        }
+
         Ok(self.config)
     }
 }
@@ -244,6 +272,11 @@ mod tests {
         assert_eq!(config.seed, 42);
         assert_eq!(config.warmup, 50);
         assert!(config.passthrough_input);
+        // n_reservoir=100 <= 200, so no auto-default
+        assert_eq!(
+            config.readout_dim, None,
+            "n=100 should not auto-default readout_dim",
+        );
     }
 
     #[test]
@@ -272,6 +305,11 @@ mod tests {
         assert_eq!(config.seed, 123);
         assert_eq!(config.warmup, 100);
         assert!(!config.passthrough_input);
+        // n_reservoir=200 <= 200, no auto-default
+        assert_eq!(
+            config.readout_dim, None,
+            "n=200 should not auto-default readout_dim",
+        );
     }
 
     #[test]
@@ -320,5 +358,53 @@ mod tests {
     fn delta_zero_fails() {
         let result = ESNConfig::builder().delta(0.0).build();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn readout_dim_auto_defaults_for_large_reservoir() {
+        // n=300 > 200 → ceil(300/3).min(64) = 64
+        let config = ESNConfig::builder().n_reservoir(300).build().unwrap();
+        assert_eq!(config.readout_dim, Some(64));
+
+        // n=500 > 200 → ceil(500/3).min(64) = 64
+        let config = ESNConfig::builder().n_reservoir(500).build().unwrap();
+        assert_eq!(config.readout_dim, Some(64));
+
+        // n=250 > 200 → ceil(250/3).min(64) = 64
+        let config = ESNConfig::builder().n_reservoir(250).build().unwrap();
+        assert_eq!(config.readout_dim, Some(64));
+    }
+
+    #[test]
+    fn readout_dim_no_auto_default_for_small_reservoir() {
+        // n=50 <= 200 → no auto-default
+        let config = ESNConfig::builder().n_reservoir(50).build().unwrap();
+        assert_eq!(
+            config.readout_dim, None,
+            "small reservoirs should not auto-default readout_dim",
+        );
+
+        // n=200 is exactly the boundary → no auto-default
+        let config = ESNConfig::builder().n_reservoir(200).build().unwrap();
+        assert_eq!(config.readout_dim, None);
+
+        // n=100 → no auto-default (full 103 features to RLS)
+        let config = ESNConfig::builder().n_reservoir(100).build().unwrap();
+        assert_eq!(config.readout_dim, None);
+    }
+
+    #[test]
+    fn readout_dim_explicit_overrides_auto() {
+        // Explicit readout_dim should not be overridden.
+        let config = ESNConfig::builder()
+            .n_reservoir(300)
+            .readout_dim(128)
+            .build()
+            .unwrap();
+        assert_eq!(
+            config.readout_dim,
+            Some(128),
+            "explicit readout_dim should not be overridden by auto-default",
+        );
     }
 }

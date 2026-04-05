@@ -124,25 +124,21 @@ All neural models also have preprocessor variants (`ESNPreprocessor`, `MambaPrep
 
 | Model | Use Case |
 |-------|----------|
-| `SGBT` / `DistributionalSGBT` | Tabular data, concept drift, streaming analytics. Default choice. `DistributionalSGBT` adds prediction intervals via `honest_sigma`. |
-| `EchoStateNetwork` | General temporal regression and classification. Fixed reservoir + RLS readout, no backprop. |
-| `NeuralMoE` | Heterogeneous data with regime shifts. Learned gating routes samples to specialized experts (trees + neural in one model). |
-| `RecursiveLeastSquares` | Linear baseline with confidence intervals. Exact online OLS via Sherman-Morrison, extremely fast throughput. |
+| `SGBT` / `DistributionalSGBT` | Tabular data, concept drift, streaming analytics. Default choice. Graduated sibling interpolation for continuous output. |
+| `StreamingTTT` | Non-stationary data with regime shifts. Single-sample fast weight adaptation outperforms RLS on switching dynamics. |
+| `StreamingKAN` | Compositional nonlinear regression. Adagrad-scaled B-spline updates, outperforms RLS on nonlinear targets. |
+| `EchoStateNetwork` | Temporal regression and classification. Cycle reservoir + RLS readout. JL readout projection for large reservoirs. |
+| `StreamingMamba` | Temporal feature extraction with selective memory. S4D-Inv initialization, per-channel state energy readout. |
+| `NeuralMoE` | Heterogeneous data with regime shifts. Learned gating routes samples to specialized experts. |
+| `RecursiveLeastSquares` | Linear baseline with confidence intervals. Exact online OLS via Sherman-Morrison. |
 | `NextGenRC` | Nonlinear time series without reservoir overhead. Polynomial feature maps replace random projections. |
 | `AutoTuner` | Unknown data distribution or prototyping. Tournament racing across model families. |
+| `ProjectedLearner` | High-dimensional or noisy inputs. PAST-based online subspace tracking with supervised projection gradient. |
 
-**Warmup-required** -- need initialization before streaming:
-
-| Model | Use Case |
-|-------|----------|
-| `StreamingTTT` | Adaptation layer for regime-shift scenarios. Call `pretrain_projections()` on warmup data before streaming. |
-| `StreamingMamba` | Long-sequence temporal feature extraction with selective memory. Input-dependent gating controls what the state retains. |
-
-**Research tier** -- correct implementation, online convergence or niche use unsolved:
+**Specialized** -- correct streaming implementation, niche deployment targets:
 
 | Model | Use Case |
 |-------|----------|
-| `StreamingKAN` | Compositional physics, parameter-efficient nonlinear regression. B-spline online convergence is a research direction. |
 | `SpikeNet` | Event-driven sparse data, neuromorphic edge deployment. Integer-only variant fits in 22KB on Cortex-M0+. |
 | `StreamingAttention` | Streaming linear attention (7 modes). Specialized sequential tasks where full-sequence attention is too expensive. |
 
@@ -166,7 +162,7 @@ Online hyperparameter optimization via champion-challenger tournament racing.
 | Component | Description |
 |-----------|-------------|
 | [`AutoTuner`](https://docs.rs/irithyll/latest/irithyll/automl/struct.AutoTuner.html) | Tournament successive halving with champion-challenger racing. Implements `StreamingLearner`. |
-| [`Factory`](https://docs.rs/irithyll/latest/irithyll/automl/struct.Factory.html) | Unified model factory. `Factory::sgbt()`, `Factory::esn()`, `Factory::distributional()`, `Factory::mamba()`, `Factory::attention()`, `Factory::spike_net()`. |
+| [`Factory`](https://docs.rs/irithyll/latest/irithyll/automl/struct.Factory.html) | Unified model factory. `Factory::sgbt()`, `Factory::esn()`, `Factory::mamba()`, `Factory::ttt()`, `Factory::kan()`, `Factory::projected_mamba()`, `.with_projection()`. |
 | Complexity-adjusted elimination | MDL-inspired penalty: `score = error + complexity/n_seen`. Favors simple models on sparse data, relaxes with evidence. |
 | Drift-triggered re-racing | ADWIN detects champion error drift, aborts tournament, starts fresh with expanded bracket. |
 | Warmup-aware racing | Neural models with cold-start phases are protected from premature elimination. |

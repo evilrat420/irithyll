@@ -30,7 +30,7 @@ use std::fmt;
 
 use crate::learner::StreamingLearner;
 use crate::learners::RecursiveLeastSquares;
-use irithyll_core::reservoir::CycleReservoir;
+use irithyll_core::reservoir::{CycleReservoir, Xorshift64Rng};
 
 use super::esn_config::ESNConfig;
 
@@ -93,6 +93,10 @@ pub struct EchoStateNetwork {
     alignment_ewma: f64,
     /// Per-neuron EWMA of |state[i]| for reservoir utilization entropy.
     state_activity_ewma: Vec<f64>,
+    /// Fixed random projection matrix (readout_dim x n_full, flattened row-major).
+    /// Initialized with +/- 1/sqrt(readout_dim) entries for JL-optimal projection.
+    /// `None` when readout projection is disabled.
+    readout_projection: Option<Vec<f64>>,
 }
 
 impl EchoStateNetwork {
@@ -123,6 +127,7 @@ impl EchoStateNetwork {
             prev_prev_change: 0.0,
             alignment_ewma: 0.0,
             state_activity_ewma: Vec::new(),
+            readout_projection: None,
         }
     }
 
@@ -134,17 +139,37 @@ impl EchoStateNetwork {
 
     /// Build the readout feature vector from the current reservoir state.
     ///
-    /// If `passthrough_input` is enabled, the feature vector is `[state; input]`.
-    /// Otherwise, it is just `[state]`.
+    /// If `passthrough_input` is enabled, the full feature vector is `[state; input]`.
+    /// Otherwise, it is just `[state]`. When a readout projection is active,
+    /// the full feature vector is then projected to `readout_dim` dimensions
+    /// via the fixed random matrix.
     fn build_readout_features(&self, input: &[f64]) -> Vec<f64> {
         let state = self.reservoir.state();
-        if self.config.passthrough_input {
+        let full_features = if self.config.passthrough_input {
             let mut features = Vec::with_capacity(state.len() + input.len());
             features.extend_from_slice(state);
             features.extend_from_slice(input);
             features
         } else {
             state.to_vec()
+        };
+
+        // If readout projection is active, project full features to readout_dim.
+        if let Some(ref proj) = self.readout_projection {
+            let k = self.config.readout_dim.unwrap();
+            let n = full_features.len();
+            let mut projected = vec![0.0; k];
+            for (i, p_i) in projected.iter_mut().enumerate() {
+                let row_start = i * n;
+                let mut sum = 0.0;
+                for (j, &f) in full_features.iter().enumerate() {
+                    sum += proj[row_start + j] * f;
+                }
+                *p_i = sum;
+            }
+            projected
+        } else {
+            full_features
         }
     }
 
@@ -190,6 +215,38 @@ impl EchoStateNetwork {
                 self.config.seed,
             );
             self.state_activity_ewma = vec![0.0; self.config.n_reservoir];
+            self.init_readout_projection(n_inputs);
+        }
+    }
+
+    /// Build and store the fixed random projection matrix from the config seed.
+    ///
+    /// Uses an offset seed (seed ^ 0xCAFE_BABE) to avoid correlation with
+    /// reservoir weight initialization. Entries are +/- 1/sqrt(k) (Rademacher
+    /// scaled), which satisfies the Johnson-Lindenstrauss lemma.
+    fn init_readout_projection(&mut self, n_inputs: usize) {
+        if let Some(k) = self.config.readout_dim {
+            let n_full = if self.config.passthrough_input {
+                self.config.n_reservoir + n_inputs
+            } else {
+                self.config.n_reservoir
+            };
+
+            // If readout_dim >= n_full, projection would not reduce dimensionality.
+            if k >= n_full {
+                self.readout_projection = None;
+                return;
+            }
+
+            let scale = 1.0 / (k as f64).sqrt();
+            // Use an offset seed to avoid correlation with reservoir weights.
+            let mut rng = Xorshift64Rng::new(self.config.seed ^ 0xCAFE_BABE);
+            let proj: Vec<f64> = (0..k * n_full)
+                .map(|_| if rng.next_f64() < 0.5 { -scale } else { scale })
+                .collect();
+            self.readout_projection = Some(proj);
+        } else {
+            self.readout_projection = None;
         }
     }
 }
@@ -199,7 +256,10 @@ impl StreamingLearner for EchoStateNetwork {
         // Initialize reservoir on first call.
         self.ensure_reservoir(features.len());
 
-        // Drive the reservoir forward one step.
+        // Drive the reservoir forward one step with raw input.
+        // ESN uses input_scaling to control the drive strength — the reservoir's
+        // tanh nonlinearity inherently handles magnitude. Z-score normalization
+        // would destroy absolute position information (e.g. Lorenz attractor state).
         self.reservoir.update(features);
         self.total_seen += 1;
 
@@ -244,7 +304,7 @@ impl StreamingLearner for EchoStateNetwork {
 
     fn predict(&self, features: &[f64]) -> f64 {
         // Side-effect-free: does NOT update reservoir state.
-        // Uses current reservoir state + the given features to build readout features.
+        // Uses current reservoir state + raw features to build readout features.
         if !self.past_warmup() || self.n_inputs.is_none() {
             return 0.0;
         }
@@ -268,6 +328,10 @@ impl StreamingLearner for EchoStateNetwork {
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
         self.state_activity_ewma.fill(0.0);
+        // Re-initialize the projection matrix from the same seed (deterministic).
+        if let Some(n_inputs) = self.n_inputs {
+            self.init_readout_projection(n_inputs);
+        }
         // Keep n_inputs and reservoir weights — reset only resets learned state,
         // not the architecture. If the user wants a fresh reservoir, they should
         // construct a new ESN.
@@ -285,6 +349,10 @@ impl StreamingLearner for EchoStateNetwork {
             ],
             None => [0.0; 5],
         }
+    }
+
+    fn readout_weights(&self) -> Option<&[f64]> {
+        self.rls.readout_weights()
     }
 }
 
@@ -564,9 +632,12 @@ mod tests {
     #[test]
     fn reservoir_state_evolves() {
         let mut esn = default_esn();
+        // Feed at least two distinct samples so the normalizer has nonzero
+        // variance (a single sample normalizes to zero, producing no drive).
         esn.train(&[1.0], 0.0);
+        esn.train(&[2.0], 0.0);
 
-        // After one input, the reservoir state should have changed from zero.
+        // After distinct inputs, the reservoir state should have changed from zero.
         let nonzero = esn
             .reservoir_state()
             .iter()
@@ -609,6 +680,183 @@ mod tests {
             unc.is_finite(),
             "prediction_uncertainty should be finite, got {}",
             unc
+        );
+    }
+
+    #[test]
+    fn readout_projection_reduces_rls_dim() {
+        // Explicit readout_dim=30 on n=100 reservoir (d_in=1, n_full=101).
+        // With projection, RLS should see 30 features, not 101.
+        let config = ESNConfig::builder()
+            .n_reservoir(100)
+            .readout_dim(30)
+            .warmup(5)
+            .seed(42)
+            .build()
+            .unwrap();
+        assert_eq!(config.readout_dim, Some(30));
+
+        let mut esn = EchoStateNetwork::new(config);
+        for i in 0..20 {
+            esn.train(&[i as f64 * 0.1], i as f64);
+        }
+
+        // RLS readout weights should have dimension = readout_dim = 30.
+        let weights = esn
+            .readout_weights()
+            .expect("should have weights after training");
+        assert_eq!(
+            weights.len(),
+            30,
+            "RLS should have 30 weights (readout_dim), not {} (full reservoir + input)",
+            weights.len(),
+        );
+    }
+
+    #[test]
+    fn readout_projection_deterministic() {
+        // Two ESNs with same config should produce identical predictions.
+        let config = ESNConfig::builder()
+            .n_reservoir(100)
+            .warmup(5)
+            .seed(99)
+            .build()
+            .unwrap();
+
+        let mut esn1 = EchoStateNetwork::new(config.clone());
+        let mut esn2 = EchoStateNetwork::new(config);
+
+        for i in 0..30 {
+            let x = (i as f64 * 0.2).sin();
+            let y = (i as f64 * 0.2 + 0.2).sin();
+            esn1.train(&[x], y);
+            esn2.train(&[x], y);
+        }
+
+        let pred1 = esn1.predict(&[0.5]);
+        let pred2 = esn2.predict(&[0.5]);
+        assert!(
+            (pred1 - pred2).abs() < 1e-12,
+            "projected ESN predictions should be deterministic: {} vs {}",
+            pred1,
+            pred2,
+        );
+    }
+
+    #[test]
+    fn readout_projection_reset_preserves_determinism() {
+        let config = ESNConfig::builder()
+            .n_reservoir(100)
+            .warmup(5)
+            .seed(42)
+            .build()
+            .unwrap();
+
+        let mut esn = EchoStateNetwork::new(config);
+
+        // Train, reset, re-train with same data.
+        let train_data: Vec<(f64, f64)> = (0..30)
+            .map(|i| {
+                let x = (i as f64 * 0.2).sin();
+                let y = (i as f64 * 0.2 + 0.2).sin();
+                (x, y)
+            })
+            .collect();
+
+        for &(x, y) in &train_data {
+            esn.train(&[x], y);
+        }
+        let pred_before = esn.predict(&[0.5]);
+
+        esn.reset();
+
+        for &(x, y) in &train_data {
+            esn.train(&[x], y);
+        }
+        let pred_after = esn.predict(&[0.5]);
+
+        assert!(
+            (pred_before - pred_after).abs() < 1e-12,
+            "predictions after reset should match: {} vs {}",
+            pred_before,
+            pred_after,
+        );
+    }
+
+    #[test]
+    fn small_reservoir_no_projection() {
+        // n_reservoir=50 <= 64: no projection, RLS sees full features.
+        let config = ESNConfig::builder()
+            .n_reservoir(50)
+            .warmup(5)
+            .build()
+            .unwrap();
+        assert_eq!(
+            config.readout_dim, None,
+            "small reservoir should have no readout_dim",
+        );
+
+        let mut esn = EchoStateNetwork::new(config);
+        for i in 0..20 {
+            esn.train(&[i as f64 * 0.1], i as f64);
+        }
+
+        // RLS should see n_reservoir + d_in = 50 + 1 = 51 features.
+        let weights = esn.readout_weights().expect("should have weights");
+        assert_eq!(
+            weights.len(),
+            51,
+            "small reservoir RLS should see all 51 features, got {}",
+            weights.len(),
+        );
+    }
+
+    #[test]
+    fn large_reservoir_sine_wave_with_projection() {
+        // Verify that a large reservoir with projection can still learn.
+        let config = ESNConfig::builder()
+            .n_reservoir(300)
+            .spectral_radius(0.9)
+            .leak_rate(0.3)
+            .input_scaling(1.0)
+            .warmup(50)
+            .forgetting_factor(0.999)
+            .seed(42)
+            .build()
+            .unwrap();
+        assert_eq!(
+            config.readout_dim,
+            Some(64),
+            "n=300 should auto-default readout_dim to 64",
+        );
+
+        let mut esn = EchoStateNetwork::new(config);
+
+        let dt = 0.1;
+        let n_train = 500;
+        for i in 0..n_train {
+            let t = i as f64 * dt;
+            let x = t.sin();
+            let target = (t + dt).sin();
+            esn.train(&[x], target);
+        }
+
+        // Evaluate on continuation.
+        let mut total_error = 0.0;
+        let n_test = 50;
+        for i in n_train..(n_train + n_test) {
+            let t = i as f64 * dt;
+            let x = t.sin();
+            let target = (t + dt).sin();
+            esn.train(&[x], target);
+            let pred = esn.predict(&[x]);
+            total_error += (pred - target).abs();
+        }
+        let mae = total_error / n_test as f64;
+        assert!(
+            mae < 0.5,
+            "large projected ESN sine MAE should be < 0.5, got {}",
+            mae,
         );
     }
 }
