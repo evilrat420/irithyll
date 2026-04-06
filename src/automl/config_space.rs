@@ -113,6 +113,46 @@ impl ConfigSpace {
     pub fn dim(&self) -> usize {
         self.params.len()
     }
+
+    /// Override the bounds of a named hyperparameter.
+    ///
+    /// For `Float` parameters, `low` and `high` set the new range directly.
+    /// For `Int` parameters, `low` and `high` are rounded to the nearest integer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no parameter with the given `name` exists, or if the parameter
+    /// is `Categorical` (which has no continuous range to override).
+    pub fn set_range(&mut self, name: &str, low: f64, high: f64) {
+        let param = self
+            .params
+            .iter_mut()
+            .find(|p| p.name() == name)
+            .unwrap_or_else(|| panic!("ConfigSpace::set_range: unknown parameter '{name}'"));
+        match param {
+            HyperParam::Float {
+                low: ref mut lo,
+                high: ref mut hi,
+                ..
+            } => {
+                *lo = low;
+                *hi = high;
+            }
+            HyperParam::Int {
+                low: ref mut lo,
+                high: ref mut hi,
+                ..
+            } => {
+                *lo = low.round() as i64;
+                *hi = high.round() as i64;
+            }
+            HyperParam::Categorical { name, .. } => {
+                panic!(
+                    "ConfigSpace::set_range: cannot set range on categorical parameter '{name}'"
+                );
+            }
+        }
+    }
 }
 
 impl Default for ConfigSpace {

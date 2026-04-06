@@ -34,6 +34,7 @@ pub mod stacked;
 pub mod step;
 pub mod variants;
 
+use std::collections::VecDeque;
 use std::fmt;
 
 use crate::ensemble::config::SGBTConfig;
@@ -118,6 +119,11 @@ pub struct SGBT<L: Loss = SquaredLoss> {
     /// EWMA of contribution variance (sigma) across trees for adaptive_mts.
     /// Used as the denominator when computing sigma_ratio for tree lifetime modulation.
     rolling_contribution_sigma: f64,
+    /// Ring buffer of sigma_ratio values for end-of-cycle adaptive MTS.
+    /// Capacity = grace_period. MTS updates only at tree replacement boundaries.
+    sigma_ring: VecDeque<f64>,
+    /// Sum of replacement counts at last MTS update (replacement boundary detection).
+    mts_replacement_sum: u64,
     // -----------------------------------------------------------------------
     // Diagnostic cache (updated during train_one)
     // -----------------------------------------------------------------------
@@ -157,6 +163,8 @@ impl<L: Loss + Clone> Clone for SGBT<L> {
             auto_bandwidths: self.auto_bandwidths.clone(),
             last_replacement_sum: self.last_replacement_sum,
             rolling_contribution_sigma: self.rolling_contribution_sigma,
+            sigma_ring: self.sigma_ring.clone(),
+            mts_replacement_sum: self.mts_replacement_sum,
             prev_contributions: self.prev_contributions.clone(),
             prev_prev_contributions: self.prev_prev_contributions.clone(),
             cached_residual_alignment: self.cached_residual_alignment,
@@ -235,7 +243,11 @@ impl<L: Loss> SGBT<L> {
             .min_hessian_sum_opt(config.min_hessian_sum)
             .leaf_model_type(config.leaf_model_type.clone());
 
-        let max_tree_samples = config.max_tree_samples;
+        let max_tree_samples = if let Some((base_mts, _)) = config.adaptive_mts {
+            Some(base_mts)
+        } else {
+            config.max_tree_samples
+        };
 
         let shadow_warmup = config.shadow_warmup.unwrap_or(0);
         let steps: Vec<BoostingStep> = (0..config.n_steps)
@@ -289,6 +301,8 @@ impl<L: Loss> SGBT<L> {
             auto_bandwidths: Vec::new(),
             last_replacement_sum: 0,
             rolling_contribution_sigma: 0.0,
+            sigma_ring: VecDeque::new(),
+            mts_replacement_sum: 0,
             prev_contributions: Vec::new(),
             prev_prev_contributions: Vec::new(),
             cached_residual_alignment: 0.0,
@@ -342,8 +356,9 @@ impl<L: Loss> SGBT<L> {
             }
         }
 
-        // Apply adaptive_mts: override per-step max_tree_samples based on contribution sigma.
-        if let Some((base_mts, k)) = self.config.adaptive_mts {
+        // Adaptive MTS: accumulate sigma_ratio into ring buffer.
+        // Effective MTS is only recomputed at tree replacement boundaries.
+        if self.config.adaptive_mts.is_some() {
             let contribution_sigma = self.compute_contribution_sigma(features);
             const CONTRIBUTION_SIGMA_ALPHA: f64 = 0.001;
             self.rolling_contribution_sigma = (1.0 - CONTRIBUTION_SIGMA_ALPHA)
@@ -355,11 +370,11 @@ impl<L: Loss> SGBT<L> {
             } else {
                 1.0
             };
-            let floor = (base_mts as f64 * self.config.adaptive_mts_floor).max(100.0);
-            let effective_mts = (base_mts as f64 / (1.0 + k * sigma_ratio)).max(floor) as u64;
-            for step in &mut self.steps {
-                step.slot_mut().set_max_tree_samples(Some(effective_mts));
+            let cap = self.config.grace_period;
+            if self.sigma_ring.len() >= cap {
+                self.sigma_ring.pop_front();
             }
+            self.sigma_ring.push_back(sigma_ratio);
         }
 
         // Current prediction starts from base
@@ -439,6 +454,24 @@ impl<L: Loss> SGBT<L> {
             // Interval-based fallback: fire prune check every N samples.
             if interval > 0 && self.samples_seen % interval == 0 {
                 self.check_proactive_prune();
+            }
+        }
+
+        // End-of-cycle adaptive MTS: update effective MTS at replacement boundaries.
+        if let Some((base_mts, k)) = self.config.adaptive_mts {
+            let current_sum: u64 = self.steps.iter().map(|s| s.slot().replacements()).sum();
+            if current_sum != self.mts_replacement_sum {
+                self.mts_replacement_sum = current_sum;
+                if !self.sigma_ring.is_empty() {
+                    let mean_sigma =
+                        self.sigma_ring.iter().sum::<f64>() / self.sigma_ring.len() as f64;
+                    let floor = (base_mts as f64 * self.config.adaptive_mts_floor).max(100.0);
+                    let effective_mts =
+                        (base_mts as f64 / (1.0 + k * mean_sigma)).max(floor) as u64;
+                    for step in &mut self.steps {
+                        step.slot_mut().set_max_tree_samples(Some(effective_mts));
+                    }
+                }
             }
         }
 
@@ -1288,6 +1321,8 @@ impl<L: Loss> SGBT<L> {
         self.prev_contributions.clear();
         self.prev_prev_contributions.clear();
         self.rolling_contribution_sigma = 0.0;
+        self.sigma_ring.clear();
+        self.mts_replacement_sum = 0;
         self.cached_residual_alignment = 0.0;
         self.cached_reg_sensitivity = 0.0;
         self.cached_depth_sufficiency = 0.0;
@@ -1524,6 +1559,8 @@ impl SGBT<Box<dyn Loss>> {
             auto_bandwidths: Vec::new(),
             last_replacement_sum: 0,
             rolling_contribution_sigma: state.rolling_contribution_sigma,
+            sigma_ring: VecDeque::new(),
+            mts_replacement_sum: 0,
             prev_contributions: Vec::new(),
             prev_prev_contributions: Vec::new(),
             cached_residual_alignment: 0.0,

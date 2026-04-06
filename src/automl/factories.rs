@@ -985,6 +985,24 @@ impl Factory {
         self.algorithm
     }
 
+    /// Override the bounds of a named hyperparameter in the config space.
+    ///
+    /// Panics if the parameter name is not found in this factory's space.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use irithyll::automl::Factory;
+    ///
+    /// let factory = Factory::sgbt(4)
+    ///     .with_config_range("learning_rate", 0.01, 0.1)
+    ///     .with_config_range("n_steps", 20.0, 100.0);
+    /// ```
+    pub fn with_config_range(mut self, name: &str, low: f64, high: f64) -> Self {
+        self.space.set_range(name, low, high);
+        self
+    }
+
     // -----------------------------------------------------------------------
     // Projection wrapping
     // -----------------------------------------------------------------------

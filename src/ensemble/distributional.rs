@@ -33,6 +33,8 @@ use crate::export_embedded::export_distributional_packed;
 use crate::sample::{Observation, SampleRef};
 use crate::tree::builder::TreeConfig;
 
+use std::collections::VecDeque;
+
 /// Cached packed f32 binary for fast location-only inference.
 ///
 /// Re-exported periodically from the location ensemble. Predictions use
@@ -262,6 +264,11 @@ pub struct DistributionalSGBT {
     /// (`honest_sigma / rolling_honest_sigma_mean`) modulates the effective
     /// learning rate, reacting instantly to tree disagreement.
     rolling_honest_sigma_mean: f64,
+    /// Ring buffer of sigma_ratio values for end-of-cycle adaptive MTS.
+    /// Capacity = grace_period. MTS updates only at tree replacement boundaries.
+    sigma_ring: VecDeque<f64>,
+    /// Sum of replacement counts at last MTS update (replacement boundary detection).
+    mts_replacement_sum: u64,
     /// Packed f32 cache for fast location-only inference (dual-path).
     packed_cache: Option<PackedInferenceCache>,
     /// Samples trained since last packed cache refresh.
@@ -315,6 +322,8 @@ impl Clone for DistributionalSGBT {
             ensemble_grad_m2: self.ensemble_grad_m2,
             ensemble_grad_count: self.ensemble_grad_count,
             rolling_honest_sigma_mean: self.rolling_honest_sigma_mean,
+            sigma_ring: self.sigma_ring.clone(),
+            mts_replacement_sum: self.mts_replacement_sum,
             packed_cache: self.packed_cache.clone(),
             samples_since_refresh: self.samples_since_refresh,
             packed_refresh_interval: self.packed_refresh_interval,
@@ -458,6 +467,8 @@ impl DistributionalSGBT {
             ensemble_grad_m2: 0.0,
             ensemble_grad_count: 0,
             rolling_honest_sigma_mean: 0.0,
+            sigma_ring: VecDeque::new(),
+            mts_replacement_sum: 0,
             packed_cache: None,
             samples_since_refresh: 0,
             packed_refresh_interval,
@@ -537,22 +548,20 @@ impl DistributionalSGBT {
             return;
         }
 
-        // Apply adaptive_mts: override per-step max_tree_samples based on honest_sigma.
-        if let Some((base_mts, k)) = self.config.adaptive_mts {
+        // Adaptive MTS: accumulate sigma_ratio into ring buffer.
+        // Effective MTS is only recomputed at tree replacement boundaries.
+        if self.config.adaptive_mts.is_some() {
             let sigma_ratio = if self.rolling_honest_sigma_mean > 1e-12 {
                 let honest_sigma = self.compute_honest_sigma(features);
                 honest_sigma / self.rolling_honest_sigma_mean
             } else {
                 1.0
             };
-            let floor = (base_mts as f64 * self.config.adaptive_mts_floor).max(100.0);
-            let effective_mts = (base_mts as f64 / (1.0 + k * sigma_ratio)).max(floor) as u64;
-            for step in &mut self.location_steps {
-                step.slot_mut().set_max_tree_samples(Some(effective_mts));
+            let cap = self.config.grace_period;
+            if self.sigma_ring.len() >= cap {
+                self.sigma_ring.pop_front();
             }
-            for step in &mut self.scale_steps {
-                step.slot_mut().set_max_tree_samples(Some(effective_mts));
-            }
+            self.sigma_ring.push_back(sigma_ratio);
         }
 
         match self.scale_mode {
@@ -581,6 +590,32 @@ impl DistributionalSGBT {
             // Interval-based fallback: fire prune check every N samples.
             if interval > 0 && self.samples_seen % interval == 0 {
                 self.check_proactive_prune();
+            }
+        }
+
+        // End-of-cycle adaptive MTS: update effective MTS at replacement boundaries.
+        if let Some((base_mts, k)) = self.config.adaptive_mts {
+            let current_sum: u64 = self
+                .location_steps
+                .iter()
+                .chain(self.scale_steps.iter())
+                .map(|s| s.slot().replacements())
+                .sum();
+            if current_sum != self.mts_replacement_sum {
+                self.mts_replacement_sum = current_sum;
+                if !self.sigma_ring.is_empty() {
+                    let mean_sigma =
+                        self.sigma_ring.iter().sum::<f64>() / self.sigma_ring.len() as f64;
+                    let floor = (base_mts as f64 * self.config.adaptive_mts_floor).max(100.0);
+                    let effective_mts =
+                        (base_mts as f64 / (1.0 + k * mean_sigma)).max(floor) as u64;
+                    for step in &mut self.location_steps {
+                        step.slot_mut().set_max_tree_samples(Some(effective_mts));
+                    }
+                    for step in &mut self.scale_steps {
+                        step.slot_mut().set_max_tree_samples(Some(effective_mts));
+                    }
+                }
             }
         }
 
@@ -1839,15 +1874,14 @@ impl DistributionalSGBT {
 
         let honest_sigma = self.compute_honest_sigma(features);
 
-        // Compute effective_mts if adaptive_mts is configured
+        // Compute effective_mts from ring mean (end-of-cycle evaluation)
         let effective_mts = self.config.adaptive_mts.map(|(base_mts, k)| {
-            let sigma_ratio = if self.rolling_honest_sigma_mean > 1e-12 {
-                honest_sigma / self.rolling_honest_sigma_mean
-            } else {
-                1.0
-            };
+            if self.sigma_ring.is_empty() {
+                return base_mts;
+            }
+            let mean_sigma = self.sigma_ring.iter().sum::<f64>() / self.sigma_ring.len() as f64;
             let floor = (base_mts as f64 * self.config.adaptive_mts_floor).max(100.0);
-            (base_mts as f64 / (1.0 + k * sigma_ratio)).max(floor) as u64
+            (base_mts as f64 / (1.0 + k * mean_sigma)).max(floor) as u64
         });
 
         crate::ensemble::diagnostics::DistributionalDiagnostics {
@@ -2113,6 +2147,8 @@ impl DistributionalSGBT {
             ensemble_grad_m2: 0.0,
             ensemble_grad_count: 0,
             rolling_honest_sigma_mean: state.rolling_honest_sigma_mean,
+            sigma_ring: VecDeque::new(),
+            mts_replacement_sum: 0,
             packed_cache: None,
             samples_since_refresh: 0,
             packed_refresh_interval,
