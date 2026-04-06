@@ -700,7 +700,7 @@ fn run_deltanet(dataset: &Dataset, config: &CliConfig) -> Result<()> {
     let att_config = StreamingAttentionConfig::builder()
         .d_model(dataset.n_features)
         .n_heads(att.n_heads)
-        .mode(AttentionMode::GatedDeltaNet)
+        .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
         .seed(att.seed)
         .warmup(att.warmup)
         .build()

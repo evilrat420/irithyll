@@ -1574,6 +1574,139 @@ impl SGBT<Box<dyn Loss>> {
 }
 
 // ---------------------------------------------------------------------------
+// Generic model state reconstruction with a concrete loss type
+// ---------------------------------------------------------------------------
+
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+impl<L: Loss> SGBT<L> {
+    /// Reconstruct an `SGBT<L>` from a [`ModelState`](crate::serde_support::ModelState)
+    /// using a caller-supplied concrete loss function.
+    ///
+    /// This is the generic counterpart of [`SGBT::<Box<dyn Loss>>::from_model_state`]:
+    /// it ignores the `loss_type` tag in the state and uses the provided `loss`
+    /// directly, allowing reconstruction into a monomorphized type like
+    /// `SGBT<SoftmaxLoss>` or `SGBT<SquaredLoss>`.
+    pub fn from_model_state_with_loss(state: crate::serde_support::ModelState, loss: L) -> Self {
+        use crate::ensemble::replacement::TreeSlot;
+
+        let leaf_decay_alpha = state
+            .config
+            .leaf_half_life
+            .map(|hl| (-(2.0_f64.ln()) / hl as f64).exp());
+        let max_tree_samples = state.config.max_tree_samples;
+
+        let steps: Vec<BoostingStep> = state
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, step_snap)| {
+                let tree_config = TreeConfig::new()
+                    .max_depth(state.config.max_depth)
+                    .n_bins(state.config.n_bins)
+                    .lambda(state.config.lambda)
+                    .gamma(state.config.gamma)
+                    .grace_period(state.config.grace_period)
+                    .delta(state.config.delta)
+                    .feature_subsample_rate(state.config.feature_subsample_rate)
+                    .leaf_decay_alpha_opt(leaf_decay_alpha)
+                    .split_reeval_interval_opt(state.config.split_reeval_interval)
+                    .feature_types_opt(state.config.feature_types.clone())
+                    .gradient_clip_sigma_opt(state.config.gradient_clip_sigma)
+                    .monotone_constraints_opt(state.config.monotone_constraints.clone())
+                    .adaptive_depth_opt(state.config.adaptive_depth)
+                    .leaf_model_type(state.config.leaf_model_type.clone())
+                    .seed(state.config.seed ^ (i as u64));
+
+                let active = rebuild_tree(&step_snap.tree, tree_config.clone());
+                let alternate = step_snap
+                    .alternate_tree
+                    .as_ref()
+                    .map(|snap| rebuild_tree(snap, tree_config.clone()));
+
+                let mut detector = state.config.drift_detector.create();
+                if let Some(ref ds) = step_snap.drift_state {
+                    detector.restore_state(ds);
+                }
+                let mut slot = TreeSlot::from_trees(
+                    active,
+                    alternate,
+                    tree_config,
+                    detector,
+                    max_tree_samples,
+                );
+                if let Some(ref ads) = step_snap.alt_drift_state {
+                    if let Some(alt_det) = slot.alt_detector_mut() {
+                        alt_det.restore_state(ads);
+                    }
+                }
+                BoostingStep::from_slot(slot)
+            })
+            .collect();
+
+        let n = steps.len();
+        let has_pruning = state.config.quality_prune_alpha.is_some();
+
+        let contribution_ewma = if !state.contribution_ewma.is_empty() {
+            state.contribution_ewma
+        } else if has_pruning {
+            vec![0.0; n]
+        } else {
+            Vec::new()
+        };
+        let low_contrib_count = if !state.low_contrib_count.is_empty() {
+            state.low_contrib_count
+        } else if has_pruning {
+            vec![0; n]
+        } else {
+            Vec::new()
+        };
+
+        let prune_alpha = if state.config.proactive_prune_interval.is_some() {
+            let hl = state.config.prune_half_life.unwrap_or_else(|| {
+                if let Some((base_mts, _)) = state.config.adaptive_mts {
+                    base_mts as usize
+                } else if let Some(mts) = state.config.max_tree_samples {
+                    mts as usize
+                } else {
+                    state.config.grace_period.max(1)
+                }
+            });
+            1.0 - (-2.0 / hl.max(1) as f64).exp()
+        } else {
+            0.01
+        };
+
+        Self {
+            config: state.config,
+            steps,
+            loss,
+            base_prediction: state.base_prediction,
+            base_initialized: state.base_initialized,
+            initial_targets: state.initial_targets,
+            initial_target_count: state.initial_target_count,
+            samples_seen: state.samples_seen,
+            rng_state: state.rng_state,
+            contribution_ewma,
+            low_contrib_count,
+            rolling_mean_error: state.rolling_mean_error,
+            auto_bandwidths: Vec::new(),
+            last_replacement_sum: 0,
+            rolling_contribution_sigma: state.rolling_contribution_sigma,
+            sigma_ring: VecDeque::new(),
+            mts_replacement_sum: 0,
+            prev_contributions: Vec::new(),
+            prev_prev_contributions: Vec::new(),
+            cached_residual_alignment: 0.0,
+            cached_reg_sensitivity: 0.0,
+            cached_depth_sufficiency: 0.0,
+            cached_effective_dof: 0.0,
+            contribution_accuracy: vec![0.0; n],
+            prune_alpha,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared snapshot/rebuild helpers for serde (used by SGBT + DistributionalSGBT)
 // ---------------------------------------------------------------------------
 

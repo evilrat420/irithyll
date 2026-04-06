@@ -241,6 +241,55 @@ impl<L: Loss + Clone> BaggedSGBT<L> {
         self.samples_seen = 0;
         self.rng_state = self.seed;
     }
+
+    /// Convert this model into a serializable [`crate::serde_support::BaggedModelState`].
+    ///
+    /// Each bag is serialized as a full [`crate::serde_support::ModelState`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::IrithyllError::Serialization`] if any bag's loss type
+    /// cannot be auto-detected (custom losses without `loss_type()`).
+    #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+    pub fn to_bagged_state(&self) -> crate::error::Result<crate::serde_support::BaggedModelState> {
+        use crate::serde_support::BaggedModelState;
+
+        let bags = self
+            .bags
+            .iter()
+            .map(|bag| bag.to_model_state())
+            .collect::<crate::error::Result<Vec<_>>>()?;
+
+        Ok(BaggedModelState {
+            n_bags: self.n_bags,
+            bags,
+            samples_seen: self.samples_seen,
+            rng_state: self.rng_state,
+            seed: self.seed,
+        })
+    }
+
+    /// Reconstruct a [`BaggedSGBT<L>`] from a serialized [`crate::serde_support::BaggedModelState`]
+    /// using a caller-supplied concrete loss function.
+    ///
+    /// The loss type tag in each bag's [`crate::serde_support::ModelState`] is ignored;
+    /// the provided `loss` is used for all bags.
+    #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+    pub fn from_bagged_state(state: crate::serde_support::BaggedModelState, loss: L) -> Self {
+        let bags = state
+            .bags
+            .into_iter()
+            .map(|model_state| SGBT::from_model_state_with_loss(model_state, loss.clone()))
+            .collect();
+
+        Self {
+            bags,
+            n_bags: state.n_bags,
+            samples_seen: state.samples_seen,
+            rng_state: state.rng_state,
+            seed: state.seed,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

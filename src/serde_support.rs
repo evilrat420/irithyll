@@ -191,6 +191,88 @@ pub fn load_model(json: &str) -> Result<crate::ensemble::DynSGBT> {
 }
 
 // ---------------------------------------------------------------------------
+// MulticlassSGBT serialization
+// ---------------------------------------------------------------------------
+
+/// Serializable state for [`MulticlassSGBT`](crate::ensemble::multiclass::MulticlassSGBT).
+///
+/// Each class committee is stored as a full [`ModelState`] since each committee
+/// is an independent `SGBT<SoftmaxLoss>`.
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MulticlassModelState {
+    pub n_classes: usize,
+    pub committees: Vec<ModelState>,
+    pub samples_seen: u64,
+}
+
+/// Serialize a [`MulticlassModelState`] to JSON.
+#[cfg(feature = "serde-json")]
+pub fn save_multiclass_model(state: &MulticlassModelState) -> Result<String> {
+    to_json_pretty(state)
+}
+
+/// Deserialize a [`MulticlassModelState`] from JSON.
+#[cfg(feature = "serde-json")]
+pub fn load_multiclass_model(json: &str) -> Result<MulticlassModelState> {
+    from_json(json)
+}
+
+/// Serialize a [`MulticlassModelState`] to bincode bytes.
+#[cfg(feature = "serde-bincode")]
+pub fn save_multiclass_model_bincode(state: &MulticlassModelState) -> Result<Vec<u8>> {
+    to_bincode(state)
+}
+
+/// Deserialize a [`MulticlassModelState`] from bincode bytes.
+#[cfg(feature = "serde-bincode")]
+pub fn load_multiclass_model_bincode(bytes: &[u8]) -> Result<MulticlassModelState> {
+    from_bincode(bytes)
+}
+
+// ---------------------------------------------------------------------------
+// BaggedSGBT serialization
+// ---------------------------------------------------------------------------
+
+/// Serializable state for [`BaggedSGBT`](crate::ensemble::bagged::BaggedSGBT).
+///
+/// Each bag is stored as a full [`ModelState`] since each bag is an
+/// independent `SGBT<L>`.
+#[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BaggedModelState {
+    pub n_bags: usize,
+    pub bags: Vec<ModelState>,
+    pub samples_seen: u64,
+    pub rng_state: u64,
+    pub seed: u64,
+}
+
+/// Serialize a [`BaggedModelState`] to JSON.
+#[cfg(feature = "serde-json")]
+pub fn save_bagged_model(state: &BaggedModelState) -> Result<String> {
+    to_json_pretty(state)
+}
+
+/// Deserialize a [`BaggedModelState`] from JSON.
+#[cfg(feature = "serde-json")]
+pub fn load_bagged_model(json: &str) -> Result<BaggedModelState> {
+    from_json(json)
+}
+
+/// Serialize a [`BaggedModelState`] to bincode bytes.
+#[cfg(feature = "serde-bincode")]
+pub fn save_bagged_model_bincode(state: &BaggedModelState) -> Result<Vec<u8>> {
+    to_bincode(state)
+}
+
+/// Deserialize a [`BaggedModelState`] from bincode bytes.
+#[cfg(feature = "serde-bincode")]
+pub fn load_bagged_model_bincode(bytes: &[u8]) -> Result<BaggedModelState> {
+    from_bincode(bytes)
+}
+
+// ---------------------------------------------------------------------------
 // Bincode serialization (compact binary format)
 // ---------------------------------------------------------------------------
 
@@ -359,5 +441,168 @@ mod tests {
         let json = to_json(&samples).unwrap();
         let restored: Vec<Sample> = from_json(&json).unwrap();
         assert_eq!(restored.len(), 2);
+    }
+
+    #[cfg(feature = "serde-json")]
+    #[test]
+    fn multiclass_model_json_roundtrip() {
+        use crate::ensemble::multiclass::MulticlassSGBT;
+        use crate::SGBTConfig;
+
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(3)
+            .initial_target_count(5)
+            .build()
+            .unwrap();
+
+        let mut model = MulticlassSGBT::new(config, 3).unwrap();
+
+        // Train on a simple 3-class problem
+        for i in 0..60 {
+            let x = i as f64 * 0.1;
+            let class = (i % 3) as f64;
+            model.train_one(&Sample::new(vec![x, x * 2.0], class));
+        }
+
+        // Serialize
+        let state = model.to_multiclass_state();
+        let json = save_multiclass_model(&state).unwrap();
+
+        // Deserialize
+        let loaded_state = load_multiclass_model(&json).unwrap();
+        let restored = MulticlassSGBT::from_multiclass_state(loaded_state);
+
+        // Verify predictions match
+        let test_features = vec![vec![0.5, 1.0], vec![1.0, 2.0], vec![2.0, 4.0]];
+        for features in &test_features {
+            let orig_proba = model.predict_proba(features);
+            let rest_proba = restored.predict_proba(features);
+            assert_eq!(
+                orig_proba.len(),
+                rest_proba.len(),
+                "probability vector lengths should match"
+            );
+            for (c, (o, r)) in orig_proba.iter().zip(rest_proba.iter()).enumerate() {
+                assert!(
+                    (o - r).abs() < 1e-10,
+                    "multiclass JSON round-trip mismatch at class {}: {} vs {}",
+                    c,
+                    o,
+                    r
+                );
+            }
+        }
+
+        // Verify metadata
+        assert_eq!(model.n_classes(), restored.n_classes());
+        assert_eq!(model.n_samples_seen(), restored.n_samples_seen());
+    }
+
+    #[cfg(feature = "serde-json")]
+    #[test]
+    fn bagged_model_json_roundtrip() {
+        use crate::ensemble::bagged::BaggedSGBT;
+        use crate::loss::squared::SquaredLoss;
+        use crate::SGBTConfig;
+
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .initial_target_count(5)
+            .build()
+            .unwrap();
+
+        let mut model = BaggedSGBT::new(config, 3).unwrap();
+
+        // Train on a simple regression problem
+        for i in 0..100 {
+            let x = i as f64 * 0.1;
+            model.train_one(&Sample::new(vec![x], x * 2.0 + 1.0));
+        }
+
+        // Serialize
+        let state = model.to_bagged_state().unwrap();
+        let json = save_bagged_model(&state).unwrap();
+
+        // Deserialize
+        let loaded_state = load_bagged_model(&json).unwrap();
+        let restored = BaggedSGBT::from_bagged_state(loaded_state, SquaredLoss);
+
+        // Verify predictions match
+        let test_points = [0.5, 1.0, 2.0, 3.0];
+        for &x in &test_points {
+            let orig = model.predict(&[x]);
+            let rest = restored.predict(&[x]);
+            assert!(
+                (orig - rest).abs() < 1e-10,
+                "bagged JSON round-trip mismatch at x={}: {} vs {}",
+                x,
+                orig,
+                rest
+            );
+        }
+
+        // Verify metadata
+        assert_eq!(model.n_bags(), restored.n_bags());
+        assert_eq!(model.n_samples_seen(), restored.n_samples_seen());
+    }
+
+    #[cfg(feature = "serde-json")]
+    #[test]
+    fn distributional_model_json_roundtrip() {
+        use crate::ensemble::distributional::DistributionalSGBT;
+        use crate::SGBTConfig;
+
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .learning_rate(0.1)
+            .grace_period(10)
+            .max_depth(3)
+            .initial_target_count(10)
+            .build()
+            .unwrap();
+
+        let mut model = DistributionalSGBT::new(config);
+
+        // Train on a simple regression problem
+        for i in 0..100 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(vec![x], x.sin()));
+        }
+
+        // Serialize
+        let state = model.to_distributional_state();
+        let json = save_distributional_model(&state).unwrap();
+
+        // Deserialize
+        let loaded_state = load_distributional_model(&json).unwrap();
+        let restored = DistributionalSGBT::from_distributional_state(loaded_state);
+
+        // Verify predictions match
+        let test_points = [0.5, 1.0, 2.0, 3.0];
+        for &x in &test_points {
+            let orig = model.predict(&[x]);
+            let rest = restored.predict(&[x]);
+            assert!(
+                (orig.mu - rest.mu).abs() < 1e-10,
+                "distributional JSON round-trip mu mismatch at x={}: {} vs {}",
+                x,
+                orig.mu,
+                rest.mu
+            );
+            assert!(
+                (orig.sigma - rest.sigma).abs() < 1e-10,
+                "distributional JSON round-trip sigma mismatch at x={}: {} vs {}",
+                x,
+                orig.sigma,
+                rest.sigma
+            );
+        }
+
+        assert_eq!(model.n_samples_seen(), restored.n_samples_seen());
     }
 }

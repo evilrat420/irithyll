@@ -385,7 +385,7 @@ fn run_neural_eval_deltanet(cli_config: &CliConfig, dataset: &Dataset) -> Result
     let config = StreamingAttentionConfig::builder()
         .d_model(dataset.n_features)
         .n_heads(att.n_heads)
-        .mode(AttentionMode::GatedDeltaNet)
+        .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
         .seed(att.seed)
         .warmup(att.warmup)
         .build()

@@ -108,7 +108,7 @@ impl MultiHeadAttention {
 
             // Mode-dependent gate weights
             let w_gate = match &config.mode {
-                AttentionMode::GLA | AttentionMode::GatedDeltaNet | AttentionMode::MLSTM => {
+                AttentionMode::GLA | AttentionMode::GatedDeltaNet { .. } | AttentionMode::MLSTM => {
                     init_weights(&mut rng, d_model)
                 }
                 _ => Vec::new(),
@@ -238,10 +238,10 @@ impl AttentionLayer for MultiHeadAttention {
                     update_rules::delta_update(&mut head.state, &k_norm, &v);
                     head.state.query(&q)
                 }
-                AttentionMode::GatedDeltaNet => {
+                AttentionMode::GatedDeltaNet { beta_scale } => {
                     let decay = sigmoid_gate(&head.w_gate, input);
-                    let k_norm = l2_normalize(&k);
-                    update_rules::gated_delta_update(&mut head.state, &k_norm, &v, decay);
+                    // Key normalization is now handled inside gated_delta_update
+                    update_rules::gated_delta_update(&mut head.state, &k, &v, decay, *beta_scale);
                     head.state.query(&q)
                 }
                 AttentionMode::RWKV { initial_decay } => {
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn gated_deltanet_output_dimension_matches_config() {
-        let config = make_config(AttentionMode::GatedDeltaNet);
+        let config = make_config(AttentionMode::GatedDeltaNet { beta_scale: 1.0 });
         let mut attn = MultiHeadAttention::new(config);
         let input = make_input(8);
         let output = attn.forward(&input);

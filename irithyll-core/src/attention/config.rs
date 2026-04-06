@@ -31,8 +31,15 @@ pub enum AttentionMode {
     GLA,
     /// Delta rule: error-corrective associative memory update.
     DeltaNet,
-    /// Gated delta rule: GLA gate + delta error correction (NVIDIA SOTA).
-    GatedDeltaNet,
+    /// Gated delta rule: GLA gate + delta error correction (Yang et al., ICLR 2025).
+    ///
+    /// Combines GLA's data-dependent gating with DeltaNet's error-corrective
+    /// delta rule, plus learnable beta scaling and L2-normalized keys.
+    GatedDeltaNet {
+        /// Learnable beta scaling factor (default: 1.0).
+        /// Controls how aggressively the error-corrective update is applied.
+        beta_scale: f64,
+    },
     /// RWKV-style exponential decay with learned dynamic w.
     RWKV {
         /// Base decay rate before input-dependent modulation.
@@ -131,7 +138,7 @@ mod tests {
             AttentionMode::Hawk,
             AttentionMode::GLA,
             AttentionMode::DeltaNet,
-            AttentionMode::GatedDeltaNet,
+            AttentionMode::GatedDeltaNet { beta_scale: 1.0 },
             AttentionMode::RWKV { initial_decay: 0.5 },
             AttentionMode::MLSTM,
         ];
@@ -159,7 +166,7 @@ mod tests {
             n_heads: 8,
             d_key: 8,
             d_value: 8,
-            mode: AttentionMode::GatedDeltaNet,
+            mode: AttentionMode::GatedDeltaNet { beta_scale: 1.0 },
             seed: 1234,
         };
         assert_eq!(cfg.d_model, 64, "d_model should be 64");

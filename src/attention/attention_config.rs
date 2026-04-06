@@ -102,7 +102,7 @@ impl fmt::Display for StreamingAttentionConfig {
 /// let config = StreamingAttentionConfig::builder()
 ///     .d_model(16)
 ///     .n_heads(4)
-///     .mode(AttentionMode::GatedDeltaNet)
+///     .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
 ///     .forgetting_factor(0.99)
 ///     .build()
 ///     .unwrap();
@@ -331,7 +331,7 @@ mod tests {
         let config = StreamingAttentionConfig::builder()
             .d_model(16)
             .n_heads(4)
-            .mode(AttentionMode::GatedDeltaNet)
+            .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
             .forgetting_factor(0.99)
             .delta(50.0)
             .seed(123)

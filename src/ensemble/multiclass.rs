@@ -124,6 +124,53 @@ impl MulticlassSGBT {
         }
         self.samples_seen = 0;
     }
+
+    /// Convert this model into a serializable [`crate::serde_support::MulticlassModelState`].
+    ///
+    /// Each committee is serialized as a full [`crate::serde_support::ModelState`]
+    /// with its SoftmaxLoss tag.
+    #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+    pub fn to_multiclass_state(&self) -> crate::serde_support::MulticlassModelState {
+        use crate::serde_support::MulticlassModelState;
+
+        let committees = self
+            .committees
+            .iter()
+            .map(|c| {
+                c.to_model_state()
+                    .expect("SoftmaxLoss always provides loss_type()")
+            })
+            .collect();
+
+        MulticlassModelState {
+            n_classes: self.n_classes,
+            committees,
+            samples_seen: self.samples_seen,
+        }
+    }
+
+    /// Reconstruct a [`MulticlassSGBT`] from a serialized [`crate::serde_support::MulticlassModelState`].
+    ///
+    /// Rebuilds all class committees including tree topology and leaf values.
+    /// Histogram accumulators are left empty and will rebuild from continued training.
+    #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+    pub fn from_multiclass_state(state: crate::serde_support::MulticlassModelState) -> Self {
+        let n_classes = state.n_classes;
+
+        let committees = state
+            .committees
+            .into_iter()
+            .map(|model_state| {
+                SGBT::from_model_state_with_loss(model_state, SoftmaxLoss { n_classes })
+            })
+            .collect();
+
+        Self {
+            committees,
+            n_classes,
+            samples_seen: state.samples_seen,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -1192,6 +1192,7 @@ dependencies = [
  "irithyll",
  "ratatui",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tracing",

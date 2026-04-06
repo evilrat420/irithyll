@@ -18,6 +18,7 @@ irithyll = { path = "..", features = ["serde-json", "arrow", "parquet"] }
 clap = { version = "4", features = ["derive", "env"] }
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1"
 
 # Progress & output
 indicatif = "0.17"

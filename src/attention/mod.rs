@@ -100,7 +100,7 @@ pub fn delta_net(d_model: usize, n_heads: usize) -> StreamingAttentionModel {
         StreamingAttentionConfig::builder()
             .d_model(d_model)
             .n_heads(n_heads)
-            .mode(AttentionMode::GatedDeltaNet)
+            .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
             .build()
             .expect("delta_net() factory: invalid parameters"),
     )

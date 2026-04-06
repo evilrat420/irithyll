@@ -438,12 +438,12 @@ mod tests {
         let config = StreamingAttentionConfig::builder()
             .d_model(4)
             .n_heads(2)
-            .mode(AttentionMode::GatedDeltaNet)
+            .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
             .build()
             .unwrap();
         let model = StreamingAttentionModel::new(config);
         assert!(
-            matches!(model.mode(), AttentionMode::GatedDeltaNet),
+            matches!(model.mode(), AttentionMode::GatedDeltaNet { .. }),
             "mode should be GatedDeltaNet"
         );
     }
