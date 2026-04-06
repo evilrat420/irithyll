@@ -1136,6 +1136,10 @@ impl ModelFactory for Factory {
         self.complexity
     }
 
+    fn n_features_hint(&self) -> usize {
+        self.n_features
+    }
+
     fn create(&self, config: &HyperConfig) -> Box<dyn irithyll_core::learner::StreamingLearner> {
         let inner: Box<dyn irithyll_core::learner::StreamingLearner> = match self.algorithm {
             Algorithm::Sgbt => {
@@ -1155,6 +1159,8 @@ impl ModelFactory for Factory {
                     .lambda(lambda)
                     .feature_subsample_rate(feature_subsample_rate)
                     .grace_period(grace_period)
+                    .error_weight_alpha(0.01)
+                    .shadow_warmup(100)
                     .accuracy_based_pruning(self.accuracy_based_pruning);
                 if let Some(interval) = self.proactive_prune_interval {
                     builder = builder.proactive_prune_interval(interval);
@@ -1185,6 +1191,8 @@ impl ModelFactory for Factory {
                     .lambda(lambda)
                     .feature_subsample_rate(feature_subsample_rate)
                     .grace_period(grace_period)
+                    .error_weight_alpha(0.01)
+                    .shadow_warmup(100)
                     .accuracy_based_pruning(self.accuracy_based_pruning);
                 if let Some(interval) = self.proactive_prune_interval {
                     builder = builder.proactive_prune_interval(interval);

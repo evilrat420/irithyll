@@ -117,7 +117,10 @@ impl FeasibleRegion {
         // need lower. Prevents stumpy trees from over-regularization.
         let target_std = self.target_epsilon * 10.0; // undo the 0.1 scaling from from_data()
         let lambda_center = target_std.max(0.01);
-        let lambda_bounds = (lambda_center * 0.1, lambda_center * 3.0);
+        let lambda_bounds = (
+            (lambda_center * 0.1).clamp(0.1, 5.0),
+            (lambda_center * 3.0).clamp(0.1, 5.0),
+        );
 
         ConfigBounds {
             max_depth: (2, max_depth_upper),
@@ -230,6 +233,17 @@ impl FeasibleRegion {
         self.n_samples = n_samples;
         let log_p = (self.n_features as f64).max(1.0).ln().max(1.0);
         self.budget = n_samples as f64 * self.target_epsilon.powi(2) / log_p;
+    }
+
+    /// Update target variance estimate from observed data.
+    ///
+    /// Should be called periodically as the stream progresses so that
+    /// config bounds (especially lambda and grace period) stay calibrated.
+    pub fn update_variance(&mut self, target_variance: f64) {
+        self.target_epsilon = target_variance.sqrt().max(1e-8) * 0.1;
+        // Recompute budget with updated epsilon.
+        let log_p = (self.n_features as f64).max(1.0).ln().max(1.0);
+        self.budget = self.n_samples as f64 * self.target_epsilon.powi(2) / log_p;
     }
 
     /// Current complexity budget.
@@ -643,8 +657,10 @@ impl DiagnosticLearner {
         let bounds = region.config_bounds();
 
         // Observation interval: center of grace_period range, minimum 1.
+        // Capped at 50 to ensure the SPSA optimizer gets enough gradient
+        // updates within typical stream lengths (1000-5000 samples).
         let observation_interval =
-            ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
+            ((bounds.grace_period.0 + bounds.grace_period.1) / 2).clamp(1, 50) as u64;
 
         // SPSA gain sequence parameters.
         let big_a = 10.0;
@@ -792,8 +808,10 @@ impl DiagnosticLearner {
 
                 if self.samples_in_phase >= 50 {
                     // Calibrate c_init from observed noise.
+                    // Clamped conservatively to avoid large config swings that
+                    // destabilize the champion during exploration phases.
                     let noise_std = self.perf_variance.sqrt();
-                    self.c_init = (2.0 * noise_std).clamp(0.01, 0.3);
+                    self.c_init = (2.0 * noise_std).clamp(0.005, 0.08);
                     self.initialized = true;
 
                     // Generate first perturbation and transition to PerturbPlus.
@@ -951,6 +969,16 @@ impl DiagnosticLearner {
         &self.region
     }
 
+    /// Update the feasible region with current data characteristics.
+    ///
+    /// Called by the AutoTuner as it accumulates target variance estimates.
+    /// This recalibrates config bounds (lambda, grace period) to match the
+    /// actual data distribution rather than the conservative initial guess.
+    pub fn update_region(&mut self, n_samples: usize, target_variance: f64) {
+        self.region.update(n_samples);
+        self.region.update_variance(target_variance);
+    }
+
     /// Total SPSA optimization steps completed.
     pub fn total_steps(&self) -> u64 {
         self.total_steps
@@ -1079,13 +1107,26 @@ impl DiagnosticLearner {
     }
 
     /// Compute the adjustment to move from last_emitted_theta to the target theta.
+    ///
+    /// Adjustments are dampened to prevent large config swings from
+    /// destabilizing the champion during SPSA exploration phases.
     fn adjustment_for_theta(&mut self, target: &[f64; 2]) -> SmoothAdjustments {
         let (target_lr, target_lambda) = self.theta_to_config(target);
         let (last_lr, last_lambda) = self.theta_to_config(&self.last_emitted_theta);
         self.last_emitted_theta = *target;
+
+        // Dampen: blend the raw multiplier toward 1.0 (no change).
+        // Factor of 0.3 means we apply only 30% of the suggested change,
+        // preventing large LR swings while still allowing gradient-guided drift.
+        let raw_mult = target_lr / last_lr.max(1e-15);
+        let dampened_mult = 1.0 + 0.3 * (raw_mult - 1.0);
+
+        let raw_dir = target_lambda - last_lambda;
+        let dampened_dir = 0.3 * raw_dir;
+
         SmoothAdjustments {
-            lr_multiplier: target_lr / last_lr.max(1e-15),
-            lambda_direction: target_lambda - last_lambda,
+            lr_multiplier: dampened_mult,
+            lambda_direction: dampened_dir,
         }
     }
 
@@ -1308,7 +1349,8 @@ mod tests {
         // Verify Init -> PerturbPlus -> PerturbMinus -> PerturbPlus...
         let region = FeasibleRegion::from_data(200, 3, 1.0);
         let bounds = region.config_bounds();
-        let interval = ((bounds.grace_period.0 + bounds.grace_period.1) / 2).max(1) as u64;
+        // Match the cap applied in DiagnosticLearner::with_objective.
+        let interval = ((bounds.grace_period.0 + bounds.grace_period.1) / 2).clamp(1, 50) as u64;
         let mut learner = DiagnosticLearner::new(region);
 
         let diag = ConfigDiagnostics {

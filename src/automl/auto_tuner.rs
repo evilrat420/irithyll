@@ -420,8 +420,9 @@ impl AutoTunerBuilder {
             None
         };
         let adaptor = if config.auto_builder {
-            // Create FeasibleRegion with conservative initial estimates.
-            let region = auto_builder::FeasibleRegion::from_data(100, 1, 1.0);
+            // Initialize FeasibleRegion using the first factory's feature hint.
+            let n_feat = self.factories[0].n_features_hint().max(1);
+            let region = auto_builder::FeasibleRegion::from_data(100, n_feat, 1.0);
             Some(auto_builder::DiagnosticLearner::with_objective(
                 region,
                 config.meta_objective,
@@ -688,7 +689,13 @@ impl StreamingLearner for AutoTuner {
             d.reset();
         }
         if self.config.auto_builder {
-            let region = auto_builder::FeasibleRegion::from_data(100, 1, 1.0);
+            let n_feat = self
+                .factories
+                .first()
+                .map(|f| f.n_features_hint())
+                .unwrap_or(1)
+                .max(1);
+            let region = auto_builder::FeasibleRegion::from_data(100, n_feat, 1.0);
             self.adaptor = Some(auto_builder::DiagnosticLearner::with_objective(
                 region,
                 self.config.meta_objective,

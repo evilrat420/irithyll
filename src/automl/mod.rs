@@ -98,4 +98,15 @@ pub trait ModelFactory: Send + Sync {
     fn complexity_hint(&self) -> usize {
         100
     }
+
+    /// Number of input features this factory expects.
+    ///
+    /// Used by the auto-builder to initialize the [`FeasibleRegion`] with
+    /// correct dimensionality, ensuring config bounds (especially grace period
+    /// and lambda) are properly calibrated.
+    ///
+    /// The default is 1 (conservative estimate).
+    fn n_features_hint(&self) -> usize {
+        1
+    }
 }
