@@ -11,7 +11,7 @@ use crate::learner::SGBTLearner;
 use crate::projection::{ProjectedLearner, ProjectionConfig};
 use crate::reservoir::{ESNConfig, EchoStateNetwork};
 use crate::snn::{SpikeNet, SpikeNetConfig};
-use crate::ssm::{MambaConfig, StreamingMamba};
+use crate::ssm::{MambaConfig, MambaVersion, StreamingMamba};
 use irithyll_core::attention::AttentionMode;
 
 use crate::attention::{StreamingAttentionConfig, StreamingAttentionModel};
@@ -524,6 +524,8 @@ pub enum Algorithm {
     Kan,
     /// Streaming TTT (test-time training with fast weights).
     Ttt,
+    /// Streaming Mamba-3 (MIMO groups, complex states, trapezoidal discretization).
+    Mamba3,
 }
 
 /// Unified model factory for AutoML.
@@ -748,6 +750,58 @@ impl Factory {
             space,
             warmup: 10,
             complexity: 4000,
+            seed: 42,
+            accuracy_based_pruning: false,
+            proactive_prune_interval: None,
+            prune_half_life: None,
+            projection: None,
+        }
+    }
+
+    /// Create a factory for streaming Mamba-3 (MIMO groups, complex states).
+    ///
+    /// `d_in` is the number of input features, which is fixed and not
+    /// part of the hyperparameter search.
+    ///
+    /// # Config Space (4 params)
+    ///
+    /// | Index | Name | Type | Range | Scale |
+    /// |-------|------|------|-------|-------|
+    /// | 0 | `n_state` | Int | [4, 64] | -- |
+    /// | 1 | `n_groups` | Int | [1, d_in/2] | -- |
+    /// | 2 | `forgetting_factor` | Float | [0.95, 0.9999] | linear |
+    /// | 3 | `warmup` | Int | [5, 50] | -- |
+    pub fn mamba3(d_in: usize) -> Self {
+        let max_groups = (d_in / 2).max(1);
+        let space = ConfigSpace::new()
+            .push(HyperParam::Int {
+                name: "n_state",
+                low: 4,
+                high: 64,
+            })
+            .push(HyperParam::Int {
+                name: "n_groups",
+                low: 1,
+                high: max_groups as i64,
+            })
+            .push(HyperParam::Float {
+                name: "forgetting_factor",
+                low: 0.95,
+                high: 0.9999,
+                log_scale: false,
+            })
+            .push(HyperParam::Int {
+                name: "warmup",
+                low: 5,
+                high: 50,
+            });
+
+        Self {
+            algorithm: Algorithm::Mamba3,
+            n_features: d_in,
+            space,
+            warmup: 10,
+            complexity: 5000,
             seed: 42,
             accuracy_based_pruning: false,
             proactive_prune_interval: None,
@@ -1056,6 +1110,14 @@ impl Factory {
         Factory::mamba(rank).with_projection(d_in, rank, 0.999)
     }
 
+    /// Create a projected Mamba-3 factory.
+    ///
+    /// Equivalent to `Factory::mamba3(rank).with_projection(d_in, rank, 0.999)`.
+    /// The inner Mamba-3 sees `rank`-dimensional projected features.
+    pub fn projected_mamba3(d_in: usize, rank: usize) -> Self {
+        Factory::mamba3(rank).with_projection(d_in, rank, 0.999)
+    }
+
     /// Create a projected TTT factory.
     ///
     /// Equivalent to `Factory::ttt(rank).with_projection(d_in, rank, 0.999)`.
@@ -1109,6 +1171,7 @@ impl ModelFactory for Factory {
                 Algorithm::Distributional => "Projected<Distributional>",
                 Algorithm::Esn => "Projected<ESN>",
                 Algorithm::Mamba => "Projected<Mamba>",
+                Algorithm::Mamba3 => "Projected<Mamba3>",
                 Algorithm::Attention => "Projected<Attention>",
                 Algorithm::SpikeNet => "Projected<SpikeNet>",
                 Algorithm::Kan => "Projected<KAN>",
@@ -1120,6 +1183,7 @@ impl ModelFactory for Factory {
                 Algorithm::Distributional => "Distributional",
                 Algorithm::Esn => "ESN",
                 Algorithm::Mamba => "Mamba",
+                Algorithm::Mamba3 => "Mamba3",
                 Algorithm::Attention => "Attention",
                 Algorithm::SpikeNet => "SpikeNet",
                 Algorithm::Kan => "KAN",
@@ -1235,6 +1299,31 @@ impl ModelFactory for Factory {
                     .warmup(warmup)
                     .build()
                     .expect("Factory::create(Mamba): invalid config from search space");
+
+                Box::new(StreamingMamba::new(mamba_config))
+            }
+            Algorithm::Mamba3 => {
+                let n_state = config.get(0) as usize;
+                let mut n_groups = config.get(1) as usize;
+                let forgetting_factor = config.get(2);
+                let warmup = config.get(3) as usize;
+
+                // Ensure n_groups divides d_in evenly; snap to nearest valid divisor.
+                let d_in = self.n_features;
+                if d_in > 0 && n_groups > 0 && d_in % n_groups != 0 {
+                    // Find the nearest divisor of d_in that is <= n_groups.
+                    n_groups = (1..=n_groups).rev().find(|&g| d_in % g == 0).unwrap_or(1);
+                }
+
+                let mamba_config = MambaConfig::builder()
+                    .d_in(d_in)
+                    .n_state(n_state)
+                    .version(MambaVersion::V3)
+                    .n_groups(n_groups.max(1))
+                    .forgetting_factor(forgetting_factor)
+                    .warmup(warmup)
+                    .build()
+                    .expect("Factory::create(Mamba3): invalid config from search space");
 
                 Box::new(StreamingMamba::new(mamba_config))
             }
@@ -1816,6 +1905,11 @@ mod tests {
             3000,
             "TTT complexity should be 3000"
         );
+        assert_eq!(
+            Factory::mamba3(8).complexity_hint(),
+            5000,
+            "Mamba3 complexity should be 5000"
+        );
     }
 
     /// Each algorithm returns the expected name.
@@ -1829,6 +1923,7 @@ mod tests {
         );
         assert_eq!(Factory::esn().name(), "ESN", "ESN name mismatch");
         assert_eq!(Factory::mamba(3).name(), "Mamba", "Mamba name mismatch");
+        assert_eq!(Factory::mamba3(8).name(), "Mamba3", "Mamba3 name mismatch");
         assert_eq!(
             Factory::attention(8).name(),
             "Attention",
@@ -2190,6 +2285,111 @@ mod tests {
         assert!(
             pred.is_finite(),
             "multi-factory with projected should produce finite prediction, got {pred}"
+        );
+    }
+
+    // ===================================================================
+    // Mamba3 factory tests
+    // ===================================================================
+
+    /// Factory::mamba3 config space has 4 parameters.
+    #[test]
+    fn mamba3_factory_config_space() {
+        let factory = Factory::mamba3(8);
+        let space = factory.config_space();
+        assert_eq!(
+            space.n_params(),
+            4,
+            "Mamba3 should have 4 hyperparameters, got {}",
+            space.n_params()
+        );
+        assert_eq!(
+            space.params()[0].name(),
+            "n_state",
+            "first param should be n_state"
+        );
+        assert_eq!(
+            space.params()[1].name(),
+            "n_groups",
+            "second param should be n_groups"
+        );
+        assert_eq!(
+            space.params()[2].name(),
+            "forgetting_factor",
+            "third param should be forgetting_factor"
+        );
+        assert_eq!(
+            space.params()[3].name(),
+            "warmup",
+            "fourth param should be warmup"
+        );
+    }
+
+    /// Factory::mamba3 has correct complexity and warmup.
+    #[test]
+    fn mamba3_factory_defaults() {
+        let factory = Factory::mamba3(8);
+        assert_eq!(
+            factory.complexity_hint(),
+            5000,
+            "Mamba3 complexity should be 5000"
+        );
+        assert_eq!(factory.warmup_hint(), 10, "Mamba3 warmup should be 10");
+        assert_eq!(factory.name(), "Mamba3", "Mamba3 name should be 'Mamba3'");
+        assert_eq!(
+            factory.algorithm(),
+            Algorithm::Mamba3,
+            "algorithm should be Mamba3"
+        );
+    }
+
+    /// Factory::mamba3 creates model that trains and predicts finite values.
+    #[test]
+    fn unified_factory_mamba3() {
+        let factory = Factory::mamba3(8);
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..50 {
+            let x: Vec<f64> = (0..8)
+                .map(|k| (i as f64 * 0.1 + k as f64 * 0.3).sin())
+                .collect();
+            let y = x[0] * 2.0 + x[1];
+            model.train(&x, y);
+        }
+        let x: Vec<f64> = (0..8).map(|k| (5.0 + k as f64 * 0.3).sin()).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "unified Mamba3 prediction should be finite, got {pred}"
+        );
+    }
+
+    /// Factory::projected_mamba3 creates a projected model.
+    #[test]
+    fn projected_mamba3_factory_create_and_predict() {
+        let factory = Factory::projected_mamba3(8, 4);
+        assert_eq!(
+            factory.name(),
+            "Projected<Mamba3>",
+            "projected mamba3 factory name should be Projected<Mamba3>"
+        );
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..100 {
+            let x: Vec<f64> = (0..8).map(|j| (i * j) as f64 * 0.01).collect();
+            model.train(&x, i as f64 * 0.1);
+        }
+        let x: Vec<f64> = (0..8).map(|j| j as f64 * 0.05).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "projected Mamba3 prediction should be finite, got {pred}"
         );
     }
 }

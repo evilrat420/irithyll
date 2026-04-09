@@ -110,6 +110,55 @@ pub fn s4d_inv_real(n_state: usize) -> Vec<f64> {
     log_a
 }
 
+/// S4D-Inv initialization with complex eigenvalues.
+///
+/// Returns a vec of length `2 * n_state` containing interleaved real/imaginary
+/// pairs: `[re_0, im_0, re_1, im_1, ...]`.
+///
+/// - Real part: `re_n = -(0.5 + n_state / (n + 1))` (stable, negative)
+/// - Imaginary part: `im_n = PI * (n + 1) / n_state` (oscillatory component)
+///
+/// The real parts are stored as their natural logarithms of the magnitude
+/// (same convention as `s4d_inv_real`), while imaginary parts are stored
+/// directly since they can be positive or negative.
+///
+/// These complex eigenvalues combine exponential decay (real part) with
+/// oscillatory dynamics (imaginary part), enabling the SSM to capture
+/// periodic patterns in the input sequence.
+///
+/// # Arguments
+///
+/// * `n_state` -- number of complex state dimensions (N)
+///
+/// # Returns
+///
+/// Vec of length `2 * n_state` containing `[log|re_0|, im_0, log|re_1|, im_1, ...]`.
+///
+/// # Example
+///
+/// ```
+/// use irithyll_core::ssm::init::s4d_inv_complex;
+///
+/// let log_a = s4d_inv_complex(4);
+/// assert_eq!(log_a.len(), 8); // 2 * 4
+/// // Real parts are log-magnitudes (A_n always negative after -exp())
+/// // Imaginary parts are direct values
+/// ```
+pub fn s4d_inv_complex(n_state: usize) -> Vec<f64> {
+    use core::f64::consts::PI;
+    let n = n_state as f64;
+    let mut log_a = Vec::with_capacity(2 * n_state);
+    for i in 0..n_state {
+        // Real: A_re = -(0.5 + N/(i+1)), store as ln(0.5 + N/(i+1))
+        let a_mag = 0.5 + n / ((i + 1) as f64);
+        log_a.push(math::ln(a_mag));
+        // Imaginary: direct value, oscillatory component
+        let im = PI * ((i + 1) as f64) / n;
+        log_a.push(im);
+    }
+    log_a
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +275,29 @@ mod tests {
             "s4d_inv log_A[0] should be ln(0.5), got {}",
             log_a[0]
         );
+    }
+
+    #[test]
+    fn s4d_inv_complex_length_and_sign() {
+        let log_a = s4d_inv_complex(8);
+        assert_eq!(
+            log_a.len(),
+            16,
+            "s4d_inv_complex should return 2*n_state elements"
+        );
+        // All real parts (even indices) should produce negative A after -exp()
+        for i in 0..8 {
+            let a_re = -math::exp(log_a[2 * i]);
+            assert!(a_re < 0.0, "A_re[{}] should be negative, got {}", i, a_re);
+        }
+        // Imaginary parts (odd indices) should be positive (PI * (n+1) / N > 0)
+        for i in 0..8 {
+            assert!(
+                log_a[2 * i + 1] > 0.0,
+                "A_im[{}] should be positive, got {}",
+                i,
+                log_a[2 * i + 1]
+            );
+        }
     }
 }

@@ -19,6 +19,15 @@ use std::fmt;
 
 use crate::error::ConfigError;
 
+/// Mamba architecture version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MambaVersion {
+    /// Mamba-1: per-channel scalar processing, real states, ZOH discretization.
+    V1,
+    /// Mamba-3: MIMO groups, complex states, trapezoidal discretization.
+    V3,
+}
+
 /// Configuration for a [`StreamingMamba`](super::StreamingMamba) model.
 ///
 /// Create via the builder pattern:
@@ -47,6 +56,14 @@ pub struct MambaConfig {
     pub seed: u64,
     /// Number of warmup samples before predictions are trusted (default: 10, >= 0).
     pub warmup: usize,
+    /// Mamba architecture version (default: V1).
+    pub version: MambaVersion,
+    /// Number of MIMO groups (default: 1, only used for V3).
+    ///
+    /// When `version` is V3 and `n_groups` was set to 0 at build time,
+    /// it is auto-derived as `d_in / 4` clamped to `[1, d_in]`.
+    /// When `version` is V1, this field is ignored.
+    pub n_groups: usize,
 }
 
 impl MambaConfig {
@@ -60,11 +77,20 @@ impl MambaConfig {
 
 impl fmt::Display for MambaConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "MambaConfig(d_in={}, n_state={}, ff={}, delta={}, seed={}, warmup={})",
-            self.d_in, self.n_state, self.forgetting_factor, self.delta_rls, self.seed, self.warmup
-        )
+        match self.version {
+            MambaVersion::V1 => write!(
+                f,
+                "MambaConfig(v1, d_in={}, n_state={}, ff={}, delta={}, seed={}, warmup={})",
+                self.d_in, self.n_state, self.forgetting_factor, self.delta_rls, self.seed,
+                self.warmup
+            ),
+            MambaVersion::V3 => write!(
+                f,
+                "MambaConfig(v3, d_in={}, n_state={}, n_groups={}, ff={}, delta={}, seed={}, warmup={})",
+                self.d_in, self.n_state, self.n_groups, self.forgetting_factor, self.delta_rls,
+                self.seed, self.warmup
+            ),
+        }
     }
 }
 
@@ -97,6 +123,8 @@ pub struct MambaConfigBuilder {
     delta_rls: f64,
     seed: u64,
     warmup: usize,
+    version: MambaVersion,
+    n_groups: usize,
 }
 
 impl Default for MambaConfigBuilder {
@@ -108,6 +136,8 @@ impl Default for MambaConfigBuilder {
             delta_rls: 100.0,
             seed: 42,
             warmup: 10,
+            version: MambaVersion::V1,
+            n_groups: 1,
         }
     }
 }
@@ -154,6 +184,20 @@ impl MambaConfigBuilder {
         self
     }
 
+    /// Set the Mamba architecture version (default: V1).
+    pub fn version(mut self, version: MambaVersion) -> Self {
+        self.version = version;
+        self
+    }
+
+    /// Set the number of MIMO groups (default: 1, only used for V3).
+    ///
+    /// Pass 0 for auto-derivation: `d_in / 4` clamped to `[1, d_in]`.
+    pub fn n_groups(mut self, n_groups: usize) -> Self {
+        self.n_groups = n_groups;
+        self
+    }
+
     /// Build the config, validating all parameters.
     ///
     /// # Errors
@@ -192,6 +236,36 @@ impl MambaConfigBuilder {
             ));
         }
 
+        // Version-specific validation for n_groups.
+        let n_groups = match self.version {
+            MambaVersion::V1 => {
+                // V1 ignores n_groups; store 1 for consistency.
+                1
+            }
+            MambaVersion::V3 => {
+                let g = if self.n_groups == 0 {
+                    // Auto-derive: d_in / 4, clamped to [1, d_in].
+                    (d_in / 4).clamp(1, d_in)
+                } else {
+                    self.n_groups
+                };
+                if g < 1 {
+                    return Err(ConfigError::out_of_range(
+                        "n_groups",
+                        "must be >= 1 for V3",
+                        g,
+                    ));
+                }
+                if d_in % g != 0 {
+                    return Err(ConfigError::invalid(
+                        "n_groups",
+                        format!("n_groups ({}) must divide d_in ({}) evenly for V3", g, d_in),
+                    ));
+                }
+                g
+            }
+        };
+
         Ok(MambaConfig {
             d_in,
             n_state: self.n_state,
@@ -199,6 +273,8 @@ impl MambaConfigBuilder {
             delta_rls: self.delta_rls,
             seed: self.seed,
             warmup: self.warmup,
+            version: self.version,
+            n_groups,
         })
     }
 }
@@ -216,6 +292,12 @@ mod tests {
         assert!((config.delta_rls - 100.0).abs() < 1e-12);
         assert_eq!(config.seed, 42);
         assert_eq!(config.warmup, 10);
+        assert_eq!(
+            config.version,
+            MambaVersion::V1,
+            "default version should be V1"
+        );
+        assert_eq!(config.n_groups, 1, "V1 n_groups should always be 1");
     }
 
     #[test]
@@ -308,5 +390,96 @@ mod tests {
         let cloned = config.clone();
         assert_eq!(cloned.d_in, config.d_in);
         assert_eq!(cloned.seed, config.seed);
+    }
+
+    #[test]
+    fn mamba_version_default_is_v1() {
+        let config = MambaConfig::builder().d_in(8).build().unwrap();
+        assert_eq!(
+            config.version,
+            MambaVersion::V1,
+            "default version should be V1"
+        );
+        assert_eq!(config.n_groups, 1, "V1 should have n_groups=1");
+    }
+
+    #[test]
+    fn v3_explicit_n_groups() {
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::V3)
+            .n_groups(2)
+            .build()
+            .unwrap();
+        assert_eq!(config.version, MambaVersion::V3);
+        assert_eq!(config.n_groups, 2, "should use explicit n_groups=2");
+    }
+
+    #[test]
+    fn v3_auto_derive_n_groups() {
+        // d_in=16, auto-derive: 16/4 = 4.
+        let config = MambaConfig::builder()
+            .d_in(16)
+            .version(MambaVersion::V3)
+            .n_groups(0)
+            .build()
+            .unwrap();
+        assert_eq!(
+            config.n_groups, 4,
+            "auto-derived n_groups should be d_in/4 = 4"
+        );
+    }
+
+    #[test]
+    fn v3_auto_derive_n_groups_small_d_in() {
+        // d_in=2, auto-derive: 2/4 = 0 -> clamped to 1.
+        let config = MambaConfig::builder()
+            .d_in(2)
+            .version(MambaVersion::V3)
+            .n_groups(0)
+            .build()
+            .unwrap();
+        assert_eq!(
+            config.n_groups, 1,
+            "auto-derived n_groups should clamp to 1 for small d_in"
+        );
+    }
+
+    #[test]
+    fn v3_n_groups_must_divide_d_in() {
+        let result = MambaConfig::builder()
+            .d_in(7)
+            .version(MambaVersion::V3)
+            .n_groups(3)
+            .build();
+        assert!(result.is_err(), "n_groups=3 should not divide d_in=7");
+    }
+
+    #[test]
+    fn v1_ignores_n_groups() {
+        // Even if n_groups is set, V1 should ignore it and store 1.
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::V1)
+            .n_groups(4)
+            .build()
+            .unwrap();
+        assert_eq!(config.n_groups, 1, "V1 should ignore n_groups and store 1");
+    }
+
+    #[test]
+    fn display_format_v3() {
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::V3)
+            .n_groups(2)
+            .build()
+            .unwrap();
+        let s = format!("{}", config);
+        assert!(s.contains("v3"), "V3 display should contain 'v3'");
+        assert!(
+            s.contains("n_groups=2"),
+            "V3 display should contain n_groups"
+        );
     }
 }

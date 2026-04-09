@@ -85,6 +85,54 @@ pub fn bilinear_discretize(a: f64, delta: f64) -> (f64, f64) {
     (a_bar, b_bar_factor)
 }
 
+/// Trapezoidal discretization for a complex diagonal A element.
+///
+/// Extends the bilinear (Tustin) method to complex-valued state dynamics,
+/// as used in Mamba-3 (Gu & Dao, ICLR 2026). For complex A = a_re + j*a_im:
+///
+/// ```text
+/// A_bar = (1 + delta*A/2) / (1 - delta*A/2)
+/// B_bar_factor = delta / (1 - delta*A/2)
+/// ```
+///
+/// Both are computed via complex arithmetic. The trapezoidal transform maps
+/// the left-half complex plane to the unit disk, preserving stability: if
+/// `a_re < 0`, then `|A_bar| < 1`.
+///
+/// # Arguments
+///
+/// * `a_re` -- real part of continuous-time A (should be negative for stability)
+/// * `a_im` -- imaginary part of continuous-time A
+/// * `delta` -- discretization step size (positive)
+///
+/// # Returns
+///
+/// `(a_bar_re, a_bar_im, b_factor_re, b_factor_im)` -- complex discretized
+/// state transition and input scaling factor
+#[inline]
+pub fn trapezoidal_complex(a_re: f64, a_im: f64, delta: f64) -> (f64, f64, f64, f64) {
+    // Numerator: 1 + delta*A/2 = (1 + delta*a_re/2) + j*(delta*a_im/2)
+    let num_re = 1.0 + 0.5 * delta * a_re;
+    let num_im = 0.5 * delta * a_im;
+
+    // Denominator: 1 - delta*A/2 = (1 - delta*a_re/2) + j*(-delta*a_im/2)
+    let den_re = 1.0 - 0.5 * delta * a_re;
+    let den_im = -0.5 * delta * a_im;
+
+    // |denominator|^2
+    let denom_sq = den_re * den_re + den_im * den_im;
+
+    // A_bar = num / den = (num * conj(den)) / |den|^2
+    let a_bar_re = (num_re * den_re + num_im * den_im) / denom_sq;
+    let a_bar_im = (num_im * den_re - num_re * den_im) / denom_sq;
+
+    // B_bar_factor = delta / den = delta * conj(den) / |den|^2
+    let b_factor_re = delta * den_re / denom_sq;
+    let b_factor_im = delta * (-den_im) / denom_sq;
+
+    (a_bar_re, a_bar_im, b_factor_re, b_factor_im)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,6 +255,52 @@ mod tests {
         assert!(
             math::abs(b_bar_factor) < 1e-12,
             "b_bar_factor should be ~0 when delta=0"
+        );
+    }
+
+    #[test]
+    fn trapezoidal_complex_real_matches_bilinear() {
+        // When imaginary part is zero, trapezoidal_complex should match bilinear_discretize
+        let a = -2.0;
+        let delta = 0.1;
+        let (bil_a, bil_b) = bilinear_discretize(a, delta);
+        let (trap_a_re, trap_a_im, trap_b_re, trap_b_im) = trapezoidal_complex(a, 0.0, delta);
+        assert!(
+            math::abs(trap_a_re - bil_a) < 1e-12,
+            "trap a_bar_re should match bilinear a_bar: trap={}, bil={}",
+            trap_a_re,
+            bil_a
+        );
+        assert!(
+            math::abs(trap_a_im) < 1e-12,
+            "trap a_bar_im should be 0 for real A, got {}",
+            trap_a_im
+        );
+        assert!(
+            math::abs(trap_b_re - bil_b) < 1e-12,
+            "trap b_factor_re should match bilinear b_factor: trap={}, bil={}",
+            trap_b_re,
+            bil_b
+        );
+        assert!(
+            math::abs(trap_b_im) < 1e-12,
+            "trap b_factor_im should be 0 for real A, got {}",
+            trap_b_im
+        );
+    }
+
+    #[test]
+    fn trapezoidal_complex_stable_eigenvalue() {
+        // Complex A with negative real part should produce |A_bar| < 1
+        let a_re = -1.0;
+        let a_im = 2.0;
+        let delta = 0.1;
+        let (a_bar_re, a_bar_im, _, _) = trapezoidal_complex(a_re, a_im, delta);
+        let mag_sq = a_bar_re * a_bar_re + a_bar_im * a_bar_im;
+        assert!(
+            mag_sq < 1.0,
+            "|A_bar|^2 should be < 1 for stable A, got {}",
+            mag_sq
         );
     }
 }

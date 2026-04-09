@@ -121,7 +121,7 @@ pub struct TrainArgs {
     pub n_bags: usize,
 
     /// Comma-separated list of factories to race (default: sgbt,esn,mamba).
-    /// Available: sgbt, esn, mamba, ttt, kan, spikenet, attention, distributional
+    /// Available: sgbt, esn, mamba, mamba3, ttt, kan, spikenet, attention, distributional
     #[arg(long, default_value = "sgbt,esn,mamba")]
     pub factories: String,
 
@@ -351,7 +351,7 @@ fn run_with_tui(
 // Distributional SGBT
 // ---------------------------------------------------------------------------
 
-fn run_distributional(_args: TrainArgs, cli_config: CliConfig, dataset: Dataset) -> Result<()> {
+fn run_distributional(args: TrainArgs, cli_config: CliConfig, dataset: Dataset) -> Result<()> {
     use irithyll::ensemble::distributional::DistributionalSGBT;
 
     let sgbt_config = cli_config
@@ -400,9 +400,12 @@ fn run_distributional(_args: TrainArgs, cli_config: CliConfig, dataset: Dataset)
         println!("  Last pred: mu={:.4}, sigma={:.4}", pred.mu, pred.sigma);
     }
 
-    // NOTE: JSON serialization not supported for DistributionalSGBT.
-    // Model is trained but not saved to disk.
-    println!("  [NOTE] Distributional model save not yet supported -- train-only mode");
+    // Save distributional model
+    let state = model.to_distributional_state();
+    let json = irithyll::serde_support::save_distributional_model(&state)
+        .map_err(|e| eyre!("failed to serialize distributional model: {}", e))?;
+    std::fs::write(&args.output, &json)?;
+    println!("  Saved to: {}", args.output);
 
     Ok(())
 }
@@ -477,8 +480,12 @@ fn run_multiclass(args: TrainArgs, cli_config: CliConfig, dataset: Dataset) -> R
         dataset.n_samples as f64 / elapsed.as_secs_f64()
     );
 
-    // NOTE: JSON serialization not supported for MulticlassSGBT.
-    println!("  [NOTE] Multiclass model save not yet supported -- train-only mode");
+    // Save multiclass model
+    let state = model.to_multiclass_state();
+    let json = irithyll::serde_support::save_multiclass_model(&state)
+        .map_err(|e| eyre!("failed to serialize multiclass model: {}", e))?;
+    std::fs::write(&args.output, &json)?;
+    println!("  Saved to: {}", args.output);
 
     Ok(())
 }
@@ -551,8 +558,14 @@ fn run_bagged(
         dataset.n_samples as f64 / elapsed.as_secs_f64()
     );
 
-    // NOTE: JSON serialization not supported for BaggedSGBT.
-    println!("  [NOTE] Bagged model save not yet supported -- train-only mode");
+    // Save bagged model
+    let state = model
+        .to_bagged_state()
+        .map_err(|e| eyre!("failed to snapshot bagged model: {}", e))?;
+    let json = irithyll::serde_support::save_bagged_model(&state)
+        .map_err(|e| eyre!("failed to serialize bagged model: {}", e))?;
+    std::fs::write(&args.output, &json)?;
+    println!("  Saved to: {}", args.output);
 
     Ok(())
 }
@@ -825,13 +838,14 @@ fn run_factory(args: &TrainArgs, dataset: Dataset) -> Result<()> {
             "sgbt" => Factory::sgbt(n_features),
             "esn" => Factory::esn(),
             "mamba" => Factory::mamba(n_features),
+            "mamba3" => Factory::mamba3(n_features),
             "ttt" => Factory::ttt(n_features),
             "kan" => Factory::kan(n_features),
             "spikenet" => Factory::spike_net(),
             "attention" => Factory::attention(n_features),
             "distributional" => Factory::distributional(n_features),
             _ => return Err(eyre!(
-                "unknown factory '{}'. available: sgbt, esn, mamba, ttt, kan, spikenet, attention, distributional",
+                "unknown factory '{}'. available: sgbt, esn, mamba, mamba3, ttt, kan, spikenet, attention, distributional",
                 name
             )),
         };
@@ -915,7 +929,7 @@ fn run_neural_headless(
         "  Speed:    {:.0} samples/sec",
         dataset.n_samples as f64 / elapsed.as_secs_f64()
     );
-    println!("  [NOTE] Neural model save not yet supported -- train-only mode");
+    println!("  [NOTE] Neural model serialization not yet implemented -- train-only mode");
 
     Ok(())
 }

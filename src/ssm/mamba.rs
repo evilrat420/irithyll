@@ -13,7 +13,12 @@
 //! gated + state-energy features to the target variable. All components update
 //! incrementally, making the model fully streaming with O(1) memory per timestep.
 //!
-//! # Readout Features (2 * d_in)
+//! # Readout Features
+//!
+//! For **V1**, the readout sees `2 * d_in` features.
+//! For **V3**, the readout sees `d_in + n_groups` features.
+//!
+//! ## V1 Readout (2 * d_in)
 //!
 //! The readout sees `2 * d_in` features:
 //!
@@ -52,11 +57,49 @@
 //! maintaining the contract that `predict()` is read-only. If no training has
 //! occurred, returns 0.0.
 
-use irithyll_core::ssm::{SSMLayer, SelectiveSSM};
+use irithyll_core::ssm::{SSMLayer, SelectiveSSM, SelectiveSSMv3};
 
 use crate::learner::StreamingLearner;
 use crate::learners::RecursiveLeastSquares;
-use crate::ssm::mamba_config::MambaConfig;
+use crate::ssm::mamba_config::{MambaConfig, MambaVersion};
+
+// ---------------------------------------------------------------------------
+// SSM variant dispatch
+// ---------------------------------------------------------------------------
+
+/// Internal SSM variant for V1/V3 dispatch.
+enum SSMVariant {
+    /// Mamba-1: per-channel scalar processing, real states, ZOH discretization.
+    V1(SelectiveSSM),
+    /// Mamba-3: MIMO groups, complex states, trapezoidal discretization.
+    V3(SelectiveSSMv3),
+}
+
+impl SSMVariant {
+    /// Forward one timestep through the SSM.
+    fn forward(&mut self, input: &[f64]) -> Vec<f64> {
+        match self {
+            SSMVariant::V1(ssm) => ssm.forward(input),
+            SSMVariant::V3(ssm) => ssm.forward(input),
+        }
+    }
+
+    /// Get a reference to the current hidden state.
+    fn state(&self) -> &[f64] {
+        match self {
+            SSMVariant::V1(ssm) => ssm.state(),
+            SSMVariant::V3(ssm) => ssm.state(),
+        }
+    }
+
+    /// Reset hidden state to zeros.
+    fn reset(&mut self) {
+        match self {
+            SSMVariant::V1(ssm) => ssm.reset(),
+            SSMVariant::V3(ssm) => ssm.reset(),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // RNG helpers (xorshift64, same pattern as ttt::layer)
@@ -156,8 +199,8 @@ fn silu(x: f64) -> f64 {
 pub struct StreamingMamba {
     /// Model configuration.
     config: MambaConfig,
-    /// Selective SSM for temporal feature extraction.
-    ssm: SelectiveSSM,
+    /// Selective SSM for temporal feature extraction (V1 or V3).
+    ssm: SSMVariant,
     /// RLS readout layer for prediction.
     readout: RecursiveLeastSquares,
     /// SiLU gate projection weights: d_in × d_in matrix (row-major).
@@ -195,12 +238,22 @@ impl StreamingMamba {
     /// a SiLU gate with Xavier-initialized weights, and an RLS readout
     /// with the specified forgetting factor and P matrix scale.
     ///
-    /// The readout feature vector has `2 * d_in` dimensions: the gated
-    /// SSM output (`d_in`) plus per-channel state energy (`d_in`).
+    /// For V1, the readout feature vector has `2 * d_in` dimensions.
+    /// For V3, the readout feature vector has `d_in + n_groups` dimensions.
     pub fn new(config: MambaConfig) -> Self {
-        let ssm = SelectiveSSM::new(config.d_in, config.n_state, config.seed);
+        let ssm = match config.version {
+            MambaVersion::V1 => {
+                SSMVariant::V1(SelectiveSSM::new(config.d_in, config.n_state, config.seed))
+            }
+            MambaVersion::V3 => SSMVariant::V3(SelectiveSSMv3::new(
+                config.d_in,
+                config.n_state,
+                config.n_groups,
+                config.seed,
+            )),
+        };
         let readout = RecursiveLeastSquares::with_delta(config.forgetting_factor, config.delta_rls);
-        let readout_dim = Self::readout_dim(config.d_in, config.n_state);
+        let readout_dim = Self::readout_dim_for_config(&config);
         let last_features = vec![0.0; readout_dim];
 
         // Initialize gate weights with Xavier normal: N(0, sqrt(2 / (fan_in + fan_out))).
@@ -243,18 +296,31 @@ impl StreamingMamba {
         (gate_weights, gate_bias)
     }
 
-    /// Compute readout dimension: gated SSM output + per-channel state energy.
+    /// Compute readout dimension based on the config's version.
     ///
-    /// Returns `2 * d_in`: `d_in` from the gated SSM output (C-projected +
-    /// gate + residual) and `d_in` from the per-channel L2 norm of hidden
-    /// state. The state energy captures nonlinear temporal activation that
-    /// the linear C projection may miss, and is constant-dimensional
-    /// regardless of `n_state`.
-    fn readout_dim(d_in: usize, _n_state: usize) -> usize {
-        d_in * 2
+    /// - V1: `2 * d_in` (gated output + per-channel state energy)
+    /// - V3: `d_in + n_groups` (SSM output + per-group state energy)
+    fn readout_dim_for_config(config: &MambaConfig) -> usize {
+        match config.version {
+            MambaVersion::V1 => config.d_in * 2,
+            MambaVersion::V3 => config.d_in + config.n_groups,
+        }
     }
 
-    /// Build readout features: gated SSM output (`d_in`) + state energy (`d_in`).
+    /// Build readout features based on the Mamba version.
+    ///
+    /// - **V1**: gated SSM output (`d_in`) + per-channel state energy (`d_in`).
+    ///   Total: `2 * d_in`.
+    /// - **V3**: gated SSM output (`d_in`) + per-group state energy (`n_groups`).
+    ///   Total: `d_in + n_groups`.
+    fn build_readout_features(&self, gated_output: &[f64], state: &[f64]) -> Vec<f64> {
+        match self.config.version {
+            MambaVersion::V1 => self.build_readout_features_v1(gated_output, state),
+            MambaVersion::V3 => self.build_readout_features_v3(gated_output, state),
+        }
+    }
+
+    /// V1 readout features: gated SSM output (`d_in`) + per-channel state energy (`d_in`).
     ///
     /// The gated output (SSM output ⊗ SiLU gate + residual) provides the
     /// primary signal after content-dependent filtering. The per-channel
@@ -265,7 +331,7 @@ impl StreamingMamba {
     /// Unlike mean-pooling (which dilutes signal at higher `n_state`), the
     /// L2 norm naturally accumulates more energy with larger state, so
     /// `n_state=64` provides a stronger signal than `n_state=16`.
-    fn build_readout_features(&self, gated_output: &[f64], state: &[f64]) -> Vec<f64> {
+    fn build_readout_features_v1(&self, gated_output: &[f64], state: &[f64]) -> Vec<f64> {
         let d_in = self.config.d_in;
         let n_state = self.config.n_state;
         let mut rf = Vec::with_capacity(d_in * 2);
@@ -274,15 +340,52 @@ impl StreamingMamba {
         rf.extend_from_slice(gated_output);
 
         // Secondary: per-channel state energy (L2 norm of each channel's state vector).
-        // This captures temporal activation magnitude without the noise of individual
-        // state elements. Unlike mean-pooling, energy is invariant to n_state in
-        // dimension — larger state doesn't dilute the signal, it accumulates more energy.
         for d in 0..d_in {
             let offset = d * n_state;
             let energy: f64 = state[offset..offset + n_state]
                 .iter()
                 .map(|&s| s * s)
                 .sum::<f64>();
+            rf.push(energy.sqrt());
+        }
+
+        rf
+    }
+
+    /// V3 readout features: gated SSM output (`d_in`) + per-group state energy (`n_groups`).
+    ///
+    /// For Mamba-3, the state is organized into `n_groups` MIMO groups with complex
+    /// values. Each group's state energy is the L2 norm over all state elements
+    /// (real and imaginary parts) belonging to that group, providing a compact
+    /// per-group activation summary.
+    fn build_readout_features_v3(&self, gated_output: &[f64], state: &[f64]) -> Vec<f64> {
+        let d_in = self.config.d_in;
+        let n_groups = self.config.n_groups;
+        let n_state = self.config.n_state;
+        let mut rf = Vec::with_capacity(d_in + n_groups);
+
+        // Primary: gated SSM output
+        rf.extend_from_slice(gated_output);
+
+        // Secondary: per-group state energy.
+        // V3 state layout: n_groups groups, each group has (d_in / n_groups) channels,
+        // each channel has n_state complex elements (2 * n_state f64 values).
+        // Total state length: d_in * n_state * 2 (complex) or d_in * n_state (real).
+        // We compute the L2 norm of each group's slice of the state vector.
+        let channels_per_group = d_in / n_groups;
+        let state_per_channel = if state.len() > d_in * n_state {
+            // Complex state: 2 * n_state per channel (re, im interleaved).
+            n_state * 2
+        } else {
+            // Real state: n_state per channel.
+            n_state
+        };
+
+        for g in 0..n_groups {
+            let group_start = g * channels_per_group * state_per_channel;
+            let group_end = group_start + channels_per_group * state_per_channel;
+            let group_slice = &state[group_start..group_end.min(state.len())];
+            let energy: f64 = group_slice.iter().map(|&s| s * s).sum::<f64>();
             rf.push(energy.sqrt());
         }
 
@@ -1044,5 +1147,75 @@ mod tests {
                 model.last_features().len(),
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Mamba V3 tests
+    // -------------------------------------------------------------------
+
+    use crate::ssm::mamba_config::MambaVersion;
+
+    #[test]
+    fn mamba_v3_train_and_predict_finite() {
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .n_state(16)
+            .version(MambaVersion::V3)
+            .n_groups(2)
+            .build()
+            .unwrap();
+        let mut model = StreamingMamba::new(config);
+
+        for i in 0..100 {
+            let x: Vec<f64> = (0..8)
+                .map(|k| (i as f64 * 0.1 + k as f64 * 0.3).sin())
+                .collect();
+            let y = 0.5 * x[0] + 0.3 * x[1];
+            model.train(&x, y);
+        }
+
+        let x: Vec<f64> = (0..8).map(|k| (10.0 + k as f64 * 0.3).sin()).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "V3 prediction should be finite after 100 samples, got {}",
+            pred
+        );
+    }
+
+    #[test]
+    fn mamba_v3_readout_dim() {
+        // V3 readout dim = d_in + n_groups.
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .n_state(16)
+            .version(MambaVersion::V3)
+            .n_groups(2)
+            .build()
+            .unwrap();
+        let model = StreamingMamba::new(config);
+        assert_eq!(
+            model.last_features().len(),
+            8 + 2,
+            "V3 readout dim should be d_in + n_groups = 10, got {}",
+            model.last_features().len()
+        );
+    }
+
+    #[test]
+    fn mamba_version_default_is_v1() {
+        let config = MambaConfig::builder().d_in(4).build().unwrap();
+        assert_eq!(
+            config.version,
+            MambaVersion::V1,
+            "default version should be V1 for backwards compatibility"
+        );
+        let model = StreamingMamba::new(config);
+        assert_eq!(
+            model.last_features().len(),
+            8,
+            "V1 readout should be 2*d_in=8, got {}",
+            model.last_features().len()
+        );
     }
 }

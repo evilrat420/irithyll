@@ -1236,12 +1236,14 @@ impl HoeffdingTree {
         }
 
         // Hoeffding bound: epsilon = sqrt(R^2 * ln(1/delta) / (2 * n))
-        // R = 1.0 (conservative bound on the range of the gain function).
+        // R bounds the range of the gain function. Default R=1.0 is conservative;
+        // set config.hoeffding_r = sqrt(target_variance) for data-proportional bounds.
         //
         // With EWMA decay, the effective sample size is bounded by 1/(1-alpha).
         // We cap n at this value to prevent spurious splits from artificially
         // tight bounds when decay is active.
-        let r_squared = 1.0;
+        let r = self.config.hoeffding_r.unwrap_or(1.0);
+        let r_squared = r * r;
         let n = sample_count as f64;
         let effective_n = match self.config.leaf_decay_alpha {
             Some(alpha) => n.min(1.0 / (1.0 - alpha)),

@@ -149,6 +149,16 @@ pub struct TreeConfig {
     ///   to a more complex model when the Hoeffding bound (using [`delta`](Self::delta))
     ///   confirms it is statistically superior. No arbitrary thresholds.
     pub leaf_model_type: LeafModelType,
+
+    /// Hoeffding bound range parameter (R).
+    ///
+    /// The Hoeffding bound is `epsilon = sqrt(R^2 * ln(1/delta) / (2n))`.
+    /// R is an upper bound on the range of the gain function. The default
+    /// R=1.0 is conservative but over-estimates when targets have low
+    /// variance. Set to `sqrt(target_variance)` for data-proportional bounds.
+    ///
+    /// `None` (default) uses R=1.0.
+    pub hoeffding_r: Option<f64>,
 }
 
 impl Default for TreeConfig {
@@ -172,6 +182,7 @@ impl Default for TreeConfig {
             adaptive_depth: None,
             min_hessian_sum: None,
             leaf_model_type: LeafModelType::default(),
+            hoeffding_r: None,
         }
     }
 }
@@ -375,6 +386,23 @@ impl TreeConfig {
     #[inline]
     pub fn leaf_model_type(mut self, lmt: LeafModelType) -> Self {
         self.leaf_model_type = lmt;
+        self
+    }
+
+    /// Set the Hoeffding bound range parameter (R).
+    ///
+    /// Controls `epsilon = sqrt(R^2 * ln(1/delta) / (2n))`. Set to
+    /// `sqrt(target_variance)` for data-proportional split thresholds.
+    #[inline]
+    pub fn hoeffding_r(mut self, r: f64) -> Self {
+        self.hoeffding_r = Some(r);
+        self
+    }
+
+    /// Optionally set the Hoeffding bound range parameter.
+    #[inline]
+    pub fn hoeffding_r_opt(mut self, r: Option<f64>) -> Self {
+        self.hoeffding_r = r;
         self
     }
 }

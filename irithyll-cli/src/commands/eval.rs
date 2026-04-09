@@ -51,7 +51,7 @@ pub struct EvalArgs {
     pub window: usize,
 
     /// Comma-separated list of factories to race (default: sgbt,esn,mamba).
-    /// Available: sgbt, esn, mamba, ttt, kan, spikenet, attention, distributional
+    /// Available: sgbt, esn, mamba, mamba3, ttt, kan, spikenet, attention, distributional
     #[arg(long, default_value = "sgbt,esn,mamba")]
     pub factories: String,
 
@@ -460,13 +460,14 @@ fn run_neural_eval_factory(args: &EvalArgs, dataset: &Dataset) -> Result<()> {
             "sgbt" => Factory::sgbt(n_features),
             "esn" => Factory::esn(),
             "mamba" => Factory::mamba(n_features),
+            "mamba3" => Factory::mamba3(n_features),
             "ttt" => Factory::ttt(n_features),
             "kan" => Factory::kan(n_features),
             "spikenet" => Factory::spike_net(),
             "attention" => Factory::attention(n_features),
             "distributional" => Factory::distributional(n_features),
             _ => return Err(eyre!(
-                "unknown factory '{}'. available: sgbt, esn, mamba, ttt, kan, spikenet, attention, distributional",
+                "unknown factory '{}'. available: sgbt, esn, mamba, mamba3, ttt, kan, spikenet, attention, distributional",
                 name
             )),
         };
@@ -569,7 +570,7 @@ fn run_neural_eval_headless(
         elapsed.as_secs_f64(),
         dataset.n_samples as f64 / elapsed.as_secs_f64()
     );
-    println!("  [NOTE] Neural model save not yet supported -- eval is inline prequential only");
+    println!("  [NOTE] Neural model serialization not yet implemented -- eval is inline prequential only");
 
     Ok(())
 }

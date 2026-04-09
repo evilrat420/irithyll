@@ -22,8 +22,9 @@
 //!
 //! - [`diagonal`] -- Non-selective diagonal SSM with fixed parameters
 //! - [`selective`] -- Mamba-style selective SSM with input-dependent projections
-//! - [`discretize`] -- ZOH and bilinear discretization methods
-//! - [`init`] -- A-matrix initialization strategies (Mamba, S4D)
+//! - [`selective_v3`] -- Mamba-3 MIMO SSM with complex states and trapezoidal discretization
+//! - [`discretize`] -- ZOH, bilinear, and trapezoidal complex discretization methods
+//! - [`init`] -- A-matrix initialization strategies (Mamba, S4D real/complex)
 //! - [`projection`] -- Linear algebra helpers and PRNG for weight initialization
 
 pub mod diagonal;
@@ -31,9 +32,11 @@ pub mod discretize;
 pub mod init;
 pub mod projection;
 pub mod selective;
+pub mod selective_v3;
 
 pub use diagonal::DiagonalSSM;
 pub use selective::SelectiveSSM;
+pub use selective_v3::SelectiveSSMv3;
 
 use alloc::vec::Vec;
 

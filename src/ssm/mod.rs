@@ -46,5 +46,5 @@ pub mod mamba_config;
 pub mod mamba_preprocessor;
 
 pub use mamba::StreamingMamba;
-pub use mamba_config::{MambaConfig, MambaConfigBuilder};
+pub use mamba_config::{MambaConfig, MambaConfigBuilder, MambaVersion};
 pub use mamba_preprocessor::MambaPreprocessor;
