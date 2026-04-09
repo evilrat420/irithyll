@@ -82,6 +82,9 @@ pub(crate) struct TTTLayer {
     alpha: f64,          // weight decay (forgetting factor, 0 = no decay)
     use_momentum: bool,  // whether momentum is enabled
     momentum_decay: f64, // momentum coefficient (typically 0.9)
+    nesterov: bool,      // Nesterov-accelerated momentum (Titans)
+    alpha_warmup: usize, // steps to linearly ramp alpha from 0 (0 = disabled)
+    step_count: u64,     // forward() call counter for alpha warmup schedule
 
     /// External prediction error signal for prediction-directed fast weight updates.
     ///
@@ -109,13 +112,18 @@ impl TTTLayer {
     /// * `alpha` — weight decay / forgetting factor (0.0 = no decay)
     /// * `use_momentum` — enable Titans-style momentum
     /// * `momentum_decay` — momentum coefficient (typically 0.9)
+    /// * `nesterov` — use Nesterov-accelerated momentum (only when momentum enabled)
+    /// * `alpha_warmup` — steps to linearly ramp alpha from 0 (0 = disabled)
     /// * `seed` — RNG seed (0 is mapped to 1 for xorshift64 safety)
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         d_state: usize,
         eta: f64,
         alpha: f64,
         use_momentum: bool,
         momentum_decay: f64,
+        nesterov: bool,
+        alpha_warmup: usize,
         seed: u64,
     ) -> Self {
         Self {
@@ -137,6 +145,9 @@ impl TTTLayer {
             alpha,
             use_momentum,
             momentum_decay,
+            nesterov,
+            alpha_warmup,
+            step_count: 0,
             prediction_feedback: 0.0,
             initialized: false,
             rng_state: if seed == 0 { 1 } else { seed },
@@ -161,6 +172,17 @@ impl TTTLayer {
 
         let d = self.d_state;
 
+        // Increment step counter (used for alpha warmup schedule).
+        self.step_count += 1;
+
+        // Compute effective alpha with optional warmup ramp.
+        // When alpha_warmup > 0, alpha linearly ramps from 0 over that many steps.
+        let effective_alpha = if self.alpha_warmup > 0 {
+            self.alpha * (self.step_count as f64 / self.alpha_warmup as f64).min(1.0)
+        } else {
+            self.alpha
+        };
+
         // Normalize input to prevent large projections (L2 norm, floor at 1.0)
         let input_norm: f64 = features.iter().map(|x| x * x).sum::<f64>().sqrt().max(1.0);
         let normalized: Vec<f64> = features.iter().map(|x| x / input_norm).collect();
@@ -181,7 +203,26 @@ impl TTTLayer {
         }
 
         // 2. Inner forward: z = W_fast * k
-        let z = fast_mat_vec(&self.w_fast, &k, d);
+        //    For Nesterov momentum, compute z at the look-ahead position instead:
+        //    W_lookahead = (1 - alpha) * W + beta * S, then z = W_lookahead * k.
+        let z = if self.nesterov && self.use_momentum {
+            // Nesterov look-ahead: compute z at W_fast + momentum-adjusted position.
+            // W_lookahead[i] = (1 - effective_alpha) * W_fast[i] + momentum_decay * S[i]
+            let mut z_nesterov = vec![0.0; d];
+            for i in 0..d {
+                let mut sum = 0.0;
+                for j in 0..d {
+                    let idx = i * d + j;
+                    let w_look = (1.0 - effective_alpha) * self.w_fast[idx]
+                        + self.momentum_decay * self.momentum_buf[idx];
+                    sum += w_look * k[j];
+                }
+                z_nesterov[i] = sum;
+            }
+            z_nesterov
+        } else {
+            fast_mat_vec(&self.w_fast, &k, d)
+        };
 
         // 3. Compute residual for fast weight update.
         //    Gradient: dW = residual * k^T (rank-1 outer product).
@@ -222,6 +263,9 @@ impl TTTLayer {
         } else if self.use_momentum {
             // Titans: S = momentum_decay * S - eta * (residual * k^T)
             //         W = (1 - alpha) * W + S
+            // For Nesterov: gradient was already computed at look-ahead position,
+            // so the standard momentum update formula applies — the Nesterov
+            // benefit comes from the look-ahead z computation above.
             for i in 0..d {
                 for j in 0..d {
                     let idx = i * d + j;
@@ -230,7 +274,7 @@ impl TTTLayer {
                     self.momentum_buf[idx] =
                         self.momentum_decay * self.momentum_buf[idx] - self.eta * clipped_grad;
                     self.w_fast[idx] =
-                        (1.0 - self.alpha) * self.w_fast[idx] + self.momentum_buf[idx];
+                        (1.0 - effective_alpha) * self.w_fast[idx] + self.momentum_buf[idx];
                 }
             }
         } else {
@@ -241,7 +285,7 @@ impl TTTLayer {
                     let grad = residual[i] * k[j];
                     let clipped_grad = grad.clamp(-1.0, 1.0);
                     self.w_fast[idx] =
-                        (1.0 - self.alpha) * self.w_fast[idx] - self.eta * clipped_grad;
+                        (1.0 - effective_alpha) * self.w_fast[idx] - self.eta * clipped_grad;
                 }
             }
         }
@@ -385,6 +429,7 @@ impl TTTLayer {
         self.accumulated_grad.fill(0.0);
         self.n_accumulated = 0;
         self.prediction_feedback = 0.0;
+        self.step_count = 0;
     }
 
     /// Full reset including projections (returns to uninitialized state).
@@ -400,6 +445,7 @@ impl TTTLayer {
         self.w_q.clear();
         self.d_model = 0;
         self.prediction_feedback = 0.0;
+        self.step_count = 0;
         self.initialized = false;
     }
 
@@ -417,6 +463,13 @@ impl TTTLayer {
         let d = self.d_state;
         let n = self.n_accumulated as f64;
 
+        // Compute effective alpha with optional warmup ramp (consistent with forward()).
+        let effective_alpha = if self.alpha_warmup > 0 {
+            self.alpha * (self.step_count as f64 / self.alpha_warmup as f64).min(1.0)
+        } else {
+            self.alpha
+        };
+
         // Apply averaged gradient
         if self.use_momentum {
             for i in 0..d {
@@ -426,7 +479,7 @@ impl TTTLayer {
                     self.momentum_buf[idx] =
                         self.momentum_decay * self.momentum_buf[idx] - self.eta * avg_grad;
                     self.w_fast[idx] =
-                        (1.0 - self.alpha) * self.w_fast[idx] + self.momentum_buf[idx];
+                        (1.0 - effective_alpha) * self.w_fast[idx] + self.momentum_buf[idx];
                 }
             }
         } else {
@@ -434,7 +487,8 @@ impl TTTLayer {
                 for j in 0..d {
                     let idx = i * d + j;
                     let avg_grad = self.accumulated_grad[idx] / n;
-                    self.w_fast[idx] = (1.0 - self.alpha) * self.w_fast[idx] - self.eta * avg_grad;
+                    self.w_fast[idx] =
+                        (1.0 - effective_alpha) * self.w_fast[idx] - self.eta * avg_grad;
                 }
             }
         }
@@ -687,7 +741,7 @@ mod tests {
 
     #[test]
     fn new_creates_uninit() {
-        let layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, 42);
+        let layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, false, 0, 42);
         assert!(!layer.initialized, "should be uninitialized after new()");
         assert_eq!(layer.d_state, 8, "d_state should be 8");
         assert!(
@@ -698,7 +752,7 @@ mod tests {
 
     #[test]
     fn forward_initializes_projections() {
-        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, 42);
+        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, false, 0, 42);
         assert!(!layer.initialized, "should start uninitialized");
         assert!(
             layer.w_k.is_empty(),
@@ -732,7 +786,7 @@ mod tests {
 
     #[test]
     fn forward_output_dimension() {
-        let mut layer = TTTLayer::new(16, 0.01, 0.0, false, 0.0, 42);
+        let mut layer = TTTLayer::new(16, 0.01, 0.0, false, 0.0, false, 0, 42);
         let input = vec![1.0, 2.0, 3.0];
         let output = layer.forward(&input);
         assert_eq!(
@@ -745,7 +799,7 @@ mod tests {
 
     #[test]
     fn forward_output_finite() {
-        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, 42);
+        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, false, 0, 42);
         let input = vec![0.5, -0.3, 1.2, 0.0, -1.0];
         let output = layer.forward(&input);
         for (i, &v) in output.iter().enumerate() {
@@ -755,7 +809,7 @@ mod tests {
 
     #[test]
     fn fast_weights_update() {
-        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, 42);
+        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, false, 0, 42);
         let input = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let _ = layer.forward(&input);
 
@@ -768,7 +822,7 @@ mod tests {
 
     #[test]
     fn reset_zeros_fast_weights() {
-        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, 42);
+        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, false, 0, 42);
         let input = vec![1.0, 2.0, 3.0];
         let _ = layer.forward(&input);
 
@@ -788,7 +842,7 @@ mod tests {
 
     #[test]
     fn reset_full_clears_projections() {
-        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, 42);
+        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, false, 0, 42);
         let input = vec![1.0, 2.0, 3.0];
         let _ = layer.forward(&input);
 
@@ -819,7 +873,7 @@ mod tests {
 
     #[test]
     fn reset_full_clears_everything() {
-        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, 42);
+        let mut layer = TTTLayer::new(8, 0.01, 0.0, false, 0.0, false, 0, 42);
         let input = vec![1.0, 2.0, 3.0];
         let _ = layer.forward(&input);
 
@@ -853,13 +907,13 @@ mod tests {
         let input = vec![1.0, -0.5, 0.3, 2.0];
 
         // Without momentum
-        let mut layer_no_mom = TTTLayer::new(8, 0.01, 0.0, false, 0.0, 42);
+        let mut layer_no_mom = TTTLayer::new(8, 0.01, 0.0, false, 0.0, false, 0, 42);
         let _ = layer_no_mom.forward(&input);
         let _ = layer_no_mom.forward(&input);
         let out_no_mom = layer_no_mom.forward(&input);
 
         // With momentum
-        let mut layer_mom = TTTLayer::new(8, 0.01, 0.0, true, 0.9, 42);
+        let mut layer_mom = TTTLayer::new(8, 0.01, 0.0, true, 0.9, false, 0, 42);
         let _ = layer_mom.forward(&input);
         let _ = layer_mom.forward(&input);
         let out_mom = layer_mom.forward(&input);
@@ -880,11 +934,11 @@ mod tests {
     fn deterministic_with_seed() {
         let input = vec![0.5, -1.0, 2.0, 0.3];
 
-        let mut layer_a = TTTLayer::new(8, 0.01, 0.0, false, 0.0, 12345);
+        let mut layer_a = TTTLayer::new(8, 0.01, 0.0, false, 0.0, false, 0, 12345);
         let out_a1 = layer_a.forward(&input);
         let out_a2 = layer_a.forward(&input);
 
-        let mut layer_b = TTTLayer::new(8, 0.01, 0.0, false, 0.0, 12345);
+        let mut layer_b = TTTLayer::new(8, 0.01, 0.0, false, 0.0, false, 0, 12345);
         let out_b1 = layer_b.forward(&input);
         let out_b2 = layer_b.forward(&input);
 
@@ -910,7 +964,7 @@ mod tests {
     fn convergence_on_pattern() {
         // Feed a repeating pattern and verify the reconstruction error decreases.
         // d_state != d_model so Xavier init is used (identity init makes v-k=0).
-        let mut layer = TTTLayer::new(4, 0.05, 0.0, false, 0.0, 42);
+        let mut layer = TTTLayer::new(4, 0.05, 0.0, false, 0.0, false, 0, 42);
         let pattern = vec![1.0, 0.0, 0.5, -0.5, 0.3];
 
         // Collect reconstruction errors over time.

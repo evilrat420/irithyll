@@ -50,6 +50,10 @@ pub struct SpikeNetConfig {
     pub seed: u64,
     /// Weight initialization range: weights sampled from `[-range, range]`.
     pub weight_init_range: f64,
+    /// Enable astrocyte-gated modulation of input weights.
+    pub astrocyte: bool,
+    /// Astrocyte EWMA time constant (higher = slower adaptation). Default: 1000.
+    pub astrocyte_tau: f64,
 }
 
 impl Default for SpikeNetConfig {
@@ -66,6 +70,8 @@ impl Default for SpikeNetConfig {
             spike_threshold: 0.05,
             seed: 42,
             weight_init_range: 0.10,
+            astrocyte: false,
+            astrocyte_tau: 1000.0,
         }
     }
 }
@@ -152,6 +158,13 @@ impl SpikeNetConfig {
                 "weight_init_range",
                 "must be <= 1.9 (Q1.14 limit)",
                 self.weight_init_range,
+            ));
+        }
+        if self.astrocyte_tau <= 0.0 {
+            return Err(ConfigError::out_of_range(
+                "astrocyte_tau",
+                "must be > 0.0",
+                self.astrocyte_tau,
             ));
         }
         Ok(())
@@ -257,6 +270,18 @@ impl SpikeNetConfigBuilder {
     /// Set the weight initialization range.
     pub fn weight_init_range(mut self, range: f64) -> Self {
         self.config.weight_init_range = range;
+        self
+    }
+
+    /// Enable or disable astrocyte-gated modulation of input weights.
+    pub fn astrocyte(mut self, enabled: bool) -> Self {
+        self.config.astrocyte = enabled;
+        self
+    }
+
+    /// Set the astrocyte EWMA time constant (higher = slower adaptation).
+    pub fn astrocyte_tau(mut self, tau: f64) -> Self {
+        self.config.astrocyte_tau = tau;
         self
     }
 

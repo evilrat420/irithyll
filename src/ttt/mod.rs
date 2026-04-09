@@ -80,6 +80,23 @@ pub struct TTTConfig {
     pub batch_size: usize,
     /// Warmup samples before RLS training starts (default: 10).
     pub warmup: usize,
+    /// Use Nesterov-accelerated momentum (default: false).
+    ///
+    /// Only activates when `momentum > 0.0`. When enabled, the momentum
+    /// update computes gradients at a look-ahead position for faster
+    /// convergence (Behrouz et al., 2025 — Titans).
+    pub nesterov: bool,
+    /// Steps to linearly ramp alpha (weight decay) from 0 (default: 0 = disabled).
+    ///
+    /// When > 0, `effective_alpha = alpha * min(1.0, step / alpha_warmup)`.
+    /// Prevents weight decay from fighting learning during early adaptation.
+    pub alpha_warmup: usize,
+    /// Enable surprise-gated learning rate modulation (default: false).
+    ///
+    /// When enabled, the inner learning rate eta is scaled by prediction
+    /// surprise: routine predictions get lower LR, surprising inputs get
+    /// full LR. Applied after uncertainty modulation.
+    pub surprise_gated: bool,
     /// RNG seed (default: 42).
     pub seed: u64,
 }
@@ -96,6 +113,9 @@ impl Default for TTTConfig {
             delta_rls: 100.0,
             batch_size: 1,
             warmup: 10,
+            nesterov: false,
+            alpha_warmup: 0,
+            surprise_gated: false,
             seed: 42,
         }
     }
@@ -105,9 +125,19 @@ impl std::fmt::Display for TTTConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "TTTConfig(d_model={}, n_heads={}, eta={}, alpha={}, momentum={}, ff={}, batch_size={}, warmup={}, seed={})",
-            self.d_model, self.n_heads, self.eta, self.alpha, self.momentum,
-            self.forgetting_factor, self.batch_size, self.warmup, self.seed
+            "TTTConfig(d_model={}, n_heads={}, eta={}, alpha={}, momentum={}, ff={}, batch_size={}, warmup={}, nesterov={}, alpha_warmup={}, surprise_gated={}, seed={})",
+            self.d_model,
+            self.n_heads,
+            self.eta,
+            self.alpha,
+            self.momentum,
+            self.forgetting_factor,
+            self.batch_size,
+            self.warmup,
+            self.nesterov,
+            self.alpha_warmup,
+            self.surprise_gated,
+            self.seed
         )
     }
 }
@@ -210,6 +240,32 @@ impl TTTConfigBuilder {
         self
     }
 
+    /// Enable Nesterov-accelerated momentum (default: false).
+    ///
+    /// Only activates when `momentum > 0.0`. When enabled, gradients are
+    /// computed at a look-ahead position for faster convergence.
+    pub fn nesterov(mut self, n: bool) -> Self {
+        self.config.nesterov = n;
+        self
+    }
+
+    /// Set the alpha (weight decay) warmup steps (default: 0 = disabled).
+    ///
+    /// When > 0, alpha linearly ramps from 0 over this many steps.
+    pub fn alpha_warmup(mut self, w: usize) -> Self {
+        self.config.alpha_warmup = w;
+        self
+    }
+
+    /// Enable surprise-gated learning rate modulation (default: false).
+    ///
+    /// Scales inner LR by prediction surprise: routine predictions get
+    /// lower LR, surprising inputs get full LR.
+    pub fn surprise_gated(mut self, sg: bool) -> Self {
+        self.config.surprise_gated = sg;
+        self
+    }
+
     /// Build the config, validating all parameters.
     ///
     /// # Errors
@@ -296,6 +352,8 @@ pub struct StreamingTTT {
     alignment_ewma: f64,
     /// EWMA of maximum Frobenius squared norm of TTT output for utilization ratio.
     max_frob_sq_ewma: f64,
+    /// EWMA of |prediction error| for surprise-gated LR (alpha=0.01).
+    running_abs_error: f64,
 
     // --- Mini-batch fast weight updates ---
     // Default is b=1 (single-sample streaming) for maximum adaptation speed.
@@ -332,6 +390,8 @@ impl StreamingTTT {
             config.alpha,
             config.momentum > 0.0,
             config.momentum,
+            config.nesterov,
+            config.alpha_warmup,
             config.seed,
         );
         // Enable mini-batch accumulation when batch_size > 1.
@@ -357,6 +417,7 @@ impl StreamingTTT {
             prev_prev_change: 0.0,
             alignment_ewma: 0.0,
             max_frob_sq_ewma: 0.0,
+            running_abs_error: 0.0,
             batch_size,
             batch_count: 0,
             base_proj_lr,
@@ -408,7 +469,7 @@ impl StreamingTTT {
     /// # Arguments
     ///
     /// * `data` — Slice of `(features, target)` pairs for pretraining.
-    /// * `epochs` — Number of passes over the data (typically 3–10).
+    /// * `epochs` — Number of passes over the data (typically 3-10).
     ///
     /// # How it works
     ///
@@ -524,6 +585,7 @@ impl StreamingTTT {
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
         self.max_frob_sq_ewma = 0.0;
+        self.running_abs_error = 0.0;
         self.batch_count = 0;
         self.proj_lr = self.base_proj_lr;
         self.proj_step = 0;
@@ -574,13 +636,12 @@ impl StreamingLearner for StreamingTTT {
         self.rolling_uncertainty = (1.0 - UNCERTAINTY_ALPHA) * self.rolling_uncertainty
             + UNCERTAINTY_ALPHA * current_uncertainty;
 
-        let effective_eta = if self.rolling_uncertainty > 1e-10 {
+        let mut effective_eta = if self.rolling_uncertainty > 1e-10 {
             let ratio = (current_uncertainty / self.rolling_uncertainty).clamp(0.5, 2.0);
             self.config.eta * ratio
         } else {
             self.config.eta
         };
-        self.layer.set_eta(effective_eta);
 
         // Also modulate RLS forgetting factor by the same uncertainty ratio.
         // High uncertainty → lower ff (forget faster to shed stale weights).
@@ -601,6 +662,18 @@ impl StreamingLearner for StreamingTTT {
             let current_pred = self.readout.predict(&self.last_features);
             let pred_error = target - current_pred;
             self.layer.prediction_feedback = pred_error;
+
+            // Surprise-gated LR: modulate eta by prediction surprise.
+            // Routine predictions (low surprise) → lower LR (conserve).
+            // Surprising inputs (high error vs baseline) → full LR (adapt).
+            if self.config.surprise_gated && self.running_abs_error > 1e-10 {
+                let surprise = (pred_error.abs() / self.running_abs_error.max(1e-10)).min(1.0);
+                effective_eta *= surprise;
+            }
+            // Update running |error| EWMA for surprise computation.
+            const SURPRISE_ALPHA: f64 = 0.01;
+            self.running_abs_error =
+                (1.0 - SURPRISE_ALPHA) * self.running_abs_error + SURPRISE_ALPHA * pred_error.abs();
 
             // Drift detection: compare short-term vs long-term error.
             // Short-term EWMA (alpha=0.1) reacts fast to phase changes.
@@ -647,6 +720,9 @@ impl StreamingLearner for StreamingTTT {
             self.prev_change = current_change;
             self.prev_prediction = current_pred;
         }
+
+        // Set effective eta (after surprise gating, if applicable).
+        self.layer.set_eta(effective_eta);
 
         // Forward through TTT layer (uses prediction_feedback if set above).
         // In batch_mode, the layer accumulates gradients instead of applying them.
@@ -765,6 +841,7 @@ impl StreamingLearner for StreamingTTT {
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
         self.max_frob_sq_ewma = 0.0;
+        self.running_abs_error = 0.0;
         self.batch_count = 0;
         // Reset projection learning schedule (projections themselves cleared by reset_full).
         self.proj_lr = self.base_proj_lr;
@@ -1301,7 +1378,7 @@ mod tests {
 
         // proj_lr should have decayed significantly.
         // tau = d_model(16) * d_input(3) = 48.
-        // After 500 steps: proj_lr = 0.001 / (1 + 500/48) ≈ 0.000088.
+        // After 500 steps: proj_lr = 0.001 / (1 + 500/48) ~ 0.000088.
         assert!(
             model.proj_lr < initial_proj_lr * 0.2,
             "proj_lr should decay: initial={}, current={}",
@@ -1599,6 +1676,106 @@ mod tests {
         assert!(
             pred.is_finite(),
             "xavier-init prediction should be finite, got {pred}"
+        );
+    }
+
+    #[test]
+    fn ttt_nesterov_config() {
+        let config = TTTConfig::builder()
+            .d_model(16)
+            .nesterov(true)
+            .momentum(0.9)
+            .build()
+            .unwrap();
+        assert!(config.nesterov);
+        assert!((config.momentum - 0.9).abs() < 1e-10);
+    }
+
+    #[test]
+    fn ttt_nesterov_trains() {
+        let config = TTTConfig::builder()
+            .d_model(16)
+            .nesterov(true)
+            .momentum(0.9)
+            .eta(0.05)
+            .build()
+            .unwrap();
+        let mut model = StreamingTTT::new(config);
+        for i in 0..100 {
+            model.train_one(&[0.1 * i as f64; 4], (i as f64 * 0.1).sin(), 1.0);
+        }
+        let pred = model.predict(&[0.5; 4]);
+        assert!(pred.is_finite(), "nesterov TTT prediction must be finite");
+    }
+
+    #[test]
+    fn ttt_alpha_warmup() {
+        let config = TTTConfig::builder()
+            .d_model(16)
+            .alpha(0.01)
+            .alpha_warmup(50)
+            .eta(0.05)
+            .build()
+            .unwrap();
+        let mut model = StreamingTTT::new(config);
+        for i in 0..100 {
+            model.train_one(&[0.1 * i as f64; 4], (i as f64 * 0.1).sin(), 1.0);
+        }
+        let pred = model.predict(&[0.5; 4]);
+        assert!(
+            pred.is_finite(),
+            "alpha warmup TTT prediction must be finite"
+        );
+    }
+
+    #[test]
+    fn ttt_surprise_gated() {
+        let config = TTTConfig::builder()
+            .d_model(16)
+            .surprise_gated(true)
+            .eta(0.05)
+            .build()
+            .unwrap();
+        let mut model = StreamingTTT::new(config);
+        for i in 0..100 {
+            model.train_one(&[0.1 * i as f64; 4], (i as f64 * 0.1).sin(), 1.0);
+        }
+        let pred = model.predict(&[0.5; 4]);
+        assert!(
+            pred.is_finite(),
+            "surprise-gated TTT prediction must be finite"
+        );
+    }
+
+    #[test]
+    fn ttt_defaults_unchanged() {
+        let config = TTTConfig::default();
+        assert!(!config.nesterov);
+        assert_eq!(config.alpha_warmup, 0);
+        assert!(!config.surprise_gated);
+    }
+
+    #[test]
+    fn ttt_all_titans_features_combined() {
+        let config = TTTConfig::builder()
+            .d_model(16)
+            .nesterov(true)
+            .momentum(0.9)
+            .alpha(0.005)
+            .alpha_warmup(30)
+            .surprise_gated(true)
+            .eta(0.05)
+            .build()
+            .unwrap();
+        let mut model = StreamingTTT::new(config);
+        for i in 0..200 {
+            let x = [0.01 * i as f64, -0.01 * i as f64, 0.5, -0.5];
+            model.train_one(&x, (i as f64 * 0.05).sin(), 1.0);
+        }
+        let pred = model.predict(&[0.5, -0.5, 0.5, -0.5]);
+        assert!(
+            pred.is_finite(),
+            "combined Titans TTT prediction must be finite"
         );
     }
 }

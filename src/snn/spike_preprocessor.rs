@@ -108,6 +108,8 @@ impl SpikePreprocessor {
             spike_threshold: f64_to_q14(0.05),
             seed: self.seed,
             weight_init_range: f64_to_q14(0.1),
+            use_astrocyte: false,
+            astrocyte_tau: 1000.0,
         };
 
         self.inner = Some(SpikeNetFixed::new(config));

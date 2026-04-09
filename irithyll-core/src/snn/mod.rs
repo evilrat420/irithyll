@@ -29,6 +29,7 @@
 //! - [`readout`] -- Non-spiking leaky integrator readout neuron
 //! - [`network_fixed`] -- Complete SNN combining all components
 
+pub mod astrocyte;
 pub mod eprop;
 pub mod lif;
 pub mod network_fixed;

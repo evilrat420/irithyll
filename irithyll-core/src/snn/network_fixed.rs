@@ -38,6 +38,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use super::astrocyte::AstrocyteGate;
 use super::eprop::{
     compute_learning_signal_fixed, update_eligibility_fixed, update_output_weights_fixed,
     update_pre_trace_fixed, update_weights_fixed,
@@ -86,6 +87,10 @@ pub struct SpikeNetFixedConfig {
     pub seed: u64,
     /// Weight initialization range: weights sampled from `[-range, +range]` in Q1.14.
     pub weight_init_range: i16,
+    /// Enable astrocyte-gated modulation of input weights.
+    pub use_astrocyte: bool,
+    /// Astrocyte EWMA time constant (higher = slower adaptation). Default: 1000.
+    pub astrocyte_tau: f64,
 }
 
 impl Default for SpikeNetFixedConfig {
@@ -103,6 +108,8 @@ impl Default for SpikeNetFixedConfig {
             spike_threshold: 819, // 0.05
             seed: 42,
             weight_init_range: 1638, // 0.10
+            use_astrocyte: false,
+            astrocyte_tau: 1000.0,
         }
     }
 }
@@ -169,6 +176,9 @@ pub struct SpikeNetFixed {
     // --- Error buffer (reusable) ---
     error_buf: Vec<i16>, // [n_output]
 
+    // --- Astrocyte gating ---
+    astrocyte: Option<AstrocyteGate>,
+
     // --- Counters ---
     n_samples: u64,
 }
@@ -217,6 +227,12 @@ impl SpikeNetFixed {
 
         let encoder = DeltaEncoderFixed::new(n_in, config.spike_threshold);
 
+        let astrocyte = if config.use_astrocyte {
+            Some(AstrocyteGate::new(n_hid, config.astrocyte_tau))
+        } else {
+            None
+        };
+
         Self {
             n_input_encoded: n_enc,
             membrane: vec![0; n_hid],
@@ -234,6 +250,7 @@ impl SpikeNetFixed {
             encoder,
             spike_buf: vec![0; n_enc],
             error_buf: vec![0; n_out],
+            astrocyte,
             n_samples: 0,
             config,
         }
@@ -264,7 +281,13 @@ impl SpikeNetFixed {
             let w_in_offset = j * n_enc;
             for i in 0..n_enc {
                 if self.spike_buf[i] != 0 {
-                    current += self.w_input[w_in_offset + i] as i32;
+                    // Apply astrocyte modulation to input weights if enabled.
+                    // Uses modulation from the PREVIOUS step (correct slow-timescale behavior).
+                    let w = match &self.astrocyte {
+                        Some(astro) => astro.modulate_weight(j, self.w_input[w_in_offset + i]),
+                        None => self.w_input[w_in_offset + i],
+                    };
+                    current += w as i32;
                 }
             }
 
@@ -285,6 +308,11 @@ impl SpikeNetFixed {
             );
             self.membrane[j] = v_new;
             self.spikes[j] = spike as u8;
+        }
+
+        // 3b. Update astrocyte spike tracking after spikes are computed
+        if let Some(ref mut astro) = self.astrocyte {
+            astro.update(&self.spikes);
         }
 
         // 4. Update readout neurons
@@ -578,6 +606,11 @@ impl SpikeNetFixed {
             *e = 0;
         }
 
+        // Reset astrocyte if present
+        if let Some(ref mut astro) = self.astrocyte {
+            astro.reset();
+        }
+
         // Re-initialize weights from seed
         let mut rng_state = if self.config.seed == 0 {
             1
@@ -622,6 +655,8 @@ mod tests {
             spike_threshold: f64_to_q14(0.05),
             seed: 42,
             weight_init_range: f64_to_q14(0.1),
+            use_astrocyte: false,
+            astrocyte_tau: 1000.0,
         }
     }
 
@@ -688,6 +723,8 @@ mod tests {
             spike_threshold: f64_to_q14(0.01), // very sensitive encoding
             seed: 12345,
             weight_init_range: f64_to_q14(0.2),
+            use_astrocyte: false,
+            astrocyte_tau: 1000.0,
         };
 
         let mut net = SpikeNetFixed::new(config);
@@ -831,6 +868,22 @@ mod tests {
         // Should not panic
         net.train_step(&[1000, -500], &[2000, -1000]);
         assert_eq!(net.n_samples_seen(), 1);
+    }
+
+    #[test]
+    fn network_with_astrocyte_runs() {
+        let config = SpikeNetFixedConfig {
+            use_astrocyte: true,
+            astrocyte_tau: 100.0,
+            ..default_small_config()
+        };
+        let mut net = SpikeNetFixed::new(config);
+        for _ in 0..50 {
+            net.train_step(&[1000, -500], &[2000]);
+        }
+        assert_eq!(net.n_samples_seen(), 50);
+        let raw = net.predict_raw();
+        assert_eq!(raw.len(), 1);
     }
 
     #[test]

@@ -140,6 +140,8 @@ impl SpikeNet {
             spike_threshold: f64_to_q14(self.config.spike_threshold),
             seed: self.config.seed,
             weight_init_range: f64_to_q14(self.config.weight_init_range),
+            use_astrocyte: self.config.astrocyte,
+            astrocyte_tau: self.config.astrocyte_tau,
         };
 
         self.inner = Some(SpikeNetFixed::new(fixed_config));
