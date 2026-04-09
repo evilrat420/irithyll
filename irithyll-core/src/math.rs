@@ -130,6 +130,22 @@ pub fn fmax(x: f64, y: f64) -> f64 {
     libm::fmax(x, y)
 }
 
+/// SiLU (Sigmoid Linear Unit): `x * sigmoid(x)`.
+///
+/// Also known as the Swish activation. Produces a smooth, non-negative-biased
+/// output that allows gradient flow in both directions.
+#[inline]
+pub fn silu(x: f64) -> f64 {
+    x * sigmoid(x)
+}
+
+/// SiLU derivative: `sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))`.
+#[inline]
+pub fn silu_derivative(x: f64) -> f64 {
+    let s = sigmoid(x);
+    s + x * s * (1.0 - s)
+}
+
 /// Error function.
 #[inline]
 pub fn erf(x: f64) -> f64 {

@@ -89,21 +89,10 @@ pub struct NeuronRegeneration {
     regenerated_mask: Vec<bool>,
 }
 
-/// Generate a pseudorandom u64 using xorshift64.
-#[inline]
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    x
-}
-
 /// Generate a small random value in approximately [-0.01, 0.01].
 #[inline]
 fn small_random(state: &mut u64) -> f64 {
-    let bits = xorshift64(state);
+    let bits = crate::rng::xorshift64(state);
     (bits as f64 / u64::MAX as f64 - 0.5) * 0.02
 }
 
@@ -368,7 +357,7 @@ impl ContinualStrategy for NeuronRegeneration {
                 let start = g * self.group_size;
                 let end = (start + self.group_size).min(self.n_params);
                 for _ in start..end {
-                    let _ = xorshift64(&mut self.rng_state);
+                    let _ = crate::rng::xorshift64(&mut self.rng_state);
                 }
             }
         }

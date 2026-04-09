@@ -324,13 +324,13 @@ impl crate::pipeline::StreamingPreprocessor for CCIPCA {
 }
 
 // ---------------------------------------------------------------------------
-// Vector utilities (no external dependency needed for these basics)
+// Vector utilities
 // ---------------------------------------------------------------------------
 
 /// Dot product of two equal-length slices.
 #[inline]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b.iter()).map(|(&ai, &bi)| ai * bi).sum()
+    irithyll_core::simd::simd_dot(a, b)
 }
 
 /// Euclidean norm of a slice.

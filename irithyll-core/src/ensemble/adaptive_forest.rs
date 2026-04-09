@@ -30,18 +30,11 @@ use crate::drift::adwin::Adwin;
 use crate::drift::{DriftDetector, DriftSignal};
 use crate::learner::StreamingLearner;
 
+use crate::rng::xorshift64;
+
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
-
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    x
-}
 
 fn poisson(lambda: f64, rng: &mut u64) -> u64 {
     let l = crate::math::exp(-lambda);

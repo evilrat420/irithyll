@@ -37,20 +37,11 @@ use std::fmt;
 
 use crate::learner::StreamingLearner;
 
-// ---------------------------------------------------------------------------
-// RNG utilities -- xorshift64
-// ---------------------------------------------------------------------------
+use irithyll_core::rng::xorshift64;
 
-/// Advance a xorshift64 state and return the next pseudo-random `u64`.
-#[inline]
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    x
-}
+// ---------------------------------------------------------------------------
+// RNG utilities
+// ---------------------------------------------------------------------------
 
 /// Return a pseudo-random `f64` in [0, 1).
 #[inline]

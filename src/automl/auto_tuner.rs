@@ -1059,16 +1059,14 @@ impl crate::automl::DiagnosticSource for AutoTuner {
 // ===========================================================================
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
-    use crate::automl::factories::{AttentionFactory, EsnFactory, MambaFactory, SpikeNetFactory};
-    use crate::automl::SgbtFactory;
+    use crate::automl::Factory;
 
     /// Verify AutoTuner builder creates an instance with default config values.
     #[test]
     fn tournament_builder_default() {
-        let tuner = AutoTuner::builder().factory(SgbtFactory::new(5)).build();
+        let tuner = AutoTuner::builder().factory(Factory::sgbt(5)).build();
 
         assert_eq!(
             tuner.config.n_initial, 8,
@@ -1118,7 +1116,7 @@ mod tests {
     #[test]
     fn tournament_train_and_predict() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(5))
+            .factory(Factory::sgbt(5))
             .round_budget(50)
             .build();
 
@@ -1139,7 +1137,7 @@ mod tests {
     #[test]
     fn tournament_successive_halving() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(4)
             .round_budget(20)
             .seed(77)
@@ -1167,7 +1165,7 @@ mod tests {
     #[test]
     fn tournament_promotes() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(4)
             .round_budget(20)
             .seed(123)
@@ -1190,7 +1188,7 @@ mod tests {
     #[test]
     fn tournament_reset() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .round_budget(20)
             .n_initial(4)
             .build();
@@ -1241,7 +1239,7 @@ mod tests {
     /// Verify n_samples_seen matches the number of train calls.
     #[test]
     fn tournament_n_samples_seen() {
-        let mut tuner = AutoTuner::builder().factory(SgbtFactory::new(3)).build();
+        let mut tuner = AutoTuner::builder().factory(Factory::sgbt(3)).build();
 
         assert_eq!(tuner.n_samples_seen(), 0, "should start at 0 samples");
 
@@ -1261,7 +1259,7 @@ mod tests {
     /// Verify AutoTuner can be used as a trait object.
     #[test]
     fn tournament_implements_streaming_learner() {
-        let tuner = AutoTuner::builder().factory(SgbtFactory::new(3)).build();
+        let tuner = AutoTuner::builder().factory(Factory::sgbt(3)).build();
 
         let mut boxed: Box<dyn StreamingLearner> = Box::new(tuner);
         boxed.train(&[1.0, 2.0, 3.0], 4.0);
@@ -1275,7 +1273,7 @@ mod tests {
     /// Verify factory_names returns correct name for single factory.
     #[test]
     fn tournament_factory_names_single() {
-        let tuner = AutoTuner::builder().factory(SgbtFactory::new(5)).build();
+        let tuner = AutoTuner::builder().factory(Factory::sgbt(5)).build();
 
         let names = tuner.factory_names();
         assert_eq!(
@@ -1295,8 +1293,8 @@ mod tests {
     #[test]
     fn tournament_multi_factory() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
-            .add_factory(EsnFactory::new())
+            .factory(Factory::sgbt(3))
+            .add_factory(Factory::esn())
             .n_initial(4)
             .round_budget(30)
             .seed(42)
@@ -1328,7 +1326,7 @@ mod tests {
     #[test]
     fn tournament_custom_config() {
         let tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(4)
             .round_budget(50)
             .metric(AutoMetric::RMSE)
@@ -1385,8 +1383,8 @@ mod tests {
     #[test]
     fn tournament_add_factory() {
         let tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
-            .add_factory(EsnFactory::new())
+            .factory(Factory::sgbt(3))
+            .add_factory(Factory::esn())
             .build();
 
         let names = tuner.factory_names();
@@ -1401,9 +1399,9 @@ mod tests {
 
         // Verify factory() clears and add_factory appends.
         let tuner2 = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
-            .add_factory(EsnFactory::new())
-            .factory(SgbtFactory::new(5)) // this should clear both, leaving only this one
+            .factory(Factory::sgbt(3))
+            .add_factory(Factory::esn())
+            .factory(Factory::sgbt(5)) // this should clear both, leaving only this one
             .build();
 
         let names2 = tuner2.factory_names();
@@ -1420,7 +1418,7 @@ mod tests {
     #[test]
     fn tournament_candidates_decrease() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(8)
             .round_budget(20)
             .seed(55)
@@ -1501,8 +1499,8 @@ mod tests {
         // With round_budget=25 and 30 training samples, ESN candidates
         // should survive the first elimination despite poor warmup metrics.
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(1))
-            .add_factory(EsnFactory::new())
+            .factory(Factory::sgbt(1))
+            .add_factory(Factory::esn())
             .n_initial(4)
             .round_budget(25)
             .seed(42)
@@ -1532,7 +1530,7 @@ mod tests {
     #[test]
     fn early_stopping_eliminates_bad() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(8)
             .round_budget(200)
             .seed(42)
@@ -1577,7 +1575,7 @@ mod tests {
     #[test]
     fn adaptive_bracket_grows_on_promotion() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(4)
             .round_budget(20)
             .min_n_initial(4)
@@ -1623,7 +1621,7 @@ mod tests {
         // complete quickly. The champion gets trained on clear signal
         // before challengers, making promotion unlikely.
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(16)
             .round_budget(10)
             .min_n_initial(4)
@@ -1667,11 +1665,11 @@ mod tests {
     /// Verify warmup_hint returns correct values for each factory.
     #[test]
     fn warmup_hint_factories() {
-        let sgbt: Box<dyn ModelFactory> = Box::new(SgbtFactory::new(5));
-        let esn: Box<dyn ModelFactory> = Box::new(EsnFactory::new());
-        let mamba: Box<dyn ModelFactory> = Box::new(MambaFactory::new(4));
-        let attn: Box<dyn ModelFactory> = Box::new(AttentionFactory::new(8));
-        let spike: Box<dyn ModelFactory> = Box::new(SpikeNetFactory::new());
+        let sgbt: Box<dyn ModelFactory> = Box::new(Factory::sgbt(5));
+        let esn: Box<dyn ModelFactory> = Box::new(Factory::esn());
+        let mamba: Box<dyn ModelFactory> = Box::new(Factory::mamba(4));
+        let attn: Box<dyn ModelFactory> = Box::new(Factory::attention(8));
+        let spike: Box<dyn ModelFactory> = Box::new(Factory::spike_net());
 
         assert_eq!(sgbt.warmup_hint(), 0, "SGBT warmup_hint should be 0");
         assert_eq!(esn.warmup_hint(), 50, "ESN warmup_hint should be 50");
@@ -1684,7 +1682,7 @@ mod tests {
     #[test]
     fn effective_n_initial_resets() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(8)
             .round_budget(20)
             .min_n_initial(4)
@@ -1756,7 +1754,7 @@ mod tests {
     #[test]
     fn drift_rerace_config() {
         let tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .use_drift_rerace(true)
             .build();
 
@@ -1770,7 +1768,7 @@ mod tests {
         );
 
         let tuner2 = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .use_drift_rerace(false)
             .build();
 
@@ -1788,7 +1786,7 @@ mod tests {
     #[test]
     fn drift_rerace_triggers_new_tournament() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(4)
             .round_budget(20)
             .min_n_initial(4)
@@ -1832,7 +1830,7 @@ mod tests {
     #[test]
     fn drift_rerace_reset() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(4)
             .round_budget(20)
             .use_drift_rerace(true)
@@ -1868,7 +1866,7 @@ mod tests {
     #[test]
     fn snapshot_after_training() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(5))
+            .factory(Factory::sgbt(5))
             .round_budget(50)
             .build();
 
@@ -1904,7 +1902,7 @@ mod tests {
     #[test]
     fn snapshot_shows_candidates() {
         let tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(4)
             .round_budget(100)
             .build();
@@ -1933,7 +1931,7 @@ mod tests {
     #[test]
     fn snapshot_display() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(4)
             .round_budget(50)
             .build();
@@ -1961,7 +1959,7 @@ mod tests {
     #[test]
     fn snapshot_tracks_promotions() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .n_initial(4)
             .round_budget(20)
             .seed(123)
@@ -1994,7 +1992,7 @@ mod tests {
     #[test]
     fn auto_builder_mode_enabled() {
         let tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .auto_builder(true)
             .build();
 
@@ -2011,7 +2009,7 @@ mod tests {
     /// Verify default build has no adaptor.
     #[test]
     fn auto_builder_mode_disabled() {
-        let tuner = AutoTuner::builder().factory(SgbtFactory::new(3)).build();
+        let tuner = AutoTuner::builder().factory(Factory::sgbt(3)).build();
 
         assert!(
             !tuner.config.auto_builder,
@@ -2027,7 +2025,7 @@ mod tests {
     #[test]
     fn auto_builder_train_works() {
         let mut tuner = AutoTuner::builder()
-            .factory(SgbtFactory::new(3))
+            .factory(Factory::sgbt(3))
             .auto_builder(true)
             .round_budget(50)
             .build();

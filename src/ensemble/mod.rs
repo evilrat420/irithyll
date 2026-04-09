@@ -921,11 +921,16 @@ impl<L: Loss> SGBT<L> {
     /// This allows external schedulers (e.g., [`lr_schedule::LRScheduler`]) to
     /// adapt the rate over time without rebuilding the model.
     ///
-    /// # Arguments
+    /// # Panics
     ///
-    /// * `lr` -- New learning rate (should be positive and finite)
+    /// Panics if `lr` is not in `(0.0, 1.0]` or is not finite.
     #[inline]
     pub fn set_learning_rate(&mut self, lr: f64) {
+        assert!(
+            lr > 0.0 && lr <= 1.0 && lr.is_finite(),
+            "learning_rate must be in (0.0, 1.0], got {}",
+            lr
+        );
         self.config.learning_rate = lr;
     }
 

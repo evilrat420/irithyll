@@ -35,12 +35,7 @@ use crate::learner::StreamingLearner;
 /// Dot product of two equal-length slices.
 #[inline]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
-    debug_assert_eq!(a.len(), b.len());
-    let mut sum = 0.0;
-    for i in 0..a.len() {
-        sum += a[i] * b[i];
-    }
-    sum
+    irithyll_core::simd::simd_dot(a, b)
 }
 
 /// Multiply an n x n row-major matrix by an n-vector.

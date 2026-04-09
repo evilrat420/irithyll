@@ -47,23 +47,7 @@ pub enum HoldoutStrategy {
     },
 }
 
-// ---------------------------------------------------------------------------
-// xorshift64 PRNG
-// ---------------------------------------------------------------------------
-
-/// Deterministic xorshift64 PRNG.
-///
-/// Fast, minimal state, reproducible. Same algorithm used in irithyll's
-/// BaggedSGBT for Poisson sampling.
-#[inline]
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    x
-}
+use irithyll_core::rng::xorshift64;
 
 // ---------------------------------------------------------------------------
 // Progressive Validator

@@ -32,10 +32,7 @@ pub use auto_tuner::{
     AutoTuner, AutoTunerBuilder, AutoTunerConfig, AutoTunerSnapshot, CandidateSnapshot,
 };
 pub use config_space::{ConfigSampler, ConfigSpace, HyperConfig, HyperParam};
-#[allow(deprecated)]
-pub use factories::{
-    Algorithm, AttentionFactory, EsnFactory, Factory, MambaFactory, SgbtFactory, SpikeNetFactory,
-};
+pub use factories::{Algorithm, Factory};
 pub use reward::RewardNormalizer;
 
 /// Metric to optimize during auto-tuning.

@@ -22,19 +22,7 @@ const DEFAULT_MAX_ITERS: usize = 50;
 const EPSILON: f64 = 1e-10;
 
 // ---------------------------------------------------------------------------
-// Xorshift64 PRNG -- lightweight, deterministic, no allocation.
-// ---------------------------------------------------------------------------
-
-/// Advance an xorshift64 state and return the new value.
-#[inline]
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut s = *state;
-    s ^= s << 13;
-    s ^= s >> 7;
-    s ^= s << 17;
-    *state = s;
-    s
-}
+use crate::rng::xorshift64;
 
 // ---------------------------------------------------------------------------
 // KMeansBinning

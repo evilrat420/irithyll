@@ -105,39 +105,10 @@ pub trait ContextualBandit: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Shared RNG utilities (xorshift64, no external dep)
+// Shared RNG utilities (canonical implementations in irithyll-core::rng)
 // ---------------------------------------------------------------------------
 
-/// Advance xorshift64 state and return raw u64.
-#[inline]
-pub(crate) fn xorshift64(state: &mut u64) -> u64 {
-    let mut s = *state;
-    s ^= s << 13;
-    s ^= s >> 7;
-    s ^= s << 17;
-    *state = s;
-    s
-}
-
-/// Uniform f64 in [0, 1) from xorshift64.
-#[inline]
-pub(crate) fn xorshift64_f64(state: &mut u64) -> f64 {
-    // Use 53-bit mantissa for full f64 precision.
-    (xorshift64(state) >> 11) as f64 / ((1u64 << 53) as f64)
-}
-
-/// Standard normal via Box-Muller transform (returns one sample).
-pub(crate) fn standard_normal(state: &mut u64) -> f64 {
-    loop {
-        let u1 = xorshift64_f64(state);
-        let u2 = xorshift64_f64(state);
-        if u1 > 0.0 {
-            let r = (-2.0 * u1.ln()).sqrt();
-            let theta = 2.0 * std::f64::consts::PI * u2;
-            return r * theta.cos();
-        }
-    }
-}
+pub(crate) use irithyll_core::rng::{standard_normal, xorshift64, xorshift64_f64};
 
 /// Gamma(shape, 1) sample via Marsaglia-Tsang (2000).
 ///

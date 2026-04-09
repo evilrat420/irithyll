@@ -14,20 +14,8 @@
 //! Yang, B. (1995). Projection approximation subspace tracking.
 //! *IEEE Transactions on Signal Processing*, 43(1), 95--107.
 
-// ===========================================================================
-// Private linear algebra helpers
-// ===========================================================================
-
-/// Dot product of two equal-length slices.
-#[inline]
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    debug_assert_eq!(a.len(), b.len());
-    let mut sum = 0.0;
-    for i in 0..a.len() {
-        sum += a[i] * b[i];
-    }
-    sum
-}
+use irithyll_core::rng::xorshift64_f64;
+use irithyll_core::simd::simd_dot as dot;
 
 /// Multiply a row-major n x n matrix by an n-vector.
 #[inline]
@@ -101,28 +89,6 @@ fn mat_vec_col_major(w: &[f64], y: &[f64], d_in: usize, rank: usize) -> Vec<f64>
         }
     }
     result
-}
-
-// ===========================================================================
-// RNG helpers (xorshift64, same pattern as the rest of irithyll)
-// ===========================================================================
-
-/// Advance xorshift64 state and return raw u64.
-#[inline]
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut s = *state;
-    s ^= s << 13;
-    s ^= s >> 7;
-    s ^= s << 17;
-    *state = s;
-    s
-}
-
-/// Uniform f64 in [0, 1) from xorshift64.
-#[inline]
-fn xorshift64_f64(state: &mut u64) -> f64 {
-    // Use 53-bit mantissa for full f64 precision.
-    (xorshift64(state) >> 11) as f64 / ((1u64 << 53) as f64)
 }
 
 // ===========================================================================

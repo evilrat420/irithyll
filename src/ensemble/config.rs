@@ -1133,6 +1133,16 @@ impl SGBTConfigBuilder {
             }
         }
 
+        // -- Empirical sigma alpha --
+        if c.empirical_sigma_alpha <= 0.0 || c.empirical_sigma_alpha >= 1.0 {
+            return Err(ConfigError::out_of_range(
+                "empirical_sigma_alpha",
+                "must be in (0, 1)",
+                c.empirical_sigma_alpha,
+            )
+            .into());
+        }
+
         // -- Shadow warmup --
         if let Some(warmup) = c.shadow_warmup {
             if warmup == 0 {

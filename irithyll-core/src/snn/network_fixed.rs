@@ -107,18 +107,7 @@ impl Default for SpikeNetFixedConfig {
     }
 }
 
-/// Inline xorshift64 PRNG for weight initialization.
-///
-/// Returns the next pseudo-random u64.
-#[inline]
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    x
-}
+use crate::rng::xorshift64;
 
 /// Generate a random i16 in `[-range, +range]` from the PRNG.
 ///

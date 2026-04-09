@@ -33,21 +33,11 @@ use crate::loss::squared::SquaredLoss;
 use crate::loss::Loss;
 use crate::sample::Observation;
 
+use irithyll_core::rng::xorshift64_f64;
+
 // ---------------------------------------------------------------------------
 // Poisson sampling utilities
 // ---------------------------------------------------------------------------
-
-/// Advance an xorshift64 state and return a f64 in [0, 1).
-#[inline]
-fn xorshift64_f64(state: &mut u64) -> f64 {
-    let mut s = *state;
-    s ^= s << 13;
-    s ^= s >> 7;
-    s ^= s << 17;
-    *state = s;
-    // Use 53-bit mantissa for uniform [0, 1)
-    (s >> 11) as f64 / ((1u64 << 53) as f64)
-}
 
 /// Sample from Poisson(lambda=1) using Knuth's algorithm.
 ///

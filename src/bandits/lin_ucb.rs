@@ -227,9 +227,9 @@ fn mat_vec_mul(mat: &[f64], v: &[f64], d: usize) -> Vec<f64> {
 }
 
 /// Dot product of two vectors.
+#[inline]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
-    debug_assert_eq!(a.len(), b.len());
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    irithyll_core::simd::simd_dot(a, b)
 }
 
 /// In-place Sherman-Morrison rank-1 downdate of the inverse matrix.

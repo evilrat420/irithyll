@@ -254,10 +254,7 @@ pub use moe::{NeuralMoE, NeuralMoEBuilder, NeuralMoEConfig};
 pub use projection::{ProjectedLearner, ProjectionConfig, ProjectionConfigBuilder};
 
 // Re-exports -- automl
-#[allow(deprecated)]
-pub use automl::{
-    Algorithm, AttentionFactory, EsnFactory, Factory, MambaFactory, SgbtFactory, SpikeNetFactory,
-};
+pub use automl::{Algorithm, Factory};
 pub use automl::{AutoMetric, AutoTuner, AutoTunerBuilder, AutoTunerConfig, ModelFactory};
 pub use automl::{
     ConfigDiagnostics, DiagnosticAdaptor, DiagnosticLearner, DiagnosticSource, FeasibleRegion,

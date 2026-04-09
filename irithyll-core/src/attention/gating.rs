@@ -14,44 +14,7 @@
 use alloc::vec::Vec;
 
 use crate::math;
-
-/// Xorshift64 PRNG for deterministic weight initialization.
-///
-/// Same algorithm as [`crate::ssm::projection::Xorshift64`], duplicated here
-/// to keep the attention module self-contained within `irithyll-core`.
-pub struct Xorshift64(pub u64);
-
-impl Xorshift64 {
-    /// Generate the next random u64 value.
-    #[inline]
-    pub fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-
-    /// Generate a uniform random f64 in `[0, 1)`.
-    #[inline]
-    pub fn next_f64(&mut self) -> f64 {
-        (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64)
-    }
-
-    /// Generate a standard normal random value via Box-Muller transform.
-    #[inline]
-    pub fn next_normal(&mut self) -> f64 {
-        let u1 = loop {
-            let u = self.next_f64();
-            if u > 0.0 {
-                break u;
-            }
-        };
-        let u2 = self.next_f64();
-        math::sqrt(-2.0 * math::ln(u1)) * math::cos(2.0 * core::f64::consts::PI * u2)
-    }
-}
+pub use crate::rng::Xorshift64;
 
 /// Dot product of two slices.
 ///
@@ -59,7 +22,6 @@ impl Xorshift64 {
 /// when available.
 #[inline]
 fn dot(a: &[f64], b: &[f64]) -> f64 {
-    debug_assert_eq!(a.len(), b.len(), "dot product requires equal lengths");
     crate::simd::simd_dot(a, b)
 }
 

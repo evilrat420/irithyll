@@ -37,20 +37,7 @@ use crate::tree::StreamingTree;
 /// Hoeffding bound is already tight enough that further samples won't help.
 const TAU: f64 = 0.05;
 
-// ---------------------------------------------------------------------------
-// xorshift64 -- minimal deterministic PRNG
-// ---------------------------------------------------------------------------
-
-/// Advance an xorshift64 state and return the new value.
-#[inline]
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut s = *state;
-    s ^= s << 13;
-    s ^= s >> 7;
-    s ^= s << 17;
-    *state = s;
-    s
-}
+use crate::rng::xorshift64;
 
 // ---------------------------------------------------------------------------
 // LeafState -- per-leaf bookkeeping

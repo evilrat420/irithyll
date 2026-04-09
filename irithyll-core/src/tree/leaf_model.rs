@@ -727,19 +727,7 @@ impl LeafModelType {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared utility
-// ---------------------------------------------------------------------------
-
-/// Xorshift64 PRNG for deterministic weight initialization.
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut s = *state;
-    s ^= s << 13;
-    s ^= s >> 7;
-    s ^= s << 17;
-    *state = s;
-    s
-}
+use crate::rng::xorshift64;
 
 // ---------------------------------------------------------------------------
 // Tests

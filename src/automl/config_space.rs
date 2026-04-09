@@ -4,40 +4,7 @@
 //! for generating candidate configurations. Supports continuous (linear
 //! and log-scale), integer, and categorical parameters.
 
-// ---------------------------------------------------------------------------
-// RNG helpers (xorshift64, same as the rest of irithyll)
-// ---------------------------------------------------------------------------
-
-/// Advance xorshift64 state and return raw u64.
-#[inline]
-fn xorshift64(state: &mut u64) -> u64 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *state = x;
-    x
-}
-
-/// Uniform f64 in [0, 1) from xorshift64.
-#[inline]
-fn xorshift64_f64(state: &mut u64) -> f64 {
-    // Use 53-bit mantissa for full f64 precision.
-    (xorshift64(state) >> 11) as f64 / ((1u64 << 53) as f64)
-}
-
-/// Standard normal sample via Box-Muller transform.
-fn standard_normal(state: &mut u64) -> f64 {
-    loop {
-        let u1 = xorshift64_f64(state);
-        let u2 = xorshift64_f64(state);
-        if u1 > 0.0 {
-            let r = (-2.0 * u1.ln()).sqrt();
-            let theta = 2.0 * std::f64::consts::PI * u2;
-            return r * theta.cos();
-        }
-    }
-}
+use irithyll_core::rng::{standard_normal, xorshift64, xorshift64_f64};
 
 // ---------------------------------------------------------------------------
 // HyperParam

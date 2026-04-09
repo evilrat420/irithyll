@@ -11,6 +11,7 @@
 //! beyond `libm` (via `crate::math`), making them suitable for `no_std` targets.
 
 use crate::math;
+pub use crate::rng::Xorshift64;
 
 /// Row-major matrix-vector multiply: out = W * x.
 ///
@@ -60,60 +61,6 @@ pub fn softplus(x: f64) -> f64 {
 #[inline]
 pub fn sigmoid(x: f64) -> f64 {
     math::sigmoid(x)
-}
-
-/// Xorshift64 pseudo-random number generator.
-///
-/// A fast, deterministic PRNG suitable for weight initialization. Not
-/// cryptographically secure, but provides good statistical properties
-/// for ML weight sampling.
-///
-/// # Example
-///
-/// ```
-/// use irithyll_core::ssm::projection::Xorshift64;
-///
-/// let mut rng = Xorshift64(12345);
-/// let val = rng.next_f64();   // uniform in [0, 1)
-/// let normal = rng.next_normal(); // standard normal via Box-Muller
-/// ```
-pub struct Xorshift64(pub u64);
-
-impl Xorshift64 {
-    /// Generate the next random u64 value.
-    #[inline]
-    pub fn next_u64(&mut self) -> u64 {
-        let mut x = self.0;
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        self.0 = x;
-        x
-    }
-
-    /// Generate a uniform random f64 in `[0, 1)`.
-    #[inline]
-    pub fn next_f64(&mut self) -> f64 {
-        // Use upper 53 bits for full mantissa precision
-        (self.next_u64() >> 11) as f64 / ((1u64 << 53) as f64)
-    }
-
-    /// Generate a standard normal random value via Box-Muller transform.
-    ///
-    /// Generates two uniform samples and converts to a standard normal.
-    /// Discards the second value for simplicity.
-    #[inline]
-    pub fn next_normal(&mut self) -> f64 {
-        // Box-Muller: need two independent uniforms in (0, 1)
-        let u1 = loop {
-            let u = self.next_f64();
-            if u > 0.0 {
-                break u;
-            }
-        };
-        let u2 = self.next_f64();
-        math::sqrt(-2.0 * math::ln(u1)) * math::cos(2.0 * core::f64::consts::PI * u2)
-    }
 }
 
 #[cfg(test)]
