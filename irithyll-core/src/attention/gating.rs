@@ -148,6 +148,83 @@ pub fn lstm_gates(w_f: &[f64], w_i: &[f64], x: &[f64]) -> (f64, f64) {
     (math::sigmoid(dot(w_f, x)), math::sigmoid(dot(w_i, x)))
 }
 
+/// Per-dimension vector decay (RWKV-7).
+///
+/// Computes bounded decay per dimension:
+/// `w[i] = exp(-exp(-0.5) * sigmoid(dot_i))` where `dot_i = w_decay_row_i . x`.
+///
+/// Each element of the output is in (exp(-exp(-0.5)), 1) ≈ (0.545, 1.0),
+/// ensuring stable but non-trivial decay per dimension.
+///
+/// # Arguments
+///
+/// * `w_decay` -- decay weight matrix, `d_key x d_model` row-major
+/// * `x` -- input vector (length `d_model`)
+/// * `d_key` -- number of output dimensions
+///
+/// # Returns
+///
+/// Vector of length `d_key` with decay factors in (0.545, 1.0).
+pub fn vector_decay(w_decay: &[f64], x: &[f64], d_key: usize) -> Vec<f64> {
+    let d_model = x.len();
+    debug_assert_eq!(
+        w_decay.len(),
+        d_key * d_model,
+        "w_decay must be d_key * d_model"
+    );
+    let scale = math::exp(-0.5); // ~0.6065
+    let mut w = Vec::with_capacity(d_key);
+    for i in 0..d_key {
+        let row = &w_decay[i * d_model..(i + 1) * d_model];
+        let raw = dot(row, x);
+        w.push(math::exp(-scale * math::sigmoid(raw)));
+    }
+    w
+}
+
+/// Per-dimension sigmoid gate (RWKV-7 ICLR).
+///
+/// Computes `sigmoid(w_gate_row_i . x)` for each dimension, producing
+/// a vector of gate values in (0, 1).
+///
+/// # Arguments
+///
+/// * `w_gate` -- gate weight matrix, `d_key x d_model` row-major
+/// * `x` -- input vector (length `d_model`)
+/// * `d_key` -- number of output dimensions
+///
+/// # Returns
+///
+/// Vector of length `d_key` with gate values in (0, 1).
+pub fn vector_sigmoid_gate(w_gate: &[f64], x: &[f64], d_key: usize) -> Vec<f64> {
+    let d_model = x.len();
+    debug_assert_eq!(
+        w_gate.len(),
+        d_key * d_model,
+        "w_gate must be d_key * d_model"
+    );
+    let mut g = Vec::with_capacity(d_key);
+    for i in 0..d_key {
+        let row = &w_gate[i * d_model..(i + 1) * d_model];
+        g.push(math::sigmoid(dot(row, x)));
+    }
+    g
+}
+
+/// Extended sigmoid for DeltaProduct beta (range [0, 2]).
+///
+/// Computes `2 * sigmoid(w . x)`, mapping to [0, 2] for Householder
+/// reflections. At beta=2, the transformation is a full reflection.
+///
+/// # Arguments
+///
+/// * `w` -- weight vector (length must match `x`)
+/// * `x` -- input vector
+#[inline]
+pub fn extended_sigmoid_gate(w: &[f64], x: &[f64]) -> f64 {
+    2.0 * math::sigmoid(dot(w, x))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +364,48 @@ mod tests {
             max_abs < 0.5,
             "weights with scale 0.01 should be small, max_abs={}",
             max_abs
+        );
+    }
+
+    #[test]
+    fn vector_decay_bounded() {
+        let w = vec![0.1, -0.2, 0.3, -0.1, 0.05, 0.15, -0.05, 0.2];
+        let x = vec![1.0, 2.0, -1.0, 0.5];
+        let decay = vector_decay(&w, &x, 2);
+        assert_eq!(decay.len(), 2, "should produce 2 decay values");
+        for (i, &d) in decay.iter().enumerate() {
+            assert!(
+                d > 0.54 && d < 1.0,
+                "decay[{}] should be in (0.54, 1.0), got {}",
+                i,
+                d
+            );
+        }
+    }
+
+    #[test]
+    fn vector_sigmoid_gate_bounded() {
+        let w = vec![10.0, 0.0, -10.0, 0.0]; // 2 dims, d_model=2
+        let x = vec![1.0, 0.0];
+        let g = vector_sigmoid_gate(&w, &x, 2);
+        assert!(g[0] > 0.99, "large positive should give ~1, got {}", g[0]);
+        assert!(g[1] < 0.01, "large negative should give ~0, got {}", g[1]);
+    }
+
+    #[test]
+    fn extended_sigmoid_gate_range() {
+        let w_pos = vec![100.0];
+        let w_neg = vec![-100.0];
+        let x = vec![1.0];
+        let high = extended_sigmoid_gate(&w_pos, &x);
+        let low = extended_sigmoid_gate(&w_neg, &x);
+        assert!(high > 1.99, "large positive should give ~2.0, got {}", high);
+        assert!(low < 0.01, "large negative should give ~0.0, got {}", low);
+        let mid = extended_sigmoid_gate(&[0.0], &[0.0]);
+        assert!(
+            (mid - 1.0).abs() < 1e-6,
+            "zero input should give 1.0, got {}",
+            mid
         );
     }
 

@@ -15,7 +15,8 @@
 //!
 //! The attention layer processes each feature vector as a timestep, maintaining
 //! per-head recurrent state that captures temporal dependencies via linear
-//! attention mechanisms (RetNet, Hawk, GLA, DeltaNet, GatedDeltaNet, RWKV, mLSTM).
+//! attention mechanisms (RetNet, Hawk, GLA, DeltaNet, GatedDeltaNet, RWKV, mLSTM,
+//! DeltaProduct, RWKV7).
 //! The RLS readout learns a linear mapping from the attention output to the target.
 //!
 //! # Components
@@ -103,6 +104,58 @@ pub fn delta_net(d_model: usize, n_heads: usize) -> StreamingAttentionModel {
             .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
             .build()
             .expect("delta_net() factory: invalid parameters"),
+    )
+}
+
+/// Create a DeltaProduct model (strongest tunable linear attention).
+///
+/// DeltaProduct applies `n_compositions` sequential delta rule steps per token,
+/// with spectrally bounded Householder transitions. Higher `n_compositions`
+/// increases expressivity at the cost of per-token compute.
+///
+/// ```ignore
+/// use irithyll::attention::delta_product;
+/// use irithyll::learner::StreamingLearner;
+///
+/// let mut model = delta_product(8, 2, 3);
+/// model.train(&[1.0; 8], 0.5);
+/// ```
+pub fn delta_product(
+    d_model: usize,
+    n_heads: usize,
+    n_compositions: usize,
+) -> StreamingAttentionModel {
+    StreamingAttentionModel::new(
+        StreamingAttentionConfig::builder()
+            .d_model(d_model)
+            .n_heads(n_heads)
+            .mode(AttentionMode::DeltaProduct { n_compositions })
+            .build()
+            .expect("delta_product() factory: invalid parameters"),
+    )
+}
+
+/// Create an RWKV-7 model (vector-gated delta rule with DPLR transitions).
+///
+/// RWKV-7 uses per-dimension vector decay, vector in-context learning rate,
+/// and decoupled removal/replacement keys for state-of-the-art in-context
+/// learning performance.
+///
+/// ```ignore
+/// use irithyll::attention::rwkv7;
+/// use irithyll::learner::StreamingLearner;
+///
+/// let mut model = rwkv7(8, 2);
+/// model.train(&[1.0; 8], 0.5);
+/// ```
+pub fn rwkv7(d_model: usize, n_heads: usize) -> StreamingAttentionModel {
+    StreamingAttentionModel::new(
+        StreamingAttentionConfig::builder()
+            .d_model(d_model)
+            .n_heads(n_heads)
+            .mode(AttentionMode::RWKV7)
+            .build()
+            .expect("rwkv7() factory: invalid parameters"),
     )
 }
 

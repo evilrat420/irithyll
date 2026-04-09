@@ -10,7 +10,8 @@ use alloc::vec::Vec;
 
 use super::config::{AttentionConfig, AttentionMode};
 use super::gating::{
-    exponential_gate, fixed_decay, init_weights, lstm_gates, mat_vec, sigmoid_gate, Xorshift64,
+    exponential_gate, extended_sigmoid_gate, fixed_decay, init_weights, lstm_gates, mat_vec,
+    sigmoid_gate, vector_decay, vector_sigmoid_gate, Xorshift64,
 };
 use super::state::AttentionState;
 use super::update_rules;
@@ -37,6 +38,20 @@ struct AttentionHead {
     w_alpha: Vec<f64>,
     /// Beta (input scale) weights for Hawk (length d_model, projected to d_value).
     w_beta: Vec<f64>,
+    /// Per-composition key projections for DeltaProduct (n_h * d_key * d_model).
+    w_comp_keys: Vec<f64>,
+    /// Per-composition value projections for DeltaProduct (n_h * d_value * d_model).
+    w_comp_values: Vec<f64>,
+    /// Per-composition beta projections for DeltaProduct (n_h * d_model).
+    w_comp_betas: Vec<f64>,
+    /// Per-dimension decay projection for RWKV-7 (d_key * d_model).
+    w_decay_vec: Vec<f64>,
+    /// ICLR projection for RWKV-7 (d_key * d_model).
+    w_iclr: Vec<f64>,
+    /// Removal key modifier for RWKV-7 (length d_key).
+    w_xi: Vec<f64>,
+    /// Replacement key modifier for RWKV-7 (length d_key).
+    w_alpha_rk: Vec<f64>,
 }
 
 /// Multi-head streaming linear attention layer.
@@ -108,9 +123,10 @@ impl MultiHeadAttention {
 
             // Mode-dependent gate weights
             let w_gate = match &config.mode {
-                AttentionMode::GLA | AttentionMode::GatedDeltaNet { .. } | AttentionMode::MLSTM => {
-                    init_weights(&mut rng, d_model)
-                }
+                AttentionMode::GLA
+                | AttentionMode::GatedDeltaNet { .. }
+                | AttentionMode::MLSTM
+                | AttentionMode::DeltaProduct { .. } => init_weights(&mut rng, d_model),
                 _ => Vec::new(),
             };
 
@@ -134,6 +150,28 @@ impl MultiHeadAttention {
                 _ => Vec::new(),
             };
 
+            let (w_comp_keys, w_comp_values, w_comp_betas) = match &config.mode {
+                AttentionMode::DeltaProduct { n_compositions } => {
+                    let n_h = *n_compositions;
+                    (
+                        init_weights(&mut rng, n_h * d_key * d_model),
+                        init_weights(&mut rng, n_h * d_value * d_model),
+                        init_weights(&mut rng, n_h * d_model),
+                    )
+                }
+                _ => (Vec::new(), Vec::new(), Vec::new()),
+            };
+
+            let (w_decay_vec, w_iclr, w_xi, w_alpha_rk) = match &config.mode {
+                AttentionMode::RWKV7 => (
+                    init_weights(&mut rng, d_key * d_model),
+                    init_weights(&mut rng, d_key * d_model),
+                    init_weights(&mut rng, d_key),
+                    init_weights(&mut rng, d_key),
+                ),
+                _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+            };
+
             heads.push(AttentionHead {
                 state,
                 w_key,
@@ -144,6 +182,13 @@ impl MultiHeadAttention {
                 w_decay,
                 w_alpha,
                 w_beta,
+                w_comp_keys,
+                w_comp_values,
+                w_comp_betas,
+                w_decay_vec,
+                w_iclr,
+                w_xi,
+                w_alpha_rk,
             });
         }
 
@@ -255,6 +300,90 @@ impl AttentionLayer for MultiHeadAttention {
                 AttentionMode::MLSTM => {
                     let (forget, input_gate) = lstm_gates(&head.w_gate, &head.w_gate2, input);
                     update_rules::mlstm_update(&mut head.state, &k, &v, forget, input_gate);
+                    head.state.query(&q)
+                }
+                AttentionMode::DeltaProduct { n_compositions } => {
+                    let n_h = *n_compositions;
+                    let gate = sigmoid_gate(&head.w_gate, input);
+
+                    // Project n_h keys, values, betas
+                    let mut comp_keys_storage: Vec<Vec<f64>> = Vec::with_capacity(n_h);
+                    let mut comp_values_storage: Vec<Vec<f64>> = Vec::with_capacity(n_h);
+                    let mut comp_betas: Vec<f64> = Vec::with_capacity(n_h);
+
+                    for j in 0..n_h {
+                        // Key projection for composition j
+                        let mut kj = vec![0.0; d_key];
+                        let k_offset = j * d_key * d_model;
+                        mat_vec(
+                            &head.w_comp_keys[k_offset..k_offset + d_key * d_model],
+                            input,
+                            d_key,
+                            d_model,
+                            &mut kj,
+                        );
+                        // L2-normalize the key
+                        let kj_norm = l2_normalize(&kj);
+                        comp_keys_storage.push(kj_norm);
+
+                        // Value projection for composition j
+                        let mut vj = vec![0.0; d_value];
+                        let v_offset = j * d_value * d_model;
+                        mat_vec(
+                            &head.w_comp_values[v_offset..v_offset + d_value * d_model],
+                            input,
+                            d_value,
+                            d_model,
+                            &mut vj,
+                        );
+                        comp_values_storage.push(vj);
+
+                        // Beta for composition j (extended sigmoid -> [0, 2])
+                        let b_offset = j * d_model;
+                        let beta = extended_sigmoid_gate(
+                            &head.w_comp_betas[b_offset..b_offset + d_model],
+                            input,
+                        );
+                        comp_betas.push(beta);
+                    }
+
+                    // Build slice references for update function
+                    let comp_keys_refs: Vec<&[f64]> =
+                        comp_keys_storage.iter().map(|k| k.as_slice()).collect();
+                    let comp_values_refs: Vec<&[f64]> =
+                        comp_values_storage.iter().map(|v| v.as_slice()).collect();
+
+                    update_rules::delta_product_update(
+                        &mut head.state,
+                        &comp_keys_refs,
+                        &comp_values_refs,
+                        &comp_betas,
+                        gate,
+                    );
+                    head.state.query(&q)
+                }
+                AttentionMode::RWKV7 => {
+                    // Per-dimension vector decay
+                    let w = vector_decay(&head.w_decay_vec, input, d_key);
+
+                    // Removal key: k * xi, then L2-normalize
+                    let mut kappa = vec![0.0; d_key];
+                    for i in 0..d_key {
+                        kappa[i] = k[i] * head.w_xi[i];
+                    }
+                    let kappa_hat = l2_normalize(&kappa);
+
+                    // ICLR vector
+                    let a = vector_sigmoid_gate(&head.w_iclr, input, d_key);
+
+                    // Replacement key: k * lerp(1, a, alpha)
+                    let mut k_tilde = vec![0.0; d_key];
+                    for i in 0..d_key {
+                        let mix = 1.0 + head.w_alpha_rk[i] * (a[i] - 1.0);
+                        k_tilde[i] = k[i] * mix;
+                    }
+
+                    update_rules::rwkv7_update(&mut head.state, &w, &kappa_hat, &a, &k_tilde, &v);
                     head.state.query(&q)
                 }
             };
@@ -593,6 +722,94 @@ mod tests {
         assert!(
             n.iter().all(|&x| x == 0.0),
             "normalizing zero vector should return zero vector"
+        );
+    }
+
+    #[test]
+    fn delta_product_output_dimension() {
+        let config = make_config(AttentionMode::DeltaProduct { n_compositions: 3 });
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+        let output = attn.forward(&input);
+        assert_eq!(
+            output.len(),
+            8,
+            "DeltaProduct output should match d_model=8"
+        );
+    }
+
+    #[test]
+    fn delta_product_state_length() {
+        let config = make_config(AttentionMode::DeltaProduct { n_compositions: 2 });
+        let attn = MultiHeadAttention::new(config);
+        let expected = 2 * 4 * 4; // n_heads * d_key * d_value
+        assert_eq!(
+            attn.state().len(),
+            expected,
+            "DeltaProduct state should be n_heads*d_key*d_value"
+        );
+    }
+
+    #[test]
+    fn delta_product_deterministic() {
+        let input = make_input(8);
+        let config1 = make_config(AttentionMode::DeltaProduct { n_compositions: 2 });
+        let mut a1 = MultiHeadAttention::new(config1);
+        let o1 = a1.forward(&input);
+        let config2 = make_config(AttentionMode::DeltaProduct { n_compositions: 2 });
+        let mut a2 = MultiHeadAttention::new(config2);
+        let o2 = a2.forward(&input);
+        for i in 0..o1.len() {
+            assert!(
+                (o1[i] - o2[i]).abs() < 1e-12,
+                "same seed should give same output at {}",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn rwkv7_output_dimension() {
+        let config = make_config(AttentionMode::RWKV7);
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+        let output = attn.forward(&input);
+        assert_eq!(output.len(), 8, "RWKV7 output should match d_model=8");
+    }
+
+    #[test]
+    fn rwkv7_state_length() {
+        let config = make_config(AttentionMode::RWKV7);
+        let attn = MultiHeadAttention::new(config);
+        let expected = 2 * 4 * 4;
+        assert_eq!(
+            attn.state().len(),
+            expected,
+            "RWKV7 state should be n_heads*d_key*d_value"
+        );
+    }
+
+    #[test]
+    fn rwkv7_forward_changes_state() {
+        let config = make_config(AttentionMode::RWKV7);
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+        attn.forward(&input);
+        let state = attn.state();
+        let any_nonzero = state.iter().any(|&x| x.abs() > 1e-15);
+        assert!(any_nonzero, "after forward, RWKV7 state should be non-zero");
+    }
+
+    #[test]
+    fn rwkv7_reset_clears() {
+        let config = make_config(AttentionMode::RWKV7);
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+        attn.forward(&input);
+        attn.reset();
+        assert!(
+            attn.state().iter().all(|&x| x == 0.0),
+            "after reset all state should be zero"
         );
     }
 }

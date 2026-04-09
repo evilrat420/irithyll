@@ -138,6 +138,30 @@ impl AttentionState {
         }
     }
 
+    /// Multiply each row `i` of a matrix state by `weights[i]`.
+    ///
+    /// This implements per-dimension decay: `S[i][:] *= weights[i]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the state is a Vector, or if `weights.len() != rows`.
+    #[allow(clippy::needless_range_loop)]
+    pub fn scale_per_row(&mut self, weights: &[f64]) {
+        match self {
+            Self::Matrix { data, rows, cols } => {
+                debug_assert_eq!(weights.len(), *rows, "weights.len() must equal rows");
+                for i in 0..*rows {
+                    let row_start = i * *cols;
+                    let wi = weights[i];
+                    for j in 0..*cols {
+                        data[row_start + j] *= wi;
+                    }
+                }
+            }
+            Self::Vector(_) => panic!("scale_per_row called on Vector state"),
+        }
+    }
+
     /// Compute `S^T * q` for matrix state, returning a vector of length `cols`.
     ///
     /// This is the standard attention readout: `o = S^T * q` where `q` has
@@ -315,6 +339,34 @@ mod tests {
         assert_eq!(s.len(), 4, "flat slice should have 4 elements");
         assert!((s[0] - 1.0).abs() < 1e-12, "s[0] should be 1.0");
         assert!((s[3] - 4.0).abs() < 1e-12, "s[3] should be 4.0");
+    }
+
+    #[test]
+    fn scale_per_row_applies_different_factors() {
+        let mut state = AttentionState::new_matrix(2, 3);
+        state.set_matrix(0, 0, 2.0);
+        state.set_matrix(0, 1, 4.0);
+        state.set_matrix(0, 2, 6.0);
+        state.set_matrix(1, 0, 3.0);
+        state.set_matrix(1, 1, 5.0);
+        state.set_matrix(1, 2, 7.0);
+        state.scale_per_row(&[0.5, 2.0]);
+        assert!(
+            (state.get_matrix(0, 0) - 1.0).abs() < 1e-12,
+            "row 0 scaled by 0.5: 2*0.5=1"
+        );
+        assert!(
+            (state.get_matrix(0, 2) - 3.0).abs() < 1e-12,
+            "row 0 scaled by 0.5: 6*0.5=3"
+        );
+        assert!(
+            (state.get_matrix(1, 0) - 6.0).abs() < 1e-12,
+            "row 1 scaled by 2: 3*2=6"
+        );
+        assert!(
+            (state.get_matrix(1, 2) - 14.0).abs() < 1e-12,
+            "row 1 scaled by 2: 7*2=14"
+        );
     }
 
     #[test]

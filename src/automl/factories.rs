@@ -526,6 +526,10 @@ pub enum Algorithm {
     Ttt,
     /// Streaming Mamba-3 (MIMO groups, complex states, trapezoidal discretization).
     Mamba3,
+    /// DeltaProduct attention (product of Householder delta rules).
+    DeltaProduct,
+    /// RWKV-7 attention (vector-gated delta rule with DPLR transitions).
+    Rwkv7,
 }
 
 /// Unified model factory for AutoML.
@@ -846,6 +850,102 @@ impl Factory {
         }
     }
 
+    /// Create a factory for DeltaProduct attention (product of Householder delta rules).
+    ///
+    /// `d_model` is the input feature dimension, which must be divisible
+    /// by all candidate `n_heads` values (1, 2, 4, 8).
+    ///
+    /// # Config Space (4 params)
+    ///
+    /// | Index | Name | Type | Range | Scale |
+    /// |-------|------|------|-------|-------|
+    /// | 0 | `n_heads` | Int | [1, 8] | -- |
+    /// | 1 | `n_compositions` | Int | [1, 4] | -- |
+    /// | 2 | `forgetting_factor` | Float | [0.95, 0.9999] | log |
+    /// | 3 | `warmup` | Int | [5, 50] | -- |
+    pub fn delta_product(d_model: usize) -> Self {
+        let space = ConfigSpace::new()
+            .push(HyperParam::Int {
+                name: "n_heads",
+                low: 1,
+                high: 8,
+            })
+            .push(HyperParam::Int {
+                name: "n_compositions",
+                low: 1,
+                high: 4,
+            })
+            .push(HyperParam::Float {
+                name: "forgetting_factor",
+                low: 0.95,
+                high: 0.9999,
+                log_scale: true,
+            })
+            .push(HyperParam::Int {
+                name: "warmup",
+                low: 5,
+                high: 50,
+            });
+
+        Self {
+            algorithm: Algorithm::DeltaProduct,
+            n_features: d_model,
+            space,
+            warmup: 10,
+            complexity: 8000,
+            seed: 42,
+            accuracy_based_pruning: false,
+            proactive_prune_interval: None,
+            prune_half_life: None,
+            projection: None,
+        }
+    }
+
+    /// Create a factory for RWKV-7 attention (vector-gated delta rule with DPLR).
+    ///
+    /// `d_model` is the input feature dimension, which must be divisible
+    /// by all candidate `n_heads` values (1, 2, 4, 8).
+    ///
+    /// # Config Space (3 params)
+    ///
+    /// | Index | Name | Type | Range | Scale |
+    /// |-------|------|------|-------|-------|
+    /// | 0 | `n_heads` | Int | [1, 8] | -- |
+    /// | 1 | `forgetting_factor` | Float | [0.95, 0.9999] | log |
+    /// | 2 | `warmup` | Int | [5, 50] | -- |
+    pub fn rwkv7(d_model: usize) -> Self {
+        let space = ConfigSpace::new()
+            .push(HyperParam::Int {
+                name: "n_heads",
+                low: 1,
+                high: 8,
+            })
+            .push(HyperParam::Float {
+                name: "forgetting_factor",
+                low: 0.95,
+                high: 0.9999,
+                log_scale: true,
+            })
+            .push(HyperParam::Int {
+                name: "warmup",
+                low: 5,
+                high: 50,
+            });
+
+        Self {
+            algorithm: Algorithm::Rwkv7,
+            n_features: d_model,
+            space,
+            warmup: 10,
+            complexity: 5000,
+            seed: 42,
+            accuracy_based_pruning: false,
+            proactive_prune_interval: None,
+            prune_half_life: None,
+            projection: None,
+        }
+    }
+
     /// Create a factory for spiking neural networks (e-prop learning).
     ///
     /// Input dimension is auto-detected from the first training sample.
@@ -1142,6 +1242,22 @@ impl Factory {
         Factory::attention(rank).with_projection(d_in, rank, 0.999)
     }
 
+    /// Create a projected DeltaProduct factory.
+    ///
+    /// Equivalent to `Factory::delta_product(rank).with_projection(d_in, rank, 0.999)`.
+    /// The inner DeltaProduct sees `rank`-dimensional projected features.
+    pub fn projected_delta_product(d_in: usize, rank: usize) -> Self {
+        Factory::delta_product(rank).with_projection(d_in, rank, 0.999)
+    }
+
+    /// Create a projected RWKV-7 factory.
+    ///
+    /// Equivalent to `Factory::rwkv7(rank).with_projection(d_in, rank, 0.999)`.
+    /// The inner RWKV-7 sees `rank`-dimensional projected features.
+    pub fn projected_rwkv7(d_in: usize, rank: usize) -> Self {
+        Factory::rwkv7(rank).with_projection(d_in, rank, 0.999)
+    }
+
     /// Create a projected ESN factory.
     ///
     /// Equivalent to `Factory::esn().with_projection(d_in, rank, 0.999)`.
@@ -1176,6 +1292,8 @@ impl ModelFactory for Factory {
                 Algorithm::SpikeNet => "Projected<SpikeNet>",
                 Algorithm::Kan => "Projected<KAN>",
                 Algorithm::Ttt => "Projected<TTT>",
+                Algorithm::DeltaProduct => "Projected<DeltaProduct>",
+                Algorithm::Rwkv7 => "Projected<RWKV7>",
             }
         } else {
             match self.algorithm {
@@ -1188,6 +1306,8 @@ impl ModelFactory for Factory {
                 Algorithm::SpikeNet => "SpikeNet",
                 Algorithm::Kan => "KAN",
                 Algorithm::Ttt => "TTT",
+                Algorithm::DeltaProduct => "DeltaProduct",
+                Algorithm::Rwkv7 => "RWKV7",
             }
         }
     }
@@ -1394,6 +1514,39 @@ impl ModelFactory for Factory {
                     .expect("Factory::create(Ttt): invalid config");
 
                 Box::new(crate::ttt::StreamingTTT::new(ttt_config))
+            }
+            Algorithm::DeltaProduct => {
+                let n_heads = (config.get(0) as usize).max(1);
+                let n_compositions = (config.get(1) as usize).max(1);
+                let forgetting_factor = config.get(2);
+                let warmup = config.get(3) as usize;
+
+                let attn_config = StreamingAttentionConfig::builder()
+                    .d_model(self.n_features)
+                    .n_heads(n_heads)
+                    .mode(AttentionMode::DeltaProduct { n_compositions })
+                    .forgetting_factor(forgetting_factor)
+                    .warmup(warmup)
+                    .build()
+                    .expect("Factory::create(DeltaProduct): invalid config from search space");
+
+                Box::new(StreamingAttentionModel::new(attn_config))
+            }
+            Algorithm::Rwkv7 => {
+                let n_heads = (config.get(0) as usize).max(1);
+                let forgetting_factor = config.get(1);
+                let warmup = config.get(2) as usize;
+
+                let attn_config = StreamingAttentionConfig::builder()
+                    .d_model(self.n_features)
+                    .n_heads(n_heads)
+                    .mode(AttentionMode::RWKV7)
+                    .forgetting_factor(forgetting_factor)
+                    .warmup(warmup)
+                    .build()
+                    .expect("Factory::create(Rwkv7): invalid config from search space");
+
+                Box::new(StreamingAttentionModel::new(attn_config))
             }
         };
 
@@ -1910,6 +2063,16 @@ mod tests {
             5000,
             "Mamba3 complexity should be 5000"
         );
+        assert_eq!(
+            Factory::delta_product(8).complexity_hint(),
+            8000,
+            "DeltaProduct complexity should be 8000"
+        );
+        assert_eq!(
+            Factory::rwkv7(8).complexity_hint(),
+            5000,
+            "RWKV7 complexity should be 5000"
+        );
     }
 
     /// Each algorithm returns the expected name.
@@ -1936,6 +2099,12 @@ mod tests {
         );
         assert_eq!(Factory::kan(3).name(), "KAN", "KAN name mismatch");
         assert_eq!(Factory::ttt(3).name(), "TTT", "TTT name mismatch");
+        assert_eq!(
+            Factory::delta_product(8).name(),
+            "DeltaProduct",
+            "DeltaProduct name mismatch"
+        );
+        assert_eq!(Factory::rwkv7(8).name(), "RWKV7", "RWKV7 name mismatch");
     }
 
     /// Factory works as a ModelFactory inside auto_tune().
@@ -2390,6 +2559,219 @@ mod tests {
         assert!(
             pred.is_finite(),
             "projected Mamba3 prediction should be finite, got {pred}"
+        );
+    }
+
+    // ===================================================================
+    // DeltaProduct factory tests
+    // ===================================================================
+
+    /// Factory::delta_product config space has 4 parameters.
+    #[test]
+    fn delta_product_factory_config_space() {
+        let factory = Factory::delta_product(8);
+        let space = factory.config_space();
+        assert_eq!(
+            space.n_params(),
+            4,
+            "DeltaProduct should have 4 hyperparameters, got {}",
+            space.n_params()
+        );
+        assert_eq!(
+            space.params()[0].name(),
+            "n_heads",
+            "first param should be n_heads"
+        );
+        assert_eq!(
+            space.params()[1].name(),
+            "n_compositions",
+            "second param should be n_compositions"
+        );
+        assert_eq!(
+            space.params()[2].name(),
+            "forgetting_factor",
+            "third param should be forgetting_factor"
+        );
+        assert_eq!(
+            space.params()[3].name(),
+            "warmup",
+            "fourth param should be warmup"
+        );
+    }
+
+    /// Factory::delta_product has correct complexity, warmup, and name.
+    #[test]
+    fn delta_product_factory_defaults() {
+        let factory = Factory::delta_product(8);
+        assert_eq!(
+            factory.complexity_hint(),
+            8000,
+            "DeltaProduct complexity should be 8000"
+        );
+        assert_eq!(
+            factory.warmup_hint(),
+            10,
+            "DeltaProduct warmup should be 10"
+        );
+        assert_eq!(
+            factory.name(),
+            "DeltaProduct",
+            "DeltaProduct name should be 'DeltaProduct'"
+        );
+        assert_eq!(
+            factory.algorithm(),
+            Algorithm::DeltaProduct,
+            "algorithm should be DeltaProduct"
+        );
+    }
+
+    /// Factory::delta_product creates model that trains and predicts finite values.
+    #[test]
+    fn unified_factory_delta_product() {
+        let factory = Factory::delta_product(8);
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..50 {
+            let x: Vec<f64> = (0..8)
+                .map(|k| (i as f64 * 0.1 + k as f64 * 0.3).sin())
+                .collect();
+            let y = x[0] * 2.0 + x[1];
+            model.train(&x, y);
+        }
+        let x: Vec<f64> = (0..8).map(|k| (5.0 + k as f64 * 0.3).sin()).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "unified DeltaProduct prediction should be finite, got {pred}"
+        );
+    }
+
+    /// Factory::projected_delta_product creates a projected model.
+    #[test]
+    fn projected_delta_product_factory_create_and_predict() {
+        let factory = Factory::projected_delta_product(8, 4);
+        assert_eq!(
+            factory.name(),
+            "Projected<DeltaProduct>",
+            "projected delta_product factory name should be Projected<DeltaProduct>"
+        );
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..100 {
+            let x: Vec<f64> = (0..8).map(|j| (i * j) as f64 * 0.01).collect();
+            model.train(&x, i as f64 * 0.1);
+        }
+        let x: Vec<f64> = (0..8).map(|j| j as f64 * 0.05).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "projected DeltaProduct prediction should be finite, got {pred}"
+        );
+    }
+
+    // ===================================================================
+    // RWKV7 factory tests
+    // ===================================================================
+
+    /// Factory::rwkv7 config space has 3 parameters.
+    #[test]
+    fn rwkv7_factory_config_space() {
+        let factory = Factory::rwkv7(8);
+        let space = factory.config_space();
+        assert_eq!(
+            space.n_params(),
+            3,
+            "RWKV7 should have 3 hyperparameters, got {}",
+            space.n_params()
+        );
+        assert_eq!(
+            space.params()[0].name(),
+            "n_heads",
+            "first param should be n_heads"
+        );
+        assert_eq!(
+            space.params()[1].name(),
+            "forgetting_factor",
+            "second param should be forgetting_factor"
+        );
+        assert_eq!(
+            space.params()[2].name(),
+            "warmup",
+            "third param should be warmup"
+        );
+    }
+
+    /// Factory::rwkv7 has correct complexity, warmup, and name.
+    #[test]
+    fn rwkv7_factory_defaults() {
+        let factory = Factory::rwkv7(8);
+        assert_eq!(
+            factory.complexity_hint(),
+            5000,
+            "RWKV7 complexity should be 5000"
+        );
+        assert_eq!(factory.warmup_hint(), 10, "RWKV7 warmup should be 10");
+        assert_eq!(factory.name(), "RWKV7", "RWKV7 name should be 'RWKV7'");
+        assert_eq!(
+            factory.algorithm(),
+            Algorithm::Rwkv7,
+            "algorithm should be Rwkv7"
+        );
+    }
+
+    /// Factory::rwkv7 creates model that trains and predicts finite values.
+    #[test]
+    fn unified_factory_rwkv7() {
+        let factory = Factory::rwkv7(8);
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..50 {
+            let x: Vec<f64> = (0..8)
+                .map(|k| (i as f64 * 0.1 + k as f64 * 0.3).sin())
+                .collect();
+            let y = x[0] * 2.0 + x[1];
+            model.train(&x, y);
+        }
+        let x: Vec<f64> = (0..8).map(|k| (5.0 + k as f64 * 0.3).sin()).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "unified RWKV7 prediction should be finite, got {pred}"
+        );
+    }
+
+    /// Factory::projected_rwkv7 creates a projected model.
+    #[test]
+    fn projected_rwkv7_factory_create_and_predict() {
+        let factory = Factory::projected_rwkv7(8, 4);
+        assert_eq!(
+            factory.name(),
+            "Projected<RWKV7>",
+            "projected rwkv7 factory name should be Projected<RWKV7>"
+        );
+        let space = factory.config_space();
+        let mut sampler = ConfigSampler::new(space, 42);
+        let config = sampler.random();
+        let mut model = factory.create(&config);
+
+        for i in 0..100 {
+            let x: Vec<f64> = (0..8).map(|j| (i * j) as f64 * 0.01).collect();
+            model.train(&x, i as f64 * 0.1);
+        }
+        let x: Vec<f64> = (0..8).map(|j| j as f64 * 0.05).collect();
+        let pred = model.predict(&x);
+        assert!(
+            pred.is_finite(),
+            "projected RWKV7 prediction should be finite, got {pred}"
         );
     }
 }

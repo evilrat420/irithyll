@@ -18,6 +18,8 @@
 /// - **GatedDeltaNet** -- GLA + delta rule combined (Yang et al., 2024, NVIDIA)
 /// - **RWKV** -- Exponential decay with dynamic w (Peng et al., 2024)
 /// - **MLSTM** -- xLSTM matrix memory with forget+input gates (Beck et al., 2024)
+/// - **DeltaProduct** -- Product of n_h Householder delta rules (Siems et al., NeurIPS 2025)
+/// - **RWKV7** -- Vector-gated delta rule with DPLR transitions (Peng et al., 2025)
 #[derive(Clone, Debug)]
 pub enum AttentionMode {
     /// Fixed exponential decay: `S = gamma * S + k * v^T`.
@@ -47,6 +49,22 @@ pub enum AttentionMode {
     },
     /// xLSTM matrix memory with separate forget and input gates.
     MLSTM,
+    /// Product of n_h Householder delta rules (Siems et al., NeurIPS 2025).
+    ///
+    /// Applies `n_compositions` sequential delta rule steps per token, each with
+    /// its own key, value, and beta. The product of generalized Householder
+    /// transformations gives a spectrally bounded (norm ≤ 1) transition matrix.
+    /// Beta range [0, 2] enables full reflections. Includes a scalar forget gate.
+    DeltaProduct {
+        /// Number of Householder compositions per token (typically 2-4).
+        n_compositions: usize,
+    },
+    /// RWKV-7 vector-gated delta rule with DPLR transitions (Peng et al., 2025).
+    ///
+    /// Uses per-dimension vector decay, vector in-context learning rate (ICLR),
+    /// and decoupled removal/replacement keys. The transition matrix is
+    /// diagonal-plus-low-rank (DPLR), enabling state tracking beyond TC^0.
+    RWKV7,
 }
 
 /// Full configuration for a multi-head streaming attention layer.
@@ -141,8 +159,10 @@ mod tests {
             AttentionMode::GatedDeltaNet { beta_scale: 1.0 },
             AttentionMode::RWKV { initial_decay: 0.5 },
             AttentionMode::MLSTM,
+            AttentionMode::DeltaProduct { n_compositions: 3 },
+            AttentionMode::RWKV7,
         ];
-        assert_eq!(modes.len(), 7, "should have exactly 7 modes");
+        assert_eq!(modes.len(), 9, "should have exactly 9 modes");
     }
 
     #[test]

@@ -208,6 +208,95 @@ pub fn mlstm_update(state: &mut AttentionState, k: &[f64], v: &[f64], forget: f6
     state.add_outer_product(k, &scaled_v);
 }
 
+/// DeltaProduct update (Siems et al., NeurIPS 2025).
+///
+/// Applies `n_compositions` sequential delta rule steps. Each step uses its
+/// own (key, value, beta) triple. The product of generalized Householder
+/// transformations is spectrally bounded.
+///
+/// For each composition j:
+/// `S = (I - beta_j * k_j * k_j^T) * S + beta_j * k_j * v_j^T`
+///
+/// With gating, the state is decayed by `gate` before the first composition.
+///
+/// # Arguments
+///
+/// * `state` -- matrix state of shape `d_k x d_v`
+/// * `keys` -- slice of `n_compositions` key vectors (each L2-normalized, length `d_k`)
+/// * `values` -- slice of `n_compositions` value vectors (each length `d_v`)
+/// * `betas` -- slice of `n_compositions` step sizes, each in [0, 2]
+/// * `gate` -- scalar forget gate in [0, 1] (1.0 for no gating)
+pub fn delta_product_update(
+    state: &mut AttentionState,
+    keys: &[&[f64]],
+    values: &[&[f64]],
+    betas: &[f64],
+    gate: f64,
+) {
+    let n = betas.len();
+    debug_assert_eq!(keys.len(), n, "keys length must match n_compositions");
+    debug_assert_eq!(values.len(), n, "values length must match n_compositions");
+
+    // Apply forget gate to previous state
+    state.scale(gate);
+
+    // Apply n_h sequential delta rule steps
+    for j in 0..n {
+        // pred = S^T * k_j (retrieval at this key)
+        let pred = state.query(keys[j]);
+        // error = beta_j * (v_j - pred)
+        let d_v = values[j].len();
+        let mut error = vec![0.0; d_v];
+        for idx in 0..d_v {
+            error[idx] = betas[j] * (values[j][idx] - pred[idx]);
+        }
+        // S += k_j * error^T
+        state.add_outer_product(keys[j], &error);
+    }
+}
+
+/// RWKV-7 vector-gated delta rule update (Peng et al., 2025).
+///
+/// Combines per-dimension vector decay, delta rule removal at a normalized
+/// key, and additive write at a separate replacement key:
+///
+/// `S = diag(w) * S - (a ⊙ κ̂) ⊗ (S^T κ̂)^T + k̃ ⊗ v^T`
+///
+/// # Arguments
+///
+/// * `state` -- matrix state of shape `d_k x d_v`
+/// * `w` -- per-dimension decay vector (length `d_k`, elements in (0, 1))
+/// * `kappa_hat` -- L2-normalized removal key (length `d_k`)
+/// * `a` -- in-context learning rate vector (length `d_k`, elements in (0, 1))
+/// * `k_tilde` -- replacement key (length `d_k`)
+/// * `v` -- value vector (length `d_v`)
+pub fn rwkv7_update(
+    state: &mut AttentionState,
+    w: &[f64],
+    kappa_hat: &[f64],
+    a: &[f64],
+    k_tilde: &[f64],
+    v: &[f64],
+) {
+    // Step 1: Per-dimension decay
+    state.scale_per_row(w);
+
+    // Step 2: Delta removal -- retrieve at removal key, subtract correction
+    let proj = state.query(kappa_hat); // S^T @ κ̂, length d_v
+
+    // Compute a ⊙ κ̂ (element-wise product)
+    let d_k = kappa_hat.len();
+    let mut a_kappa = vec![0.0; d_k];
+    for i in 0..d_k {
+        a_kappa[i] = -(a[i] * kappa_hat[i]); // negate for subtraction
+    }
+    // S -= (a⊙κ̂) ⊗ proj^T  (using negated a_kappa with add_outer_product)
+    state.add_outer_product(&a_kappa, &proj);
+
+    // Step 3: Additive write -- new association at replacement key
+    state.add_outer_product(k_tilde, v);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +518,186 @@ mod tests {
     }
 
     #[test]
+    fn delta_product_single_step_matches_delta() {
+        // With n_compositions=1 and gate=1.0, should match basic delta update
+        let mut state1 = AttentionState::new_matrix(2, 2);
+        let mut state2 = AttentionState::new_matrix(2, 2);
+        let k = [0.6, 0.8]; // unit norm
+        let v = [5.0, 3.0];
+
+        delta_update(&mut state1, &k, &v);
+        // DeltaProduct with beta=1.0 and gate=1.0 should give same result
+        delta_product_update(&mut state2, &[&k[..]], &[&v[..]], &[1.0], 1.0);
+
+        let s1 = state1.as_slice();
+        let s2 = state2.as_slice();
+        for i in 0..s1.len() {
+            assert!(
+                (s1[i] - s2[i]).abs() < 1e-12,
+                "single-step DeltaProduct should match DeltaNet at {}: {} vs {}",
+                i,
+                s1[i],
+                s2[i]
+            );
+        }
+    }
+
+    #[test]
+    fn delta_product_multi_step_changes_state() {
+        let mut state = AttentionState::new_matrix(2, 2);
+        let k1 = [1.0, 0.0];
+        let k2 = [0.0, 1.0];
+        let v1 = [3.0, 4.0];
+        let v2 = [5.0, 6.0];
+        delta_product_update(
+            &mut state,
+            &[&k1[..], &k2[..]],
+            &[&v1[..], &v2[..]],
+            &[1.0, 1.0],
+            1.0,
+        );
+        let s = state.as_slice();
+        let sum: f64 = s.iter().map(|x| math::abs(*x)).sum();
+        assert!(sum > 0.0, "multi-step should produce non-zero state");
+    }
+
+    #[test]
+    fn delta_product_gate_decays_state() {
+        let mut state = AttentionState::new_matrix(2, 2);
+        state.set_matrix(0, 0, 10.0);
+        state.set_matrix(1, 1, 20.0);
+        let k = [1.0, 0.0];
+        let v = [0.0, 0.0];
+        // gate=0.5 should halve existing state, then delta correction is zero
+        delta_product_update(&mut state, &[&k[..]], &[&v[..]], &[1.0], 0.5);
+        // After gate: S[0][0]=5, S[1][1]=10
+        // After delta with k=[1,0], v=[0,0]: retrieves pred=[5,0], error=[-5,0]
+        // S[0][0] += 1*(-5) = 0, S[0][1] += 1*0 = 0
+        assert!(
+            state.get_matrix(0, 0).abs() < 1e-12,
+            "gated delta should correct to target value 0"
+        );
+    }
+
+    #[test]
+    fn delta_product_beta_two_reflects() {
+        // With beta=2 and unit key, the Householder should be a full reflection
+        let mut state = AttentionState::new_matrix(2, 2);
+        state.set_matrix(0, 0, 10.0);
+        let k = [1.0, 0.0];
+        let v = [0.0, 0.0];
+        delta_product_update(&mut state, &[&k[..]], &[&v[..]], &[2.0], 1.0);
+        // pred = S^T k = [10, 0], error = 2*(v - pred) = 2*([0,0]-[10,0]) = [-20, 0]
+        // S[0][0] += 1 * (-20) = 10 - 20 = -10 (reflection!)
+        assert!(
+            (state.get_matrix(0, 0) - (-10.0)).abs() < 1e-12,
+            "beta=2 should reflect: got {}",
+            state.get_matrix(0, 0)
+        );
+    }
+
+    #[test]
+    fn rwkv7_update_from_zero() {
+        let mut state = AttentionState::new_matrix(2, 2);
+        let w = [0.9, 0.8];
+        let kappa_hat = [1.0, 0.0]; // unit vector
+        let a = [0.5, 0.5];
+        let k_tilde = [0.6, 0.8];
+        let v = [3.0, 7.0];
+        rwkv7_update(&mut state, &w, &kappa_hat, &a, &k_tilde, &v);
+        // From zero state: decay does nothing, removal does nothing, only additive write
+        // S += k_tilde * v^T = [[0.6*3, 0.6*7], [0.8*3, 0.8*7]] = [[1.8, 4.2], [2.4, 5.6]]
+        assert!(
+            (state.get_matrix(0, 0) - 1.8).abs() < 1e-12,
+            "from zero, S[0][0] = 0.6*3 = 1.8, got {}",
+            state.get_matrix(0, 0)
+        );
+        assert!(
+            (state.get_matrix(1, 1) - 5.6).abs() < 1e-12,
+            "from zero, S[1][1] = 0.8*7 = 5.6, got {}",
+            state.get_matrix(1, 1)
+        );
+    }
+
+    #[test]
+    fn rwkv7_decay_per_dimension() {
+        let mut state = AttentionState::new_matrix(2, 2);
+        state.set_matrix(0, 0, 10.0);
+        state.set_matrix(1, 1, 10.0);
+        let w = [0.5, 0.9]; // different decay per row
+        let kappa_hat = [0.0, 0.0]; // zero removal key => no delta removal
+        let a = [0.0, 0.0]; // zero ICLR => no removal
+        let k_tilde = [0.0, 0.0]; // no write
+        let v = [0.0, 0.0];
+        rwkv7_update(&mut state, &w, &kappa_hat, &a, &k_tilde, &v);
+        assert!(
+            (state.get_matrix(0, 0) - 5.0).abs() < 1e-12,
+            "row 0 decayed by 0.5: 10*0.5=5, got {}",
+            state.get_matrix(0, 0)
+        );
+        assert!(
+            (state.get_matrix(1, 1) - 9.0).abs() < 1e-12,
+            "row 1 decayed by 0.9: 10*0.9=9, got {}",
+            state.get_matrix(1, 1)
+        );
+    }
+
+    #[test]
+    fn rwkv7_delta_removal() {
+        // Write a value, then remove it via delta rule
+        let mut state = AttentionState::new_matrix(2, 2);
+        // Write: k=[1,0], v=[5,3]
+        state.set_matrix(0, 0, 5.0);
+        state.set_matrix(0, 1, 3.0);
+        // Now remove at k=[1,0] with full ICLR
+        let w = [1.0, 1.0]; // no decay
+        let kappa_hat = [1.0, 0.0]; // remove at first key dim
+        let a = [1.0, 1.0]; // full removal rate
+        let k_tilde = [0.0, 0.0]; // no replacement
+        let v = [0.0, 0.0];
+        rwkv7_update(&mut state, &w, &kappa_hat, &a, &k_tilde, &v);
+        // proj = S^T @ [1,0] = [5, 3]
+        // correction: a_kappa = [1*1, 1*0] = [1, 0]
+        // S -= [1,0] outer [5,3] = [[5,3],[0,0]]
+        // Result: S[0][0] = 5-5=0, S[0][1] = 3-3=0
+        assert!(
+            state.get_matrix(0, 0).abs() < 1e-12,
+            "full removal should clear row 0, got {}",
+            state.get_matrix(0, 0)
+        );
+        assert!(
+            state.get_matrix(0, 1).abs() < 1e-12,
+            "full removal should clear row 0, got {}",
+            state.get_matrix(0, 1)
+        );
+    }
+
+    #[test]
+    fn rwkv7_combined_remove_and_write() {
+        let mut state = AttentionState::new_matrix(2, 2);
+        // Initial: association at [1,0] -> [10, 20]
+        state.set_matrix(0, 0, 10.0);
+        state.set_matrix(0, 1, 20.0);
+
+        let w = [1.0, 1.0]; // no decay
+        let kappa_hat = [1.0, 0.0]; // remove at [1,0]
+        let a = [1.0, 1.0]; // full ICLR
+        let k_tilde = [0.0, 1.0]; // write at [0,1] instead
+        let v = [5.0, 3.0];
+        rwkv7_update(&mut state, &w, &kappa_hat, &a, &k_tilde, &v);
+        // After removal: S[0][:] cleared
+        // After write: S[1][0] += 5, S[1][1] += 3
+        assert!(
+            state.get_matrix(0, 0).abs() < 1e-12,
+            "removed association should be cleared"
+        );
+        assert!(
+            (state.get_matrix(1, 0) - 5.0).abs() < 1e-12,
+            "new association written at [0,1] -> [5,3]"
+        );
+    }
+
+    #[test]
     fn all_updates_change_state_from_zero() {
         // Verify every update rule produces non-zero state from zero init
         // (with non-zero inputs)
@@ -467,6 +736,16 @@ mod tests {
         mlstm_update(&mut s6, &k, &v, 0.9, 0.8);
         let sum6: f64 = s6.as_slice().iter().map(|x| math::abs(*x)).sum();
         assert!(sum6 > 0.0, "mlstm_update should change state");
+
+        let mut s7 = AttentionState::new_matrix(2, 2);
+        delta_product_update(&mut s7, &[&k[..]], &[&v[..]], &[1.0], 1.0);
+        let sum7: f64 = s7.as_slice().iter().map(|x| math::abs(*x)).sum();
+        assert!(sum7 > 0.0, "delta_product_update should change state");
+
+        let mut s8 = AttentionState::new_matrix(2, 2);
+        rwkv7_update(&mut s8, &[0.9, 0.8], &k, &[0.5, 0.5], &k, &v);
+        let sum8: f64 = s8.as_slice().iter().map(|x| math::abs(*x)).sum();
+        assert!(sum8 > 0.0, "rwkv7_update should change state");
     }
 
     #[test]
