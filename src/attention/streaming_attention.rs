@@ -26,6 +26,7 @@
 use irithyll_core::attention::{
     AttentionConfig, AttentionLayer, AttentionMode, MultiHeadAttention,
 };
+use irithyll_core::continual::{ContinualStrategy, NeuronRegeneration};
 
 use crate::attention::attention_config::StreamingAttentionConfig;
 use crate::learner::StreamingLearner;
@@ -84,6 +85,10 @@ pub struct StreamingAttentionModel {
     alignment_ewma: f64,
     /// EWMA of maximum Frobenius squared norm of attention state for utilization ratio.
     max_frob_sq_ewma: f64,
+    /// Optional plasticity guard for maintaining learning capacity.
+    plasticity_guard: Option<NeuronRegeneration>,
+    /// Snapshot of per-head output energy from previous step.
+    prev_head_energy: Vec<f64>,
 }
 
 impl StreamingAttentionModel {
@@ -105,6 +110,23 @@ impl StreamingAttentionModel {
         let readout = RecursiveLeastSquares::with_delta(config.forgetting_factor, config.delta);
         let last_features = vec![0.0; output_dim];
 
+        // Create plasticity guard if enabled.
+        // Tracks output_dim units (group_size=1), regenerating the bottom 1%
+        // every 500 steps with utility EWMA alpha=0.99.
+        let plasticity_guard = if config.plasticity {
+            Some(NeuronRegeneration::new(
+                output_dim,
+                1,
+                0.01,
+                500,
+                0.99,
+                config.seed.wrapping_add(0x_DEAD_CAFE),
+            ))
+        } else {
+            None
+        };
+        let prev_head_energy = vec![0.0; output_dim];
+
         Self {
             config,
             attention,
@@ -116,6 +138,8 @@ impl StreamingAttentionModel {
             prev_prev_change: 0.0,
             alignment_ewma: 0.0,
             max_frob_sq_ewma: 0.0,
+            plasticity_guard,
+            prev_head_energy,
         }
     }
 
@@ -201,7 +225,22 @@ impl StreamingLearner for StreamingAttentionModel {
         // 3. Train RLS readout on attention output
         self.readout.train_one(&attn_output, target, weight);
 
-        // 4. Cache the attention output for predict()
+        // 4. Plasticity maintenance: track per-output-unit energy and
+        //    surgically reinitialize dead heads instead of resetting the whole layer.
+        if let Some(ref mut guard) = self.plasticity_guard {
+            let mut output_energy: Vec<f64> = attn_output.iter().map(|x| x.abs()).collect();
+            guard.pre_update(&self.prev_head_energy, &mut output_energy);
+            guard.post_update(&self.prev_head_energy);
+            let mut reinit_rng = self.config.seed.wrapping_add(self.n_samples);
+            for h in 0..guard.n_groups() {
+                if guard.was_regenerated(h) {
+                    self.attention.reinitialize_head(h, &mut reinit_rng);
+                }
+            }
+            self.prev_head_energy = output_energy;
+        }
+
+        // 5. Cache the attention output for predict()
         self.last_features = attn_output;
 
         self.n_samples += 1;
@@ -245,6 +284,10 @@ impl StreamingLearner for StreamingAttentionModel {
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
         self.max_frob_sq_ewma = 0.0;
+        if let Some(ref mut guard) = self.plasticity_guard {
+            guard.reset();
+        }
+        self.prev_head_energy.fill(0.0);
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -517,5 +560,52 @@ mod tests {
         for p in &preds {
             assert!(p.is_finite());
         }
+    }
+
+    #[test]
+    fn attention_plasticity_disabled_by_default() {
+        let config = default_config(4, 2);
+        assert!(!config.plasticity, "plasticity should default to false");
+        let model = StreamingAttentionModel::new(config);
+        assert!(
+            model.plasticity_guard.is_none(),
+            "guard should be None when plasticity is disabled"
+        );
+    }
+
+    #[test]
+    fn attention_plasticity_enabled_creates_guard() {
+        let config = StreamingAttentionConfig::builder()
+            .d_model(4)
+            .n_heads(2)
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let model = StreamingAttentionModel::new(config);
+        assert!(
+            model.plasticity_guard.is_some(),
+            "guard should be Some when plasticity is enabled"
+        );
+    }
+
+    #[test]
+    fn attention_plasticity_train_runs_without_panic() {
+        let config = StreamingAttentionConfig::builder()
+            .d_model(4)
+            .n_heads(2)
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let mut model = StreamingAttentionModel::new(config);
+        for i in 0..600 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin(), 1.0, 0.5];
+            let y = x[0] + 0.5 * x[1];
+            model.train(&x, y);
+        }
+        let pred = model.predict(&[1.0, 0.0, 1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "plasticity-enabled model should produce finite predictions, got {pred}"
+        );
     }
 }

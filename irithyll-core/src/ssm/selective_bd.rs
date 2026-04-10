@@ -49,6 +49,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::math;
+use crate::rng::standard_normal;
 use crate::ssm::init::s4d_inv_real;
 use crate::ssm::projection::{dot, mat_vec, softplus, Xorshift64};
 use crate::ssm::SSMLayer;
@@ -243,6 +244,61 @@ impl SelectiveSSMBD {
     #[inline]
     pub fn n_blocks(&self) -> usize {
         self.n_blocks
+    }
+
+    /// Surgically reinitialize a single block, preserving all other blocks.
+    ///
+    /// Resets block `b`'s hidden state to zero, reinitializes its A matrix
+    /// with S4D diagonal + small random off-diagonal values (then L1 row-
+    /// normalizes), and resets the skip connections for the block's channels
+    /// to 1.0. All other blocks are left untouched.
+    ///
+    /// # Arguments
+    ///
+    /// * `b` — block index to reinitialize (must be < `n_blocks`)
+    /// * `rng` — mutable RNG state for generating fresh weights
+    ///
+    /// # Panics
+    ///
+    /// Panics if `b >= n_blocks`.
+    pub fn reinitialize_block(&mut self, b: usize, rng: &mut u64) {
+        assert!(
+            b < self.n_blocks,
+            "block index {} out of range (n_blocks={})",
+            b,
+            self.n_blocks
+        );
+
+        let m = self.block_size;
+        let off_diag_scale = 0.02;
+
+        // Zero state: h[b * n_state * block_size .. (b+1) * n_state * block_size]
+        let h_start = b * self.n_state * m;
+        let h_end = h_start + self.n_state * m;
+        for h in self.h[h_start..h_end].iter_mut() {
+            *h = 0.0;
+        }
+
+        // Reinit A matrix for block b: S4D diagonal + small random off-diagonal
+        let log_a = s4d_inv_real(m);
+        let a_base = b * m * m;
+        for (i, &la_i) in log_a.iter().enumerate().take(m) {
+            for j in 0..m {
+                if i == j {
+                    self.a_matrices[a_base + i * m + j] = -math::exp(la_i);
+                } else {
+                    self.a_matrices[a_base + i * m + j] = standard_normal(rng) * off_diag_scale;
+                }
+            }
+        }
+        // Apply row-wise L1 normalization for stability
+        normalize_row_l1(&mut self.a_matrices[a_base..a_base + m * m], m);
+
+        // Reset d_skip for channels in this block to default passthrough
+        let ch_start = b * m;
+        for d in ch_start..ch_start + m {
+            self.d_skip[d] = 1.0;
+        }
     }
 
     /// Compute the block-diagonal SSM forward pass for one timestep.
@@ -547,6 +603,107 @@ mod tests {
             state_norm < 1e12,
             "state norm should be bounded after 1000 constant-input steps, got {}",
             state_norm
+        );
+    }
+
+    #[test]
+    fn reinitialize_block_preserves_others() {
+        // 6 channels, 4 state dims, block_size=2 → 3 blocks
+        let mut ssm = SelectiveSSMBD::new(6, 4, 2, 42);
+
+        // Forward 10 steps to build up state
+        for step in 0..10 {
+            let s = step as f64;
+            let x = vec![s * 0.1, s * -0.2, s * 0.3, s * -0.1, s * 0.2, s * -0.3];
+            let _ = ssm.forward(&x);
+        }
+
+        // Snapshot state and A matrices for blocks 0 and 2
+        let state_before: Vec<f64> = ssm.state().to_vec();
+        let a_before: Vec<f64> = ssm.a_matrices.clone();
+        let n_state = ssm.n_state();
+        let m = ssm.block_size();
+
+        // Reinitialize block 1
+        let mut rng = 0xBEEF_u64;
+        ssm.reinitialize_block(1, &mut rng);
+
+        // Block 0 state unchanged
+        let b0_start = 0;
+        let b0_end = n_state * m;
+        for (i, &sb) in state_before.iter().enumerate().take(b0_end).skip(b0_start) {
+            assert!(
+                math::abs(ssm.h[i] - sb) < 1e-15,
+                "block 0 state[{}] should be preserved after reinit of block 1",
+                i
+            );
+        }
+
+        // Block 2 state unchanged
+        let b2_start = 2 * n_state * m;
+        let b2_end = 3 * n_state * m;
+        for (i, &sb) in state_before.iter().enumerate().take(b2_end).skip(b2_start) {
+            assert!(
+                math::abs(ssm.h[i] - sb) < 1e-15,
+                "block 2 state[{}] should be preserved after reinit of block 1",
+                i
+            );
+        }
+
+        // Block 1 state zeroed
+        let b1_start = n_state * m;
+        let b1_end = 2 * n_state * m;
+        for i in b1_start..b1_end {
+            assert!(
+                math::abs(ssm.h[i]) < 1e-15,
+                "block 1 state[{}] should be zero after reinit, got {}",
+                i,
+                ssm.h[i]
+            );
+        }
+
+        // Block 0 A matrix unchanged
+        let a0_start = 0;
+        let a0_end = m * m;
+        for (i, &ab) in a_before.iter().enumerate().take(a0_end).skip(a0_start) {
+            assert!(
+                math::abs(ssm.a_matrices[i] - ab) < 1e-15,
+                "block 0 A[{}] should be preserved",
+                i
+            );
+        }
+
+        // Block 2 A matrix unchanged
+        let a2_start = 2 * m * m;
+        let a2_end = 3 * m * m;
+        for (i, &ab) in a_before.iter().enumerate().take(a2_end).skip(a2_start) {
+            assert!(
+                math::abs(ssm.a_matrices[i] - ab) < 1e-15,
+                "block 2 A[{}] should be preserved",
+                i
+            );
+        }
+
+        // Block 1 A matrix should have changed (reinitialised)
+        let a1_start = m * m;
+        let a1_end = 2 * m * m;
+        let mut any_a_diff = false;
+        for (i, &ab) in a_before.iter().enumerate().take(a1_end).skip(a1_start) {
+            if math::abs(ssm.a_matrices[i] - ab) > 1e-15 {
+                any_a_diff = true;
+                break;
+            }
+        }
+        assert!(any_a_diff, "block 1 A matrix should differ after reinit");
+
+        // d_skip for block 1 channels (indices 2, 3) should be 1.0
+        assert!(
+            math::abs(ssm.d_skip[2] - 1.0) < 1e-15,
+            "d_skip[2] should be 1.0 after block 1 reinit"
+        );
+        assert!(
+            math::abs(ssm.d_skip[3] - 1.0) < 1e-15,
+            "d_skip[3] should be 1.0 after block 1 reinit"
         );
     }
 

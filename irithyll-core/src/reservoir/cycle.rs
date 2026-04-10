@@ -20,6 +20,7 @@
 //! where neuron 0's predecessor is neuron N-1 (ring closure).
 
 use super::prng::Xorshift64Rng;
+use crate::rng::{xorshift64, xorshift64_f64};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -56,6 +57,12 @@ pub struct CycleReservoir {
     n_reservoir: usize,
     /// Number of input features.
     n_inputs: usize,
+    /// Spectral radius used at init (stored for reinit).
+    spectral_radius: f64,
+    /// Input weight scaling used at init (stored for reinit).
+    input_scaling: f64,
+    /// Bias scaling used at init (stored for reinit).
+    bias_scaling: f64,
 }
 
 impl CycleReservoir {
@@ -121,6 +128,9 @@ impl CycleReservoir {
             leak_rate,
             n_reservoir,
             n_inputs,
+            spectral_radius,
+            input_scaling,
+            bias_scaling,
         }
     }
 
@@ -176,6 +186,61 @@ impl CycleReservoir {
     #[inline]
     pub fn n_inputs(&self) -> usize {
         self.n_inputs
+    }
+
+    /// Surgically reinitialize a single reservoir unit `j`.
+    ///
+    /// Resets the unit's state to zero and draws fresh weights for:
+    /// - Input weights: row `j` of `w_input` (uniform in [-input_scaling, input_scaling])
+    /// - Cycle weight connecting TO unit `j`: `w_cycle[(j-1+N) mod N]` (random sign * spectral_radius)
+    /// - Bias: `bias[j]` (uniform in [-bias_scaling, bias_scaling], or 0 if bias_scaling == 0)
+    ///
+    /// All other units' weights and state are preserved.
+    ///
+    /// # Arguments
+    ///
+    /// * `j` -- reservoir unit index to reinitialize (must be < `n_reservoir`)
+    /// * `rng` -- mutable RNG state for generating fresh weights
+    ///
+    /// # Panics
+    ///
+    /// Panics if `j >= n_reservoir`.
+    pub fn reinitialize_unit(&mut self, j: usize, rng: &mut u64) {
+        assert!(
+            j < self.n_reservoir,
+            "unit index {} out of range (n_reservoir={})",
+            j,
+            self.n_reservoir
+        );
+
+        let n = self.n_reservoir;
+        let d = self.n_inputs;
+
+        // Zero state for this unit.
+        self.state[j] = 0.0;
+
+        // Reinit input weights: row j spans [j * d .. (j+1) * d].
+        let row_start = j * d;
+        for col in 0..d {
+            self.w_input[row_start + col] = (xorshift64_f64(rng) * 2.0 - 1.0) * self.input_scaling;
+        }
+
+        // Reinit the cycle weight connecting TO unit j.
+        // w_cycle[prev] is the weight FROM neuron prev TO neuron (prev+1) mod N.
+        // The weight that feeds INTO unit j is w_cycle[(j-1+N) mod N].
+        let prev = if j == 0 { n - 1 } else { j - 1 };
+        self.w_cycle[prev] = if xorshift64(rng) & 1 == 0 {
+            self.spectral_radius
+        } else {
+            -self.spectral_radius
+        };
+
+        // Reinit bias for this unit.
+        if self.bias_scaling > 0.0 {
+            self.bias[j] = (xorshift64_f64(rng) * 2.0 - 1.0) * self.bias_scaling;
+        } else {
+            self.bias[j] = 0.0;
+        }
     }
 
     /// Reset the reservoir state to all zeros.
@@ -330,5 +395,112 @@ mod tests {
     #[should_panic(expected = "n_reservoir must be > 0")]
     fn zero_neurons_panics() {
         let _ = CycleReservoir::new(0, 2, 0.9, 1.0, 0.3, 0.0, 42);
+    }
+
+    #[test]
+    fn reinitialize_unit_preserves_others() {
+        let mut res = CycleReservoir::new(10, 3, 0.9, 1.0, 0.3, 0.5, 42);
+        // Drive the reservoir to populate state.
+        for _ in 0..20 {
+            res.update(&[1.0, -0.5, 0.3]);
+        }
+
+        // Snapshot all weights and state before reinit.
+        let state_before = res.state.clone();
+        let w_input_before = res.w_input.clone();
+        let w_cycle_before = res.w_cycle.clone();
+        let bias_before = res.bias.clone();
+
+        // Reinitialize unit 3.
+        let target = 3;
+        let mut rng = 999u64;
+        res.reinitialize_unit(target, &mut rng);
+
+        // Unit 3's state should be zeroed.
+        assert_eq!(
+            res.state[target], 0.0,
+            "reinitialized unit state should be zero"
+        );
+
+        // Unit 3's input weights should differ from before.
+        let row_start = target * 3;
+        let old_row = &w_input_before[row_start..row_start + 3];
+        let new_row = &res.w_input[row_start..row_start + 3];
+        let any_changed = old_row
+            .iter()
+            .zip(new_row.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-15);
+        assert!(any_changed, "input weights for unit 3 should have changed");
+
+        // Cycle weight feeding into unit 3 (w_cycle[2]) should have changed.
+        let prev = target - 1; // 2
+        assert!(
+            (w_cycle_before[prev] - res.w_cycle[prev]).abs() > 1e-15
+                || res.w_cycle[prev].abs() == res.spectral_radius,
+            "cycle weight feeding unit 3 should be reinitialized"
+        );
+
+        // Bias for unit 3 should have changed.
+        assert!(
+            (bias_before[target] - res.bias[target]).abs() > 1e-15
+                || res.bias[target].abs() <= res.bias_scaling,
+            "bias for unit 3 should be reinitialized"
+        );
+
+        // Other units' state should be unchanged.
+        for (i, &sb) in state_before.iter().enumerate().take(10) {
+            if i == target {
+                continue;
+            }
+            assert!(
+                (sb - res.state[i]).abs() < 1e-15,
+                "state of unit {} should be preserved, was {} now {}",
+                i,
+                sb,
+                res.state[i]
+            );
+        }
+
+        // Other units' input weights should be unchanged.
+        for i in 0..10 {
+            if i == target {
+                continue;
+            }
+            let rs = i * 3;
+            for col in 0..3 {
+                assert!(
+                    (w_input_before[rs + col] - res.w_input[rs + col]).abs() < 1e-15,
+                    "input weight [{}, {}] should be preserved",
+                    i,
+                    col
+                );
+            }
+        }
+
+        // Other cycle weights should be unchanged (except w_cycle[prev] which feeds target).
+        for (i, &wb) in w_cycle_before.iter().enumerate().take(10) {
+            if i == prev {
+                continue;
+            }
+            assert!(
+                (wb - res.w_cycle[i]).abs() < 1e-15,
+                "cycle weight {} should be preserved, was {} now {}",
+                i,
+                wb,
+                res.w_cycle[i]
+            );
+        }
+
+        // Other biases should be unchanged.
+        for (i, &bb) in bias_before.iter().enumerate().take(10) {
+            if i == target {
+                continue;
+            }
+            assert!(
+                (bb - res.bias[i]).abs() < 1e-15,
+                "bias {} should be preserved",
+                i
+            );
+        }
     }
 }

@@ -41,6 +41,7 @@ use layer::KANLayer;
 use crate::error::ConfigError;
 use crate::learner::StreamingLearner;
 
+use irithyll_core::continual::{ContinualStrategy, NeuronRegeneration};
 use irithyll_core::math::sigmoid;
 use irithyll_core::rng::standard_normal;
 
@@ -107,6 +108,12 @@ pub struct KANConfig {
     pub temporal: bool,
     /// RNG seed (default: 42).
     pub seed: u64,
+    /// Enable plasticity maintenance via neuron regeneration (default: false).
+    ///
+    /// When enabled, tracks per-hidden-unit activation energy and periodically
+    /// reinitializes dead B-spline edges to maintain learning capacity over
+    /// long streams (Dohare et al., Nature 2024).
+    pub plasticity: bool,
 }
 
 impl Default for KANConfig {
@@ -120,6 +127,7 @@ impl Default for KANConfig {
             coefficient_decay: 0.0,
             temporal: false,
             seed: 42,
+            plasticity: false,
         }
     }
 }
@@ -247,6 +255,16 @@ impl KANConfigBuilder {
         self
     }
 
+    /// Enable or disable plasticity maintenance (default: false).
+    ///
+    /// When enabled, tracks per-hidden-unit activation energy and periodically
+    /// reinitializes dead B-spline edges to maintain learning capacity over
+    /// long streams (Dohare et al., Nature 2024).
+    pub fn plasticity(mut self, p: bool) -> Self {
+        self.config.plasticity = p;
+        self
+    }
+
     /// Build the config, validating all parameters.
     ///
     /// # Errors
@@ -369,6 +387,12 @@ pub struct StreamingKAN {
     /// Gate bias, initialized to 1.0 so sigmoid(b) ≈ 0.73, biasing toward
     /// state preservation at initialization.
     gate_bias: f64,
+    /// Optional plasticity guard for maintaining learning capacity.
+    plasticity_guard: Option<NeuronRegeneration>,
+    /// Snapshot of per-hidden-unit activation energy from previous step.
+    prev_hidden_energy: Vec<f64>,
+    /// Total number of hidden units (sum of all hidden layer sizes).
+    n_hidden_total: usize,
 }
 
 impl StreamingKAN {
@@ -407,6 +431,30 @@ impl StreamingKAN {
         };
         let gate_bias = 1.0; // sigmoid(1.0) ≈ 0.73, biasing toward state preservation
 
+        // Compute total hidden units (all layers except input and output).
+        let n_hidden_total: usize = if config.layer_sizes.len() > 2 {
+            config.layer_sizes[1..config.layer_sizes.len() - 1]
+                .iter()
+                .sum()
+        } else {
+            0
+        };
+
+        // Create plasticity guard if enabled and there are hidden units.
+        let plasticity_guard = if config.plasticity && n_hidden_total > 0 {
+            Some(NeuronRegeneration::new(
+                n_hidden_total,
+                1,
+                0.01,
+                500,
+                0.99,
+                config.seed.wrapping_add(0x_DEAD_CAFE),
+            ))
+        } else {
+            None
+        };
+        let prev_hidden_energy = vec![0.0; n_hidden_total];
+
         Self {
             layers,
             config,
@@ -427,6 +475,9 @@ impl StreamingKAN {
             temporal_state,
             gate_weights,
             gate_bias,
+            plasticity_guard,
+            prev_hidden_energy,
+            n_hidden_total,
         }
     }
 
@@ -448,6 +499,72 @@ impl StreamingKAN {
     /// The layer sizes from the config.
     pub fn layer_sizes(&self) -> &[usize] {
         &self.config.layer_sizes
+    }
+
+    /// Surgically reinitialize a hidden unit by flat index.
+    ///
+    /// Maps the flat hidden index to the correct layer and local node index,
+    /// then reinitializes all incoming edges (in the layer producing this node)
+    /// and all outgoing edges (in the layer consuming this node). This preserves
+    /// all other units' learned representations — only the dead unit gets recycled.
+    ///
+    /// # Arguments
+    ///
+    /// * `flat_j` — flat hidden unit index (0-based across all hidden layers)
+    /// * `rng` — mutable RNG state for generating fresh weights
+    ///
+    /// # Panics
+    ///
+    /// Panics if `flat_j >= n_hidden_total`.
+    fn reinitialize_hidden_unit(&mut self, flat_j: usize, rng: &mut u64) {
+        assert!(
+            flat_j < self.n_hidden_total,
+            "hidden unit index {} out of range (n_hidden_total={})",
+            flat_j,
+            self.n_hidden_total
+        );
+
+        // Map flat index to (hidden_layer_idx, local_j).
+        // Hidden layers are layer_sizes[1..len-1].
+        let mut remaining = flat_j;
+        let mut hidden_layer_idx = 0;
+        for &size in &self.config.layer_sizes[1..self.config.layer_sizes.len() - 1] {
+            if remaining < size {
+                break;
+            }
+            remaining -= size;
+            hidden_layer_idx += 1;
+        }
+        let local_j = remaining;
+
+        // layers[hidden_layer_idx] connects layer_sizes[hidden_layer_idx] →
+        // layer_sizes[hidden_layer_idx+1]. This hidden node is output node
+        // local_j of layers[hidden_layer_idx].
+        self.layers[hidden_layer_idx].reinitialize_output_node(local_j, rng);
+
+        // layers[hidden_layer_idx+1] connects layer_sizes[hidden_layer_idx+1] →
+        // layer_sizes[hidden_layer_idx+2]. This hidden node is input node
+        // local_j of layers[hidden_layer_idx+1].
+        if hidden_layer_idx + 1 < self.layers.len() {
+            self.layers[hidden_layer_idx + 1].reinitialize_input_node(local_j, rng);
+        }
+
+        // Zero the temporal state for this unit (if temporal gating is active
+        // and this unit is in the last hidden layer).
+        if self.config.temporal && !self.temporal_state.is_empty() {
+            // Check if this flat_j maps to the last hidden layer.
+            let last_hidden_start: usize = self.config.layer_sizes
+                [1..self.config.layer_sizes.len() - 2]
+                .iter()
+                .sum();
+            let last_hidden_size = self.config.layer_sizes[self.config.layer_sizes.len() - 2];
+            if flat_j >= last_hidden_start && flat_j < last_hidden_start + last_hidden_size {
+                let local_in_last = flat_j - last_hidden_start;
+                if local_in_last < self.temporal_state.len() {
+                    self.temporal_state[local_in_last] = 0.0;
+                }
+            }
+        }
     }
 
     /// Normalize input via Welford's online algorithm, clamped for B-spline safety.
@@ -723,7 +840,47 @@ impl StreamingLearner for StreamingKAN {
         self.prev_change = current_change;
         self.prev_prediction = prediction;
 
-        // 9. Denormalize prediction back to original target space, then cache.
+        // 9. Plasticity maintenance: track per-hidden-unit activation energy
+        //    and trigger regeneration when dead units are detected.
+        // Plasticity maintenance: collect regeneration decisions first, then
+        // apply surgical reinit outside the guard borrow to satisfy the borrow checker.
+        let mut regenerated_units: Vec<usize> = Vec::new();
+        if let Some(ref mut guard) = self.plasticity_guard {
+            // Build flat energy vector from hidden layer activations.
+            // activations[0] = input, activations[1..n-1] = hidden, activations[n-1] = output.
+            let mut hidden_energy = Vec::with_capacity(self.n_hidden_total);
+            for layer_acts in activations.iter().take(activations.len() - 1).skip(1) {
+                for &a in layer_acts {
+                    hidden_energy.push(a.abs());
+                }
+            }
+            if hidden_energy.len() == self.n_hidden_total {
+                guard.pre_update(&self.prev_hidden_energy, &mut hidden_energy);
+                guard.post_update(&self.prev_hidden_energy);
+                // Collect which units need reinit.
+                let n_groups = guard.n_groups();
+                for j in 0..n_groups {
+                    if guard.was_regenerated(j) {
+                        regenerated_units.push(j);
+                    }
+                }
+                self.prev_hidden_energy = hidden_energy;
+            }
+        }
+        // Surgical per-unit reinit: only dead units get recycled.
+        // Each dead hidden unit has its incoming and outgoing B-spline
+        // edges reinitialized while preserving all other units.
+        if !regenerated_units.is_empty() {
+            let mut reinit_rng = self
+                .config
+                .seed
+                .wrapping_add(0xCAFE_BABE_u64.wrapping_mul(self.n_samples));
+            for j in regenerated_units {
+                self.reinitialize_hidden_unit(j, &mut reinit_rng);
+            }
+        }
+
+        // 10. Denormalize prediction back to original target space, then cache.
         let denormalized = prediction * target_std + self.target_mean;
         self.last_output = denormalized.clamp(-1e6, 1e6);
         if !self.last_output.is_finite() {
@@ -845,6 +1002,10 @@ impl StreamingLearner for StreamingKAN {
             *w = standard_normal(&mut self.rng_state) * 0.01;
         }
         self.gate_bias = 1.0;
+        if let Some(ref mut guard) = self.plasticity_guard {
+            guard.reset();
+        }
+        self.prev_hidden_energy.fill(0.0);
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -1643,5 +1804,145 @@ mod tests {
         model.train_one(&[0.5, -0.3], 1.0, 1.0);
         let pred = model.predict(&[0.5, -0.3]);
         assert!(pred.is_finite());
+    }
+
+    #[test]
+    fn kan_plasticity_disabled_by_default() {
+        let config = KANConfig::builder()
+            .layer_sizes(vec![2, 4, 1])
+            .build()
+            .unwrap();
+        assert!(!config.plasticity, "plasticity should default to false");
+        let model = StreamingKAN::new(config);
+        assert!(
+            model.plasticity_guard.is_none(),
+            "guard should be None when plasticity is disabled"
+        );
+    }
+
+    #[test]
+    fn kan_plasticity_enabled_creates_guard() {
+        let config = KANConfig::builder()
+            .layer_sizes(vec![3, 10, 1])
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let model = StreamingKAN::new(config);
+        assert!(
+            model.plasticity_guard.is_some(),
+            "guard should be Some when plasticity is enabled"
+        );
+        assert_eq!(
+            model.plasticity_guard.as_ref().unwrap().n_groups(),
+            10,
+            "should have one group per hidden unit (layer_sizes=[3,10,1] -> 10 hidden)"
+        );
+    }
+
+    #[test]
+    fn kan_plasticity_train_runs_without_panic() {
+        let config = KANConfig::builder()
+            .layer_sizes(vec![2, 8, 1])
+            .lr(0.1)
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let mut model = StreamingKAN::new(config);
+        for i in 0..600 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin()];
+            let y = x[0] * 2.0 + 1.0;
+            model.train(&x, y);
+        }
+        let pred = model.predict(&[1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "plasticity-enabled KAN should produce finite predictions, got {pred}"
+        );
+    }
+
+    #[test]
+    fn kan_plasticity_no_hidden_skips_guard() {
+        // layer_sizes=[2, 1] has no hidden layers -> guard should be None even with plasticity=true
+        let config = KANConfig::builder()
+            .layer_sizes(vec![2, 1])
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let model = StreamingKAN::new(config);
+        assert!(
+            model.plasticity_guard.is_none(),
+            "guard should be None for KAN without hidden layers"
+        );
+    }
+
+    #[test]
+    fn plasticity_kan_surgical_reinit() {
+        // Verify surgical per-unit reinit runs without panic and preserves
+        // other units' weights. Uses a 2-hidden-layer KAN [2, 4, 3, 1] to
+        // exercise cross-layer edge reinit.
+        let config = KANConfig::builder()
+            .layer_sizes(vec![2, 4, 3, 1])
+            .lr(0.1)
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let mut model = StreamingKAN::new(config);
+
+        // Train enough to populate weights.
+        for i in 0..100 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin()];
+            let y = x[0] * 2.0 + 1.0;
+            model.train(&x, y);
+        }
+
+        // Snapshot layer 0 coefficients before surgical reinit.
+        let coeffs_before: Vec<f64> = model.layers[0].coefficients().to_vec();
+
+        // Surgically reinit hidden unit 0 (in first hidden layer, layer_sizes[1]).
+        let mut rng = 0xBEEF_u64;
+        model.reinitialize_hidden_unit(0, &mut rng);
+
+        let coeffs_after: Vec<f64> = model.layers[0].coefficients().to_vec();
+
+        // Unit 0 edges should have changed (incoming edges in layers[0]).
+        // layers[0] has n_in=2, n_out=4. Output node 0 = edges (0,0) and (0,1).
+        let n_coeffs = model.config.grid_size + model.config.spline_order;
+        let n_in = 2;
+        let edges_for_unit_0 = n_in * n_coeffs; // coefficients for output node 0
+        let changed_in_unit_0 = coeffs_before[..edges_for_unit_0]
+            .iter()
+            .zip(coeffs_after[..edges_for_unit_0].iter())
+            .filter(|(&a, &b)| (a - b).abs() > 1e-15)
+            .count();
+        assert!(
+            changed_in_unit_0 > 0,
+            "unit 0 incoming edges should be reinitialized, but no coefficients changed"
+        );
+
+        // Unit 1 edges should be preserved (output node 1 in layers[0]).
+        let unit1_start = n_in * n_coeffs;
+        let unit1_end = unit1_start + n_in * n_coeffs;
+        let changed_in_unit_1 = coeffs_before[unit1_start..unit1_end]
+            .iter()
+            .zip(coeffs_after[unit1_start..unit1_end].iter())
+            .filter(|(&a, &b)| (a - b).abs() > 1e-15)
+            .count();
+        assert_eq!(
+            changed_in_unit_1, 0,
+            "unit 1 incoming edges should be preserved, but {} coefficients changed",
+            changed_in_unit_1
+        );
+
+        // Continue training after reinit — should not panic.
+        for i in 100..200 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin()];
+            let y = x[0] * 2.0 + 1.0;
+            model.train(&x, y);
+        }
+        let pred = model.predict(&[1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "KAN should produce finite predictions after surgical reinit, got {pred}"
+        );
     }
 }

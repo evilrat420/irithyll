@@ -68,6 +68,12 @@ pub struct ESNConfig {
     /// Auto-set: if `None` and `n_reservoir > 64`, defaults to
     /// `min(n_reservoir / 3, 64)` to keep readout tractable.
     pub readout_dim: Option<usize>,
+    /// Enable plasticity maintenance via neuron regeneration (default: false).
+    ///
+    /// When enabled, tracks per-reservoir-unit output energy and periodically
+    /// reinitializes dead units to maintain learning capacity over long
+    /// streams (Dohare et al., Nature 2024).
+    pub plasticity: bool,
 }
 
 impl Default for ESNConfig {
@@ -84,6 +90,7 @@ impl Default for ESNConfig {
             warmup: 50,
             passthrough_input: true,
             readout_dim: None,
+            plasticity: false,
         }
     }
 }
@@ -176,6 +183,16 @@ impl ESNConfigBuilder {
     /// for auto-defaulting based on reservoir size.
     pub fn readout_dim(mut self, dim: usize) -> Self {
         self.config.readout_dim = Some(dim);
+        self
+    }
+
+    /// Enable or disable plasticity maintenance (default: false).
+    ///
+    /// When enabled, tracks per-reservoir-unit output energy and periodically
+    /// reinitializes dead units to maintain learning capacity over long
+    /// streams (Dohare et al., Nature 2024).
+    pub fn plasticity(mut self, p: bool) -> Self {
+        self.config.plasticity = p;
         self
     }
 

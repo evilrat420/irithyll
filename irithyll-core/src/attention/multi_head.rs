@@ -12,12 +12,13 @@ use core::mem;
 use super::config::{AttentionConfig, AttentionMode};
 use super::gating::{
     exponential_gate, extended_sigmoid_gate, fixed_decay, init_weights, lstm_gates, mat_vec,
-    sigmoid_gate, vector_decay, vector_sigmoid_gate, Xorshift64,
+    sigmoid_gate, vector_decay, vector_lower_bounded_gate, vector_sigmoid_gate, Xorshift64,
 };
 use super::state::AttentionState;
 use super::update_rules;
 use super::AttentionLayer;
 use crate::math;
+use crate::rng::standard_normal;
 
 /// A single attention head with its own state and projection weights.
 struct AttentionHead {
@@ -53,6 +54,8 @@ struct AttentionHead {
     w_xi: Vec<f64>,
     /// Replacement key modifier for RWKV-7 (length d_key).
     w_alpha_rk: Vec<f64>,
+    /// Per-dimension lower-bounded gate for HGRN2 (d_key * d_model).
+    w_hgrn2_gate: Vec<f64>,
 }
 
 /// Multi-head streaming linear attention layer.
@@ -181,6 +184,11 @@ impl MultiHeadAttention {
                 _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             };
 
+            let w_hgrn2_gate = match &config.mode {
+                AttentionMode::HGRN2 { .. } => init_weights(&mut rng, d_key * d_model),
+                _ => Vec::new(),
+            };
+
             heads.push(AttentionHead {
                 state,
                 w_key,
@@ -198,6 +206,7 @@ impl MultiHeadAttention {
                 w_iclr,
                 w_xi,
                 w_alpha_rk,
+                w_hgrn2_gate,
             });
         }
 
@@ -231,6 +240,93 @@ impl MultiHeadAttention {
             self.state_cache[offset..offset + len].copy_from_slice(slice);
             offset += len;
         }
+    }
+
+    /// Surgically reinitialize a single attention head `h`.
+    ///
+    /// Resets the head's recurrent state to zero and draws fresh random weights
+    /// for all projection matrices (key, value, query, and any mode-specific
+    /// gate/decay weights) using the same scale (0.01 * standard_normal) as
+    /// the original initialization.
+    ///
+    /// All other heads and the output projection are preserved.
+    ///
+    /// # Arguments
+    ///
+    /// * `h` -- head index to reinitialize (must be < `n_heads`)
+    /// * `rng` -- mutable RNG state for generating fresh weights
+    ///
+    /// # Panics
+    ///
+    /// Panics if `h >= self.heads.len()`.
+    pub fn reinitialize_head(&mut self, h: usize, rng: &mut u64) {
+        assert!(
+            h < self.heads.len(),
+            "head index {} out of range (n_heads={})",
+            h,
+            self.heads.len()
+        );
+
+        let head = &mut self.heads[h];
+
+        // Zero the recurrent state.
+        head.state.reset();
+
+        // Helper: reinit a weight slice with scale 0.01 * standard_normal.
+        let reinit = |weights: &mut [f64], rng: &mut u64| {
+            for w in weights.iter_mut() {
+                *w = standard_normal(rng) * 0.01;
+            }
+        };
+
+        // Core projections (always present).
+        reinit(&mut head.w_key, rng);
+        reinit(&mut head.w_value, rng);
+        reinit(&mut head.w_query, rng);
+
+        // Mode-dependent weights (only reinit non-empty vecs).
+        if !head.w_gate.is_empty() {
+            reinit(&mut head.w_gate, rng);
+        }
+        if !head.w_gate2.is_empty() {
+            reinit(&mut head.w_gate2, rng);
+        }
+        if !head.w_decay.is_empty() {
+            reinit(&mut head.w_decay, rng);
+        }
+        if !head.w_alpha.is_empty() {
+            reinit(&mut head.w_alpha, rng);
+        }
+        if !head.w_beta.is_empty() {
+            reinit(&mut head.w_beta, rng);
+        }
+        if !head.w_comp_keys.is_empty() {
+            reinit(&mut head.w_comp_keys, rng);
+        }
+        if !head.w_comp_values.is_empty() {
+            reinit(&mut head.w_comp_values, rng);
+        }
+        if !head.w_comp_betas.is_empty() {
+            reinit(&mut head.w_comp_betas, rng);
+        }
+        if !head.w_decay_vec.is_empty() {
+            reinit(&mut head.w_decay_vec, rng);
+        }
+        if !head.w_iclr.is_empty() {
+            reinit(&mut head.w_iclr, rng);
+        }
+        if !head.w_xi.is_empty() {
+            reinit(&mut head.w_xi, rng);
+        }
+        if !head.w_alpha_rk.is_empty() {
+            reinit(&mut head.w_alpha_rk, rng);
+        }
+        if !head.w_hgrn2_gate.is_empty() {
+            reinit(&mut head.w_hgrn2_gate, rng);
+        }
+
+        // Update the state cache region for this head.
+        self.update_state_cache();
     }
 }
 
@@ -401,6 +497,13 @@ impl AttentionLayer for MultiHeadAttention {
                     }
 
                     update_rules::rwkv7_update(&mut head.state, &w, &kappa_hat, &a, &k_tilde, &v);
+                    head.state.query(&q)
+                }
+                AttentionMode::HGRN2 { lower_bound } => {
+                    // Per-dimension lower-bounded forget gate
+                    let alpha =
+                        vector_lower_bounded_gate(&head.w_hgrn2_gate, input, d_key, *lower_bound);
+                    update_rules::hgrn2_update(&mut head.state, &k, &v, &alpha);
                     head.state.query(&q)
                 }
             };
@@ -835,6 +938,179 @@ mod tests {
         assert!(
             attn.state().iter().all(|&x| x == 0.0),
             "after reset all state should be zero"
+        );
+    }
+
+    #[test]
+    fn hgrn2_output_dimension() {
+        let config = make_config(AttentionMode::HGRN2 { lower_bound: 0.9 });
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+        let output = attn.forward(&input);
+        assert_eq!(output.len(), 8, "HGRN2 output should match d_model=8");
+    }
+
+    #[test]
+    fn hgrn2_state_length() {
+        let config = make_config(AttentionMode::HGRN2 { lower_bound: 0.9 });
+        let attn = MultiHeadAttention::new(config);
+        let expected = 2 * 4 * 4; // n_heads * d_key * d_value
+        assert_eq!(
+            attn.state().len(),
+            expected,
+            "HGRN2 state should be n_heads*d_key*d_value"
+        );
+    }
+
+    #[test]
+    fn hgrn2_forward_changes_state() {
+        let config = make_config(AttentionMode::HGRN2 { lower_bound: 0.9 });
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+        attn.forward(&input);
+        let state = attn.state();
+        let any_nonzero = state.iter().any(|&x| x.abs() > 1e-15);
+        assert!(any_nonzero, "after forward, HGRN2 state should be non-zero");
+    }
+
+    #[test]
+    fn hgrn2_reset_clears() {
+        let config = make_config(AttentionMode::HGRN2 { lower_bound: 0.9 });
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+        attn.forward(&input);
+        attn.reset();
+        assert!(
+            attn.state().iter().all(|&x| x == 0.0),
+            "after reset all HGRN2 state should be zero"
+        );
+    }
+
+    #[test]
+    fn hgrn2_different_lower_bounds_different_output() {
+        let input = make_input(8);
+
+        let config1 = make_config(AttentionMode::HGRN2 { lower_bound: 0.1 });
+        let mut attn1 = MultiHeadAttention::new(config1);
+        attn1.forward(&input);
+        attn1.forward(&input);
+        let state1: Vec<f64> = attn1.state().to_vec();
+
+        let config2 = make_config(AttentionMode::HGRN2 { lower_bound: 0.99 });
+        let mut attn2 = MultiHeadAttention::new(config2);
+        attn2.forward(&input);
+        attn2.forward(&input);
+        let state2: Vec<f64> = attn2.state().to_vec();
+
+        let any_diff = state1
+            .iter()
+            .zip(state2.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-10);
+        assert!(
+            any_diff,
+            "different lower_bound values should produce different states"
+        );
+    }
+
+    #[test]
+    fn hgrn2_output_finite() {
+        let config = make_config(AttentionMode::HGRN2 { lower_bound: 0.9 });
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+        for _ in 0..100 {
+            let output = attn.forward(&input);
+            assert!(
+                output.iter().all(|x| x.is_finite()),
+                "HGRN2 output should be finite after many steps"
+            );
+        }
+    }
+
+    #[test]
+    fn reinitialize_head_preserves_others() {
+        let config = make_config(AttentionMode::GLA);
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+
+        // Run forward to populate state.
+        attn.forward(&input);
+        attn.forward(&input);
+
+        // Snapshot head 0's weights before reinit.
+        let h0_wk_before = attn.heads[0].w_key.clone();
+        let h0_wv_before = attn.heads[0].w_value.clone();
+        let h0_wq_before = attn.heads[0].w_query.clone();
+        let h0_state_before: Vec<f64> = attn.heads[0].state.as_slice().to_vec();
+
+        // Snapshot head 1's weights before reinit.
+        let h1_wk_before = attn.heads[1].w_key.clone();
+        let h1_wv_before = attn.heads[1].w_value.clone();
+        let h1_wq_before = attn.heads[1].w_query.clone();
+
+        // Snapshot w_out before reinit.
+        let w_out_before = attn.w_out.clone();
+
+        // Reinitialize head 1 only.
+        let mut rng = 12345u64;
+        attn.reinitialize_head(1, &mut rng);
+
+        // Head 0's weights should be completely unchanged.
+        assert_eq!(
+            attn.heads[0].w_key, h0_wk_before,
+            "head 0 w_key should be preserved"
+        );
+        assert_eq!(
+            attn.heads[0].w_value, h0_wv_before,
+            "head 0 w_value should be preserved"
+        );
+        assert_eq!(
+            attn.heads[0].w_query, h0_wq_before,
+            "head 0 w_query should be preserved"
+        );
+        // Head 0's state should be unchanged.
+        for (i, (&a, &b)) in h0_state_before
+            .iter()
+            .zip(attn.heads[0].state.as_slice().iter())
+            .enumerate()
+        {
+            assert!(
+                (a - b).abs() < 1e-15,
+                "head 0 state[{}] should be preserved: {} vs {}",
+                i,
+                a,
+                b
+            );
+        }
+
+        // Head 1's state should be zeroed.
+        assert!(
+            attn.heads[1].state.as_slice().iter().all(|&x| x == 0.0),
+            "head 1 state should be zeroed after reinit"
+        );
+
+        // Head 1's weights should have changed.
+        let any_key_changed = h1_wk_before
+            .iter()
+            .zip(attn.heads[1].w_key.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-15);
+        assert!(any_key_changed, "head 1 w_key should have new values");
+
+        let any_val_changed = h1_wv_before
+            .iter()
+            .zip(attn.heads[1].w_value.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-15);
+        assert!(any_val_changed, "head 1 w_value should have new values");
+
+        let any_query_changed = h1_wq_before
+            .iter()
+            .zip(attn.heads[1].w_query.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-15);
+        assert!(any_query_changed, "head 1 w_query should have new values");
+
+        // w_out should be completely unchanged.
+        assert_eq!(
+            attn.w_out, w_out_before,
+            "w_out should be preserved after head reinit"
         );
     }
 }

@@ -52,6 +52,8 @@ pub enum Algorithm {
     Slstm,
     /// Streaming Mamba BD-LRU (block-diagonal linear recurrence).
     MambaBD,
+    /// Streaming mGRADE (minimal recurrent gating with delay convolutions).
+    Mgrade,
 }
 
 /// Unified model factory for AutoML.
@@ -688,6 +690,57 @@ impl Factory {
         }
     }
 
+    /// Create a factory for streaming mGRADE.
+    ///
+    /// mGRADE combines a minGRU cell with a learnable delay convolution
+    /// (arXiv July 2025). Hidden dimension, kernel size, and RLS forgetting
+    /// factor are searchable.
+    ///
+    /// # Config Space (4 params)
+    /// | Index | Name | Type | Range |
+    /// |-------|------|------|-------|
+    /// | 0 | `d_hidden` | Int | [4, 64] |
+    /// | 1 | `kernel_size` | Int | [2, 8] |
+    /// | 2 | `forgetting_factor` | Float | [0.95, 0.9999] linear |
+    /// | 3 | `warmup` | Int | [5, 50] |
+    pub fn mgrade(d_in: usize) -> Self {
+        let space = ConfigSpace::new()
+            .push(HyperParam::Int {
+                name: "d_hidden",
+                low: 4,
+                high: 64,
+            })
+            .push(HyperParam::Int {
+                name: "kernel_size",
+                low: 2,
+                high: 8,
+            })
+            .push(HyperParam::Float {
+                name: "forgetting_factor",
+                low: 0.95,
+                high: 0.9999,
+                log_scale: false,
+            })
+            .push(HyperParam::Int {
+                name: "warmup",
+                low: 5,
+                high: 50,
+            });
+
+        Self {
+            algorithm: Algorithm::Mgrade,
+            n_features: d_in,
+            space,
+            warmup: 10,
+            complexity: 2000,
+            seed: 42,
+            accuracy_based_pruning: false,
+            proactive_prune_interval: None,
+            prune_half_life: None,
+            projection: None,
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Builder-style overrides
     // -----------------------------------------------------------------------
@@ -888,6 +941,11 @@ impl Factory {
     pub fn projected_slstm(d_in: usize, rank: usize) -> Self {
         Factory::slstm(rank).with_projection(d_in, rank, 0.999)
     }
+
+    /// Convenience: projected mGRADE. The inner mGRADE sees `rank`-dimensional features.
+    pub fn projected_mgrade(d_in: usize, rank: usize) -> Self {
+        Factory::mgrade(rank).with_projection(d_in, rank, 0.999)
+    }
 }
 
 impl ModelFactory for Factory {
@@ -911,6 +969,7 @@ impl ModelFactory for Factory {
                 Algorithm::Rwkv7 => "Projected<RWKV7>",
                 Algorithm::Slstm => "Projected<sLSTM>",
                 Algorithm::MambaBD => "Projected<MambaBD>",
+                Algorithm::Mgrade => "Projected<mGRADE>",
             }
         } else {
             match self.algorithm {
@@ -927,6 +986,7 @@ impl ModelFactory for Factory {
                 Algorithm::Rwkv7 => "RWKV7",
                 Algorithm::Slstm => "sLSTM",
                 Algorithm::MambaBD => "MambaBD",
+                Algorithm::Mgrade => "mGRADE",
             }
         }
     }
@@ -1207,6 +1267,24 @@ impl ModelFactory for Factory {
                     .expect("Factory::create(MambaBD): invalid config");
 
                 Box::new(crate::ssm::StreamingMamba::new(mamba_config))
+            }
+            Algorithm::Mgrade => {
+                let d_hidden = config.get(0) as usize;
+                let kernel_size = config.get(1) as usize;
+                let ff = config.get(2);
+                let warmup = config.get(3) as usize;
+
+                let mgrade_config = crate::mgrade::mGRADEConfig::builder()
+                    .d_in(self.n_features)
+                    .d_hidden(d_hidden)
+                    .kernel_size(kernel_size)
+                    .forgetting_factor(ff)
+                    .warmup(warmup)
+                    .seed(self.seed)
+                    .build()
+                    .expect("Factory::create(Mgrade): invalid config");
+
+                Box::new(crate::mgrade::StreamingmGRADE::new(mgrade_config))
             }
         };
 

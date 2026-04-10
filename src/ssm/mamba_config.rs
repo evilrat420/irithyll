@@ -80,6 +80,12 @@ pub struct MambaConfig {
     /// Must divide `d_in` evenly. Typical values: 2, 4, 8.
     /// When `version` is V1 or V3, this field is ignored (stored as 1).
     pub block_size: usize,
+    /// Enable plasticity maintenance via neuron regeneration (default: false).
+    ///
+    /// When enabled, tracks per-channel SSM state energy and periodically
+    /// reinitializes dead channels to maintain learning capacity over long
+    /// streams (Dohare et al., Nature 2024).
+    pub plasticity: bool,
 }
 
 impl MambaConfig {
@@ -148,6 +154,7 @@ pub struct MambaConfigBuilder {
     version: MambaVersion,
     n_groups: usize,
     block_size: usize,
+    plasticity: bool,
 }
 
 impl Default for MambaConfigBuilder {
@@ -162,6 +169,7 @@ impl Default for MambaConfigBuilder {
             version: MambaVersion::V1,
             n_groups: 1,
             block_size: 4,
+            plasticity: false,
         }
     }
 }
@@ -227,6 +235,16 @@ impl MambaConfigBuilder {
     /// Must divide `d_in` evenly. Typical values: 2, 4, 8.
     pub fn block_size(mut self, block_size: usize) -> Self {
         self.block_size = block_size;
+        self
+    }
+
+    /// Enable or disable plasticity maintenance (default: false).
+    ///
+    /// When enabled, tracks per-channel SSM state energy and periodically
+    /// reinitializes dead channels to maintain learning capacity over long
+    /// streams (Dohare et al., Nature 2024).
+    pub fn plasticity(mut self, p: bool) -> Self {
+        self.plasticity = p;
         self
     }
 
@@ -341,6 +359,7 @@ impl MambaConfigBuilder {
             version,
             n_groups,
             block_size,
+            plasticity: self.plasticity,
         })
     }
 }

@@ -14,6 +14,7 @@
 //! | RWKV            | `S = exp(-w) * S + exp(k) * v^T`              |
 //! | Hawk            | `h = alpha * h + beta * x` (element-wise)     |
 //! | mLSTM           | `S = f * S + i * v * k^T`                     |
+//! | HGRN2           | `S = diag(alpha) * S + k * v^T` (alpha lower-bounded) |
 
 use alloc::vec;
 
@@ -295,6 +296,31 @@ pub fn rwkv7_update(
 
     // Step 3: Additive write -- new association at replacement key
     state.add_outer_product(k_tilde, v);
+}
+
+/// HGRN2 update: lower-bounded gated outer-product (Qin et al., ICML 2024).
+///
+/// Applies a per-dimension forget gate with a lower bound, then adds the
+/// outer product of key and value:
+///
+/// `alpha_t[i] = lower_bound + (1 - lower_bound) * sigmoid(alpha_raw[i])`
+/// `S = diag(alpha_t) * S + k * v^T`
+///
+/// The lower bound ensures minimum memory retention: with `lower_bound=0.9`,
+/// at least 90% of each row of `S` is retained regardless of input.
+///
+/// # Arguments
+///
+/// * `state` -- matrix state of shape `d_k x d_v`
+/// * `k` -- key vector (length `d_k`)
+/// * `v` -- value vector (length `d_v`)
+/// * `alpha` -- pre-computed per-dimension gate values (length `d_k`, already
+///   lower-bounded and passed through sigmoid)
+pub fn hgrn2_update(state: &mut AttentionState, k: &[f64], v: &[f64], alpha: &[f64]) {
+    // Per-dimension decay: S[i][:] *= alpha[i]
+    state.scale_per_row(alpha);
+    // Outer-product write: S += k * v^T
+    state.add_outer_product(k, v);
 }
 
 #[cfg(test)]
@@ -746,6 +772,11 @@ mod tests {
         rwkv7_update(&mut s8, &[0.9, 0.8], &k, &[0.5, 0.5], &k, &v);
         let sum8: f64 = s8.as_slice().iter().map(|x| math::abs(*x)).sum();
         assert!(sum8 > 0.0, "rwkv7_update should change state");
+
+        let mut s9 = AttentionState::new_matrix(2, 2);
+        hgrn2_update(&mut s9, &k, &v, &[0.95, 0.9]);
+        let sum9: f64 = s9.as_slice().iter().map(|x| math::abs(*x)).sum();
+        assert!(sum9 > 0.0, "hgrn2_update should change state");
     }
 
     #[test]
@@ -844,6 +875,97 @@ mod tests {
             state.get_matrix(1, 0).abs() < 1e-12,
             "with beta=0, S[1][0] should remain 0, got {}",
             state.get_matrix(1, 0)
+        );
+    }
+
+    #[test]
+    fn hgrn2_update_basic() {
+        // From zero state: decay does nothing, so S = k * v^T
+        let mut state = AttentionState::new_matrix(2, 3);
+        let k = [1.0, 2.0];
+        let v = [3.0, 4.0, 5.0];
+        let alpha = [0.9, 0.8]; // per-dimension decay
+        hgrn2_update(&mut state, &k, &v, &alpha);
+        // From zero: alpha * 0 + k * v^T = k * v^T
+        assert!(
+            (state.get_matrix(0, 0) - 3.0).abs() < 1e-12,
+            "S[0][0] should be 1*3=3, got {}",
+            state.get_matrix(0, 0)
+        );
+        assert!(
+            (state.get_matrix(1, 2) - 10.0).abs() < 1e-12,
+            "S[1][2] should be 2*5=10, got {}",
+            state.get_matrix(1, 2)
+        );
+    }
+
+    #[test]
+    fn hgrn2_lower_bound_ensures_retention() {
+        // With alpha near 1.0, state should barely decay
+        let mut state = AttentionState::new_matrix(2, 2);
+        state.set_matrix(0, 0, 100.0);
+        state.set_matrix(1, 1, 200.0);
+        let k = [0.0, 0.0]; // no new write
+        let v = [0.0, 0.0];
+        let alpha = [0.99, 0.99]; // very high retention
+        hgrn2_update(&mut state, &k, &v, &alpha);
+        assert!(
+            (state.get_matrix(0, 0) - 99.0).abs() < 1e-12,
+            "with alpha=0.99, S[0][0] should be 100*0.99=99, got {}",
+            state.get_matrix(0, 0)
+        );
+        assert!(
+            (state.get_matrix(1, 1) - 198.0).abs() < 1e-12,
+            "with alpha=0.99, S[1][1] should be 200*0.99=198, got {}",
+            state.get_matrix(1, 1)
+        );
+    }
+
+    #[test]
+    fn hgrn2_lower_bound_zero_matches_gla() {
+        // With lower_bound=0.0 and uniform alpha, HGRN2 should match GLA
+        // (additive_update with scalar decay).
+        let mut state_hgrn2 = AttentionState::new_matrix(2, 2);
+        let mut state_gla = AttentionState::new_matrix(2, 2);
+        let k = [1.0, 0.5];
+        let v = [2.0, 3.0];
+        let decay = 0.7;
+        // HGRN2 with uniform alpha = scalar decay
+        let alpha = [decay, decay];
+        hgrn2_update(&mut state_hgrn2, &k, &v, &alpha);
+        additive_update(&mut state_gla, &k, &v, decay);
+        let s1 = state_hgrn2.as_slice();
+        let s2 = state_gla.as_slice();
+        for i in 0..s1.len() {
+            assert!(
+                (s1[i] - s2[i]).abs() < 1e-12,
+                "HGRN2 with uniform alpha should match GLA at {}: {} vs {}",
+                i,
+                s1[i],
+                s2[i]
+            );
+        }
+    }
+
+    #[test]
+    fn hgrn2_per_dimension_decay() {
+        // Different alpha per dimension should decay rows differently
+        let mut state = AttentionState::new_matrix(2, 2);
+        state.set_matrix(0, 0, 10.0);
+        state.set_matrix(1, 1, 10.0);
+        let k = [0.0, 0.0]; // no new write
+        let v = [0.0, 0.0];
+        let alpha = [0.5, 0.9]; // row 0 decays fast, row 1 decays slow
+        hgrn2_update(&mut state, &k, &v, &alpha);
+        assert!(
+            (state.get_matrix(0, 0) - 5.0).abs() < 1e-12,
+            "row 0 decayed by 0.5: 10*0.5=5, got {}",
+            state.get_matrix(0, 0)
+        );
+        assert!(
+            (state.get_matrix(1, 1) - 9.0).abs() < 1e-12,
+            "row 1 decayed by 0.9: 10*0.9=9, got {}",
+            state.get_matrix(1, 1)
         );
     }
 }

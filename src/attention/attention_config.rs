@@ -58,6 +58,12 @@ pub struct StreamingAttentionConfig {
     pub seed: u64,
     /// Number of warmup samples before predictions are trusted (default: 10).
     pub warmup: usize,
+    /// Enable plasticity maintenance via neuron regeneration (default: false).
+    ///
+    /// When enabled, tracks per-head attention output energy and periodically
+    /// reinitializes dead heads to maintain learning capacity over long
+    /// streams (Dohare et al., Nature 2024).
+    pub plasticity: bool,
 }
 
 impl StreamingAttentionConfig {
@@ -122,6 +128,7 @@ pub struct StreamingAttentionConfigBuilder {
     delta: f64,
     seed: u64,
     warmup: usize,
+    plasticity: bool,
 }
 
 impl Default for StreamingAttentionConfigBuilder {
@@ -136,6 +143,7 @@ impl Default for StreamingAttentionConfigBuilder {
             delta: 100.0,
             seed: 42,
             warmup: 10,
+            plasticity: false,
         }
     }
 }
@@ -201,6 +209,16 @@ impl StreamingAttentionConfigBuilder {
     /// Set the warmup period in samples (default: 10).
     pub fn warmup(mut self, warmup: usize) -> Self {
         self.warmup = warmup;
+        self
+    }
+
+    /// Enable or disable plasticity maintenance (default: false).
+    ///
+    /// When enabled, tracks per-head attention output energy and periodically
+    /// reinitializes dead heads to maintain learning capacity over long
+    /// streams (Dohare et al., Nature 2024).
+    pub fn plasticity(mut self, p: bool) -> Self {
+        self.plasticity = p;
         self
     }
 
@@ -301,6 +319,7 @@ impl StreamingAttentionConfigBuilder {
             delta: self.delta,
             seed: self.seed,
             warmup: self.warmup,
+            plasticity: self.plasticity,
         })
     }
 }

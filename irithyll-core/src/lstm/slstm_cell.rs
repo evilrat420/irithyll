@@ -372,6 +372,60 @@ impl SLSTMCell {
     pub fn output_dim(&self) -> usize {
         self.d_hidden
     }
+
+    /// Surgically reinitialize a single hidden unit (Dohare et al., Nature 2024).
+    ///
+    /// Reinitializes all weight columns connecting TO unit `j` across all four
+    /// gate matrices (W_f, W_i, W_o, W_z), resets the corresponding biases
+    /// (forget bias to 1.0, others to 0.0), and zeros the unit's recurrent
+    /// state (h, c, n, m).
+    ///
+    /// This preserves all other units' learned representations — only the dead
+    /// unit gets recycled. The RNG state is advanced deterministically so
+    /// repeated calls produce consistent reinitialization.
+    ///
+    /// # Arguments
+    ///
+    /// * `j` — hidden unit index to reinitialize (must be < `d_hidden`)
+    /// * `rng` — mutable RNG state for generating fresh weights
+    ///
+    /// # Panics
+    ///
+    /// Panics if `j >= d_hidden` or if the cell has not been initialized.
+    pub fn reinitialize_unit(&mut self, j: usize, rng: &mut u64) {
+        assert!(self.initialized, "cell must be initialized before reinit");
+        assert!(
+            j < self.d_hidden,
+            "unit index {} out of range (d_hidden={})",
+            j,
+            self.d_hidden
+        );
+
+        let d_total = self.d_input + self.d_hidden;
+        let scale = math::sqrt(2.0 / (self.d_input + self.d_hidden) as f64);
+
+        // Reinitialize row j of each gate weight matrix.
+        // Row j spans [j * d_total .. (j+1) * d_total] in the flat array.
+        let row_start = j * d_total;
+        for col in 0..d_total {
+            self.w_f[row_start + col] = standard_normal(rng) * scale;
+            self.w_i[row_start + col] = standard_normal(rng) * scale;
+            self.w_o[row_start + col] = standard_normal(rng) * scale;
+            self.w_z[row_start + col] = standard_normal(rng) * scale;
+        }
+
+        // Reset biases: forget=1.0 (strong retention), others=0.0
+        self.b_f[j] = 1.0;
+        self.b_i[j] = 0.0;
+        self.b_o[j] = 0.0;
+        self.b_z[j] = 0.0;
+
+        // Zero recurrent state for this unit
+        self.h[j] = 0.0;
+        self.c[j] = 0.0;
+        self.n[j] = 1.0;
+        self.m[j] = 0.0;
+    }
 }
 
 /// Clamp a value to `[lo, hi]`.
@@ -575,6 +629,92 @@ mod tests {
         assert_ne!(
             h2, h3,
             "hidden state should evolve between step 2 and step 3"
+        );
+    }
+
+    #[test]
+    fn reinitialize_unit_resets_target_only() {
+        let mut cell = SLSTMCell::new(4, 42);
+        let x = [0.5, -0.3, 0.8];
+
+        // Initialize and build up state
+        for _ in 0..10 {
+            cell.forward(&x);
+        }
+
+        // Save state of unit 0 and unit 2 before reinit
+        let h0_before = cell.h[0];
+        let h2_before = cell.h[2];
+        let c2_before = cell.c[2];
+
+        // Reinitialize unit 1 only
+        let mut rng = 999u64;
+        cell.reinitialize_unit(1, &mut rng);
+
+        // Unit 1 should be zeroed
+        assert!(
+            math::abs(cell.h[1]) < 1e-15,
+            "reinit unit h should be zero, got {}",
+            cell.h[1]
+        );
+        assert!(
+            math::abs(cell.c[1]) < 1e-15,
+            "reinit unit c should be zero, got {}",
+            cell.c[1]
+        );
+        assert!(
+            (cell.n[1] - 1.0).abs() < 1e-15,
+            "reinit unit n should be 1.0, got {}",
+            cell.n[1]
+        );
+
+        // Other units should be untouched
+        assert!(
+            (cell.h[0] - h0_before).abs() < 1e-15,
+            "unit 0 h should be unchanged after reinit of unit 1"
+        );
+        assert!(
+            (cell.h[2] - h2_before).abs() < 1e-15,
+            "unit 2 h should be unchanged after reinit of unit 1"
+        );
+        assert!(
+            (cell.c[2] - c2_before).abs() < 1e-15,
+            "unit 2 c should be unchanged after reinit of unit 1"
+        );
+    }
+
+    #[test]
+    fn reinitialize_unit_produces_fresh_weights() {
+        let mut cell = SLSTMCell::new(4, 42);
+        cell.forward(&[0.1, 0.2, 0.3]); // initialize
+
+        let d_total = cell.d_input + cell.d_hidden;
+        let row_start = d_total; // unit 1
+
+        // Save original weights for unit 1
+        let w_f_before: Vec<f64> = cell.w_f[row_start..row_start + d_total].to_vec();
+
+        // Reinitialize
+        let mut rng = 777u64;
+        cell.reinitialize_unit(1, &mut rng);
+
+        // Weights should be different (fresh random)
+        let w_f_after: Vec<f64> = cell.w_f[row_start..row_start + d_total].to_vec();
+        let diff: f64 = w_f_before
+            .iter()
+            .zip(w_f_after.iter())
+            .map(|(a, b)| (a - b).abs())
+            .sum();
+        assert!(
+            diff > 1e-10,
+            "reinitialized weights should differ from original"
+        );
+
+        // Forget bias should be 1.0
+        assert!(
+            (cell.b_f[1] - 1.0).abs() < 1e-15,
+            "forget bias should be 1.0 after reinit, got {}",
+            cell.b_f[1]
         );
     }
 }

@@ -46,6 +46,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::math;
+use crate::rng::standard_normal;
 use crate::ssm::init::s4d_inv_real;
 use crate::ssm::projection::{dot, mat_vec, softplus, Xorshift64};
 use crate::ssm::SSMLayer;
@@ -166,6 +167,53 @@ impl SelectiveSSM {
     #[inline]
     pub fn n_state(&self) -> usize {
         self.n_state
+    }
+
+    /// Surgically reinitialize a single channel, preserving all other channels.
+    ///
+    /// Resets channel `d`'s hidden state to zero across all state dimensions,
+    /// reinitializes its weight column in `w_b` and `w_c`, its `w_delta` entry,
+    /// and its skip connection `d_skip` to the default (1.0). All other channels
+    /// are left untouched.
+    ///
+    /// # Arguments
+    ///
+    /// * `d` — channel index to reinitialize (must be < `d_in`)
+    /// * `rng` — mutable RNG state for generating fresh weights
+    ///
+    /// # Panics
+    ///
+    /// Panics if `d >= d_in`.
+    pub fn reinitialize_channel(&mut self, d: usize, rng: &mut u64) {
+        assert!(
+            d < self.d_in,
+            "channel index {} out of range (d_in={})",
+            d,
+            self.d_in
+        );
+
+        let scale = 0.1;
+
+        // Zero state: h[n * d_in + d] for each state dim n (state-dim-major layout)
+        for n in 0..self.n_state {
+            self.h[n * self.d_in + d] = 0.0;
+        }
+
+        // Reinit w_delta[d]
+        self.w_delta[d] = standard_normal(rng) * scale;
+
+        // Reinit column d of w_b (N x d_in row-major): w_b[n * d_in + d]
+        for n in 0..self.n_state {
+            self.w_b[n * self.d_in + d] = standard_normal(rng) * scale;
+        }
+
+        // Reinit column d of w_c (N x d_in row-major): w_c[n * d_in + d]
+        for n in 0..self.n_state {
+            self.w_c[n * self.d_in + d] = standard_normal(rng) * scale;
+        }
+
+        // Reset skip connection to default passthrough
+        self.d_skip[d] = 1.0;
     }
 
     /// Compute the selective SSM forward pass for one timestep.
@@ -443,5 +491,120 @@ mod tests {
                 y
             );
         }
+    }
+
+    #[test]
+    fn reinitialize_channel_preserves_others() {
+        let mut ssm = SelectiveSSM::new(3, 8, 42);
+
+        // Forward 10 steps to build up state
+        for step in 0..10 {
+            let x = vec![
+                (step as f64) * 0.3,
+                (step as f64) * -0.2,
+                (step as f64) * 0.1,
+            ];
+            let _ = ssm.forward(&x);
+        }
+
+        // Snapshot state and weights for channels 0 and 2 before reinit
+        let state_before: Vec<f64> = ssm.state().to_vec();
+        let w_delta_0 = ssm.w_delta[0];
+        let w_delta_2 = ssm.w_delta[2];
+
+        let wb_col0: Vec<f64> = (0..ssm.n_state).map(|n| ssm.w_b[n * ssm.d_in]).collect();
+        let wb_col2: Vec<f64> = (0..ssm.n_state)
+            .map(|n| ssm.w_b[n * ssm.d_in + 2])
+            .collect();
+        let wc_col0: Vec<f64> = (0..ssm.n_state).map(|n| ssm.w_c[n * ssm.d_in]).collect();
+        let wc_col2: Vec<f64> = (0..ssm.n_state)
+            .map(|n| ssm.w_c[n * ssm.d_in + 2])
+            .collect();
+
+        // Reinitialize channel 1
+        let mut rng = 0xBEEF_u64;
+        ssm.reinitialize_channel(1, &mut rng);
+
+        // Channel 0 state unchanged
+        for n in 0..ssm.n_state {
+            let idx = n * ssm.d_in;
+            assert!(
+                math::abs(ssm.h[idx] - state_before[idx]) < 1e-15,
+                "channel 0 state[{}] should be preserved after reinit of channel 1",
+                n
+            );
+        }
+
+        // Channel 2 state unchanged
+        for n in 0..ssm.n_state {
+            let idx = n * ssm.d_in + 2;
+            assert!(
+                math::abs(ssm.h[idx] - state_before[idx]) < 1e-15,
+                "channel 2 state[{}] should be preserved after reinit of channel 1",
+                n
+            );
+        }
+
+        // Channel 1 state zeroed
+        for n in 0..ssm.n_state {
+            let idx = n * ssm.d_in + 1;
+            assert!(
+                math::abs(ssm.h[idx]) < 1e-15,
+                "channel 1 state[{}] should be zeroed after reinit, got {}",
+                n,
+                ssm.h[idx]
+            );
+        }
+
+        // Channel 0 and 2 weights unchanged
+        assert!(
+            math::abs(ssm.w_delta[0] - w_delta_0) < 1e-15,
+            "w_delta[0] should be preserved"
+        );
+        assert!(
+            math::abs(ssm.w_delta[2] - w_delta_2) < 1e-15,
+            "w_delta[2] should be preserved"
+        );
+        for n in 0..ssm.n_state {
+            assert!(
+                math::abs(ssm.w_b[n * ssm.d_in] - wb_col0[n]) < 1e-15,
+                "w_b col 0 row {} should be preserved",
+                n
+            );
+            assert!(
+                math::abs(ssm.w_b[n * ssm.d_in + 2] - wb_col2[n]) < 1e-15,
+                "w_b col 2 row {} should be preserved",
+                n
+            );
+            assert!(
+                math::abs(ssm.w_c[n * ssm.d_in] - wc_col0[n]) < 1e-15,
+                "w_c col 0 row {} should be preserved",
+                n
+            );
+            assert!(
+                math::abs(ssm.w_c[n * ssm.d_in + 2] - wc_col2[n]) < 1e-15,
+                "w_c col 2 row {} should be preserved",
+                n
+            );
+        }
+
+        // Channel 1 weights should have changed (reinitialised to non-zero)
+        let mut any_wb_diff = false;
+        for n in 0..ssm.n_state {
+            if math::abs(ssm.w_b[n * ssm.d_in + 1]) > 1e-15 {
+                any_wb_diff = true;
+            }
+        }
+        assert!(
+            any_wb_diff,
+            "reinitialised channel 1 w_b should have non-zero weights"
+        );
+
+        // d_skip[1] should be reset to 1.0
+        assert!(
+            math::abs(ssm.d_skip[1] - 1.0) < 1e-15,
+            "d_skip[1] should be reset to 1.0 after reinit, got {}",
+            ssm.d_skip[1]
+        );
     }
 }

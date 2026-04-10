@@ -57,6 +57,7 @@
 //! maintaining the contract that `predict()` is read-only. If no training has
 //! occurred, returns 0.0.
 
+use irithyll_core::continual::{ContinualStrategy, NeuronRegeneration};
 use irithyll_core::ssm::{SSMLayer, SelectiveSSM, SelectiveSSMBD, SelectiveSSMv3};
 
 use crate::learner::StreamingLearner;
@@ -183,6 +184,10 @@ pub struct StreamingMamba {
     alignment_ewma: f64,
     /// EWMA of maximum Frobenius squared norm of SSM state for utilization ratio.
     max_frob_sq_ewma: f64,
+    /// Optional plasticity guard for maintaining learning capacity.
+    plasticity_guard: Option<NeuronRegeneration>,
+    /// Snapshot of per-channel state energy from previous step.
+    prev_state_energy: Vec<f64>,
 }
 
 impl StreamingMamba {
@@ -226,6 +231,30 @@ impl StreamingMamba {
         // Both fan_in and fan_out are d_in, so scale = sqrt(2 / (2 * d_in)) = 1/sqrt(d_in).
         let (gate_weights, gate_bias) = Self::init_gate_weights(config.d_in, config.seed);
 
+        // Create plasticity guard if enabled.
+        // Granularity matches the SSM variant's natural unit:
+        //   V1: one group per channel (d_in)
+        //   V3: one group per MIMO group (n_groups)
+        //   BD: one group per block (n_blocks = d_in / block_size)
+        let plasticity_n_units = match config.version {
+            MambaVersion::V1 => config.d_in,
+            MambaVersion::V3 => config.n_groups,
+            MambaVersion::BlockDiagonal { block_size } => config.d_in / block_size,
+        };
+        let plasticity_guard = if config.plasticity {
+            Some(NeuronRegeneration::new(
+                plasticity_n_units,
+                1,
+                0.01,
+                500,
+                0.99,
+                config.seed.wrapping_add(0x_DEAD_CAFE),
+            ))
+        } else {
+            None
+        };
+        let prev_state_energy = vec![0.0; plasticity_n_units];
+
         Self {
             config,
             ssm,
@@ -239,6 +268,8 @@ impl StreamingMamba {
             prev_prev_change: 0.0,
             alignment_ewma: 0.0,
             max_frob_sq_ewma: 0.0,
+            plasticity_guard,
+            prev_state_energy,
         }
     }
 
@@ -484,7 +515,80 @@ impl StreamingLearner for StreamingMamba {
         // 7. Train RLS readout on gated features.
         self.readout.train_one(&readout_features, target, weight);
 
-        // 8. Cache readout features for predict()
+        // 8. Plasticity maintenance: track per-unit SSM state energy and
+        //    trigger surgical reinit when dead units are detected.
+        //    Unit granularity matches the SSM variant:
+        //      V1 → per-channel, V3 → per-group, BD → per-block.
+        if let Some(ref mut guard) = self.plasticity_guard {
+            let state = self.ssm.state();
+            let n_state = self.config.n_state;
+            let n_units = guard.n_groups();
+            let mut unit_energy: Vec<f64> = match &self.ssm {
+                SSMVariant::V1(_) => {
+                    // Per-channel energy (state-dim-major: h[n * d_in + d])
+                    (0..n_units)
+                        .map(|d| {
+                            let mut e = 0.0;
+                            for n in 0..n_state {
+                                let idx = n * self.config.d_in + d;
+                                if idx < state.len() {
+                                    e += state[idx].abs();
+                                }
+                            }
+                            e / n_state.max(1) as f64
+                        })
+                        .collect()
+                }
+                SSMVariant::V3(_) => {
+                    // Per-group energy (complex: h[(g*n_state+n)*2] re, +1 im)
+                    (0..n_units)
+                        .map(|g| {
+                            let mut e = 0.0;
+                            for n in 0..n_state {
+                                let idx = (g * n_state + n) * 2;
+                                if idx + 1 < state.len() {
+                                    e += state[idx].abs() + state[idx + 1].abs();
+                                }
+                            }
+                            e / (2 * n_state).max(1) as f64
+                        })
+                        .collect()
+                }
+                SSMVariant::BD(ssm) => {
+                    // Per-block energy (h[b*n_state*block_size .. (b+1)*n_state*block_size])
+                    let bs = ssm.block_size();
+                    (0..n_units)
+                        .map(|b| {
+                            let start = b * n_state * bs;
+                            let end = (start + n_state * bs).min(state.len());
+                            let e: f64 = state[start..end].iter().map(|s| s.abs()).sum();
+                            e / (n_state * bs).max(1) as f64
+                        })
+                        .collect()
+                }
+            };
+            guard.pre_update(&self.prev_state_energy, &mut unit_energy);
+            guard.post_update(&self.prev_state_energy);
+
+            // Surgical per-unit reinit based on SSM variant
+            let mut reinit_rng = self
+                .config
+                .seed
+                .wrapping_add(0xCAFE_BABE_u64.wrapping_mul(self.n_samples));
+            for j in 0..guard.n_groups() {
+                if guard.was_regenerated(j) {
+                    match &mut self.ssm {
+                        SSMVariant::V1(ssm) => ssm.reinitialize_channel(j, &mut reinit_rng),
+                        SSMVariant::V3(ssm) => ssm.reinitialize_group(j, &mut reinit_rng),
+                        SSMVariant::BD(ssm) => ssm.reinitialize_block(j, &mut reinit_rng),
+                    }
+                }
+            }
+
+            self.prev_state_energy = unit_energy;
+        }
+
+        // 9. Cache readout features for predict()
         self.last_features = readout_features;
 
         self.n_samples += 1;
@@ -532,6 +636,10 @@ impl StreamingLearner for StreamingMamba {
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
         self.max_frob_sq_ewma = 0.0;
+        if let Some(ref mut guard) = self.plasticity_guard {
+            guard.reset();
+        }
+        self.prev_state_energy.fill(0.0);
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -1218,6 +1326,57 @@ mod tests {
             8,
             "V1 readout should be 2*d_in=8, got {}",
             model.last_features().len()
+        );
+    }
+
+    #[test]
+    fn mamba_plasticity_disabled_by_default() {
+        let config = MambaConfig::builder().d_in(4).build().unwrap();
+        assert!(!config.plasticity, "plasticity should default to false");
+        let model = StreamingMamba::new(config);
+        assert!(
+            model.plasticity_guard.is_none(),
+            "guard should be None when plasticity is disabled"
+        );
+    }
+
+    #[test]
+    fn mamba_plasticity_enabled_creates_guard() {
+        let config = MambaConfig::builder()
+            .d_in(4)
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let model = StreamingMamba::new(config);
+        assert!(
+            model.plasticity_guard.is_some(),
+            "guard should be Some when plasticity is enabled"
+        );
+        assert_eq!(
+            model.plasticity_guard.as_ref().unwrap().n_groups(),
+            4,
+            "should have one group per channel (d_in=4)"
+        );
+    }
+
+    #[test]
+    fn mamba_plasticity_train_runs_without_panic() {
+        let config = MambaConfig::builder()
+            .d_in(3)
+            .n_state(8)
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let mut model = StreamingMamba::new(config);
+        for i in 0..600 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin(), 1.0];
+            let y = x[0] + 0.5 * x[1];
+            model.train(&x, y);
+        }
+        let pred = model.predict(&[1.0, 0.0, 1.0]);
+        assert!(
+            pred.is_finite(),
+            "plasticity-enabled model should produce finite predictions, got {pred}"
         );
     }
 }

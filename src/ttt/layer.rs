@@ -408,6 +408,13 @@ impl TTTLayer {
         self.d_state
     }
 
+    /// Read-only access to the fast weight matrix (row-major, `[d_state x d_state]`).
+    #[allow(dead_code)]
+    #[inline]
+    pub fn fast_weights(&self) -> &[f64] {
+        &self.w_fast
+    }
+
     /// Set the inner learning rate for fast weight updates.
     ///
     /// Used by [`StreamingTTT`](super::StreamingTTT) to dynamically modulate
@@ -430,6 +437,50 @@ impl TTTLayer {
         self.n_accumulated = 0;
         self.prediction_feedback = 0.0;
         self.step_count = 0;
+    }
+
+    /// Surgically reinitialize a single unit (row) of the fast weight matrix.
+    ///
+    /// When unit `j` dies (low utility), reinitialize row `j` of W_fast with
+    /// Xavier-scaled random values, and zero row `j` of the momentum buffer
+    /// and accumulated gradient. This preserves all other units' learned
+    /// fast weight representations.
+    ///
+    /// # Arguments
+    ///
+    /// * `j` — unit index (row of W_fast) to reinitialize (must be < `d_state`)
+    /// * `rng` — mutable RNG state for generating fresh weights
+    ///
+    /// # Panics
+    ///
+    /// Panics if `j >= d_state`.
+    pub fn reinitialize_unit(&mut self, j: usize, rng: &mut u64) {
+        assert!(
+            j < self.d_state,
+            "unit index {} out of range (d_state={})",
+            j,
+            self.d_state
+        );
+
+        let scale = (2.0 / (self.d_state + self.d_state) as f64).sqrt();
+        let row_start = j * self.d_state;
+
+        // Reinit row j of W_fast with Xavier-scaled random values.
+        for col in 0..self.d_state {
+            self.w_fast[row_start + col] = standard_normal(rng) * scale;
+        }
+
+        // Zero row j of momentum buffer (if momentum is enabled).
+        if self.use_momentum {
+            for col in 0..self.d_state {
+                self.momentum_buf[row_start + col] = 0.0;
+            }
+        }
+
+        // Zero row j of accumulated gradient.
+        for col in 0..self.d_state {
+            self.accumulated_grad[row_start + col] = 0.0;
+        }
     }
 
     /// Full reset including projections (returns to uninitialized state).

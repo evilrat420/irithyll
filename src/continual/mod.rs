@@ -29,4 +29,6 @@ pub mod continual_wrapper;
 pub use continual_wrapper::{continual, ContinualLearner};
 
 // Re-export core continual types for convenience.
-pub use irithyll_core::continual::{ContinualStrategy, DriftMask, StreamingEWC};
+pub use irithyll_core::continual::{
+    ContinualStrategy, DriftMask, NeuronRegeneration, StreamingEWC,
+};

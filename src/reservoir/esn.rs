@@ -30,6 +30,7 @@ use std::fmt;
 
 use crate::learner::StreamingLearner;
 use crate::learners::RecursiveLeastSquares;
+use irithyll_core::continual::{ContinualStrategy, NeuronRegeneration};
 use irithyll_core::reservoir::{CycleReservoir, Xorshift64Rng};
 
 use super::esn_config::ESNConfig;
@@ -97,6 +98,10 @@ pub struct EchoStateNetwork {
     /// Initialized with +/- 1/sqrt(readout_dim) entries for JL-optimal projection.
     /// `None` when readout projection is disabled.
     readout_projection: Option<Vec<f64>>,
+    /// Optional plasticity guard for maintaining learning capacity.
+    plasticity_guard: Option<NeuronRegeneration>,
+    /// Snapshot of per-unit state energy from previous step.
+    prev_state_energy: Vec<f64>,
 }
 
 impl EchoStateNetwork {
@@ -106,6 +111,23 @@ impl EchoStateNetwork {
     /// when the input dimension becomes known.
     pub fn new(config: ESNConfig) -> Self {
         let rls = RecursiveLeastSquares::with_delta(config.forgetting_factor, config.delta);
+
+        // Create plasticity guard if enabled.
+        // Tracks n_reservoir units (group_size=1), regenerating the bottom 1%
+        // every 500 steps with utility EWMA alpha=0.99.
+        let plasticity_guard = if config.plasticity {
+            Some(NeuronRegeneration::new(
+                config.n_reservoir,
+                1,
+                0.01,
+                500,
+                0.99,
+                config.seed.wrapping_add(0x_DEAD_CAFE),
+            ))
+        } else {
+            None
+        };
+        let prev_state_energy = vec![0.0; config.n_reservoir];
 
         Self {
             reservoir: CycleReservoir::new(
@@ -128,6 +150,8 @@ impl EchoStateNetwork {
             alignment_ewma: 0.0,
             state_activity_ewma: Vec::new(),
             readout_projection: None,
+            plasticity_guard,
+            prev_state_energy,
         }
     }
 
@@ -300,6 +324,22 @@ impl StreamingLearner for EchoStateNetwork {
             self.rls.train_one(&readout_features, target, weight);
             self.samples_trained += 1;
         }
+
+        // Plasticity maintenance: track per-reservoir-unit state energy and
+        // surgically reinitialize dead units instead of resetting the whole reservoir.
+        if let Some(ref mut guard) = self.plasticity_guard {
+            let state = self.reservoir.state();
+            let mut unit_energy: Vec<f64> = state.iter().map(|s| s.abs()).collect();
+            guard.pre_update(&self.prev_state_energy, &mut unit_energy);
+            guard.post_update(&self.prev_state_energy);
+            let mut reinit_rng = self.config.seed.wrapping_add(self.total_seen);
+            for j in 0..guard.n_groups() {
+                if guard.was_regenerated(j) {
+                    self.reservoir.reinitialize_unit(j, &mut reinit_rng);
+                }
+            }
+            self.prev_state_energy = unit_energy;
+        }
     }
 
     fn predict(&self, features: &[f64]) -> f64 {
@@ -335,6 +375,10 @@ impl StreamingLearner for EchoStateNetwork {
         // Keep n_inputs and reservoir weights — reset only resets learned state,
         // not the architecture. If the user wants a fresh reservoir, they should
         // construct a new ESN.
+        if let Some(ref mut guard) = self.plasticity_guard {
+            guard.reset();
+        }
+        self.prev_state_energy.fill(0.0);
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -857,6 +901,56 @@ mod tests {
             mae < 0.5,
             "large projected ESN sine MAE should be < 0.5, got {}",
             mae,
+        );
+    }
+
+    #[test]
+    fn esn_plasticity_disabled_by_default() {
+        let config = ESNConfig::builder().n_reservoir(50).build().unwrap();
+        assert!(!config.plasticity, "plasticity should default to false");
+        let esn = EchoStateNetwork::new(config);
+        assert!(
+            esn.plasticity_guard.is_none(),
+            "guard should be None when plasticity is disabled"
+        );
+    }
+
+    #[test]
+    fn esn_plasticity_enabled_creates_guard() {
+        let config = ESNConfig::builder()
+            .n_reservoir(50)
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let esn = EchoStateNetwork::new(config);
+        assert!(
+            esn.plasticity_guard.is_some(),
+            "guard should be Some when plasticity is enabled"
+        );
+        assert_eq!(
+            esn.plasticity_guard.as_ref().unwrap().n_groups(),
+            50,
+            "should have one group per reservoir unit"
+        );
+    }
+
+    #[test]
+    fn esn_plasticity_train_runs_without_panic() {
+        let config = ESNConfig::builder()
+            .n_reservoir(30)
+            .warmup(10)
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let mut esn = EchoStateNetwork::new(config);
+        for i in 0..600 {
+            let t = i as f64 * 0.1;
+            esn.train(&[t.sin()], (t + 0.1).sin());
+        }
+        let pred = esn.predict(&[0.5]);
+        assert!(
+            pred.is_finite(),
+            "plasticity-enabled ESN should produce finite predictions, got {pred}"
         );
     }
 }

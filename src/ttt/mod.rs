@@ -32,6 +32,7 @@ use layer::TTTLayer;
 use crate::error::ConfigError;
 use crate::learner::StreamingLearner;
 use crate::learners::RecursiveLeastSquares;
+use irithyll_core::continual::{ContinualStrategy, NeuronRegeneration};
 
 // ---------------------------------------------------------------------------
 // TTTConfig
@@ -99,6 +100,12 @@ pub struct TTTConfig {
     pub surprise_gated: bool,
     /// RNG seed (default: 42).
     pub seed: u64,
+    /// Enable plasticity maintenance via neuron regeneration (default: false).
+    ///
+    /// When enabled, tracks per-hidden-unit TTT output energy and periodically
+    /// reinitializes dead units to maintain learning capacity over long
+    /// streams (Dohare et al., Nature 2024).
+    pub plasticity: bool,
 }
 
 impl Default for TTTConfig {
@@ -117,6 +124,7 @@ impl Default for TTTConfig {
             alpha_warmup: 0,
             surprise_gated: false,
             seed: 42,
+            plasticity: false,
         }
     }
 }
@@ -266,6 +274,16 @@ impl TTTConfigBuilder {
         self
     }
 
+    /// Enable or disable plasticity maintenance (default: false).
+    ///
+    /// When enabled, tracks per-hidden-unit TTT output energy and periodically
+    /// reinitializes dead units to maintain learning capacity over long
+    /// streams (Dohare et al., Nature 2024).
+    pub fn plasticity(mut self, p: bool) -> Self {
+        self.config.plasticity = p;
+        self
+    }
+
     /// Build the config, validating all parameters.
     ///
     /// # Errors
@@ -379,6 +397,10 @@ pub struct StreamingTTT {
     proj_tau: f64,
     /// Whether tau has been set (needs input dimension from first sample).
     proj_tau_set: bool,
+    /// Optional plasticity guard for maintaining learning capacity.
+    plasticity_guard: Option<NeuronRegeneration>,
+    /// Snapshot of per-unit output energy from previous step.
+    prev_output_energy: Vec<f64>,
 }
 
 impl StreamingTTT {
@@ -403,6 +425,21 @@ impl StreamingTTT {
         let last_features = vec![0.0; config.d_model];
         let base_proj_lr = config.eta * 0.1;
 
+        // Create plasticity guard if enabled.
+        let plasticity_guard = if config.plasticity {
+            Some(NeuronRegeneration::new(
+                config.d_model,
+                1,
+                0.01,
+                500,
+                0.99,
+                config.seed.wrapping_add(0x_DEAD_CAFE),
+            ))
+        } else {
+            None
+        };
+        let prev_output_energy = vec![0.0; config.d_model];
+
         Self {
             config,
             layer,
@@ -425,6 +462,8 @@ impl StreamingTTT {
             proj_step: 0,
             proj_tau: 1.0, // placeholder, set on first train_one
             proj_tau_set: false,
+            plasticity_guard,
+            prev_output_energy,
         }
     }
 
@@ -800,6 +839,31 @@ impl StreamingLearner for StreamingTTT {
             self.proj_lr = self.base_proj_lr / (1.0 + self.proj_step as f64 / self.proj_tau);
         }
 
+        // Plasticity maintenance: track per-unit TTT output energy and
+        // trigger regeneration when dead units are detected.
+        if let Some(ref mut guard) = self.plasticity_guard {
+            let mut output_energy: Vec<f64> = ttt_output.iter().map(|x| x.abs()).collect();
+            guard.pre_update(&self.prev_output_energy, &mut output_energy);
+            guard.post_update(&self.prev_output_energy);
+            // Surgical per-unit reinit: only dead units get recycled.
+            // Each dead unit has its fast weight row reinitialized while
+            // preserving all other units' learned representations.
+            let n_groups = guard.n_groups();
+            let any_regenerated = (0..n_groups).any(|g| guard.was_regenerated(g));
+            self.prev_output_energy = output_energy;
+            if any_regenerated {
+                let mut reinit_rng = self
+                    .config
+                    .seed
+                    .wrapping_add(0xCAFE_BABE_u64.wrapping_mul(self.samples_trained));
+                for j in 0..n_groups {
+                    if guard.was_regenerated(j) {
+                        self.layer.reinitialize_unit(j, &mut reinit_rng);
+                    }
+                }
+            }
+        }
+
         // Cache for predict()
         self.last_features = ttt_output;
     }
@@ -848,6 +912,10 @@ impl StreamingLearner for StreamingTTT {
         self.proj_step = 0;
         self.proj_tau = 1.0;
         self.proj_tau_set = false;
+        if let Some(ref mut guard) = self.plasticity_guard {
+            guard.reset();
+        }
+        self.prev_output_energy.fill(0.0);
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -1776,6 +1844,126 @@ mod tests {
         assert!(
             pred.is_finite(),
             "combined Titans TTT prediction must be finite"
+        );
+    }
+
+    #[test]
+    fn ttt_plasticity_disabled_by_default() {
+        let config = TTTConfig::builder().d_model(16).build().unwrap();
+        assert!(!config.plasticity, "plasticity should default to false");
+        let model = StreamingTTT::new(config);
+        assert!(
+            model.plasticity_guard.is_none(),
+            "guard should be None when plasticity is disabled"
+        );
+    }
+
+    #[test]
+    fn ttt_plasticity_enabled_creates_guard() {
+        let config = TTTConfig::builder()
+            .d_model(16)
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let model = StreamingTTT::new(config);
+        assert!(
+            model.plasticity_guard.is_some(),
+            "guard should be Some when plasticity is enabled"
+        );
+        assert_eq!(
+            model.plasticity_guard.as_ref().unwrap().n_groups(),
+            16,
+            "should have one group per hidden unit"
+        );
+    }
+
+    #[test]
+    fn ttt_plasticity_train_runs_without_panic() {
+        let config = TTTConfig::builder()
+            .d_model(8)
+            .warmup(5)
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let mut model = StreamingTTT::new(config);
+        for i in 0..600 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin()];
+            let y = x[0] * 2.0 + 1.0;
+            model.train(&x, y);
+        }
+        let pred = model.predict(&[1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "plasticity-enabled TTT should produce finite predictions, got {pred}"
+        );
+    }
+
+    #[test]
+    fn plasticity_ttt_surgical_reinit() {
+        // Verify surgical per-unit reinit runs without panic and preserves
+        // other units' fast weight rows.
+        let config = TTTConfig::builder()
+            .d_model(8)
+            .warmup(5)
+            .plasticity(true)
+            .build()
+            .unwrap();
+        let mut model = StreamingTTT::new(config);
+
+        // Train enough to populate fast weights.
+        for i in 0..100 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin()];
+            let y = x[0] * 2.0 + 1.0;
+            model.train(&x, y);
+        }
+
+        // Snapshot fast weights before surgical reinit.
+        let d = 8;
+        let w_fast_before: Vec<f64> = model.layer.fast_weights().to_vec();
+
+        // Surgically reinit unit 2 (row 2 of W_fast).
+        let mut rng = 0xBEEF_u64;
+        model.layer.reinitialize_unit(2, &mut rng);
+
+        let w_fast_after: Vec<f64> = model.layer.fast_weights().to_vec();
+
+        // Row 2 should have changed.
+        let row2_start = 2 * d;
+        let row2_end = row2_start + d;
+        let changed_row2 = w_fast_before[row2_start..row2_end]
+            .iter()
+            .zip(w_fast_after[row2_start..row2_end].iter())
+            .filter(|(&a, &b)| (a - b).abs() > 1e-15)
+            .count();
+        assert!(
+            changed_row2 > 0,
+            "row 2 of W_fast should be reinitialized, but no elements changed"
+        );
+
+        // Row 3 should be preserved.
+        let row3_start = 3 * d;
+        let row3_end = row3_start + d;
+        let changed_row3 = w_fast_before[row3_start..row3_end]
+            .iter()
+            .zip(w_fast_after[row3_start..row3_end].iter())
+            .filter(|(&a, &b)| (a - b).abs() > 1e-15)
+            .count();
+        assert_eq!(
+            changed_row3, 0,
+            "row 3 of W_fast should be preserved, but {} elements changed",
+            changed_row3
+        );
+
+        // Continue training after reinit — should not panic.
+        for i in 100..200 {
+            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin()];
+            let y = x[0] * 2.0 + 1.0;
+            model.train(&x, y);
+        }
+        let pred = model.predict(&[1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "TTT should produce finite predictions after surgical reinit, got {pred}"
         );
     }
 }

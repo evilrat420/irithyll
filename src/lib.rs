@@ -117,6 +117,7 @@ pub mod time_series;
 pub mod ttt;
 
 pub mod lstm;
+pub mod mgrade;
 
 #[cfg(feature = "arrow")]
 pub mod arrow_support;
@@ -251,6 +252,9 @@ pub use ttt::{StreamingTTT, TTTConfig, TTTConfigBuilder};
 
 // Re-exports -- sLSTM (stabilized LSTM with exponential gating)
 pub use lstm::{SLSTMConfig, SLSTMConfigBuilder, StreamingsLSTM};
+
+// Re-exports -- mGRADE (minimal recurrent gating with delay convolutions)
+pub use mgrade::{mGRADEConfig, mGRADEConfigBuilder, StreamingmGRADE};
 
 // Re-exports -- Kolmogorov-Arnold Networks
 pub use kan::{KANConfig, KANConfigBuilder, StreamingKAN};
@@ -736,6 +740,25 @@ pub fn streaming_slstm(d_model: usize) -> lstm::StreamingsLSTM {
             .d_model(d_model)
             .build()
             .expect("streaming_slstm() factory: invalid parameters"),
+    )
+}
+
+/// Create a streaming mGRADE (minimal recurrent gating with delay convolutions).
+///
+/// ```no_run
+/// use irithyll::{mgrade, StreamingLearner};
+///
+/// let mut model = mgrade(3, 16);
+/// model.train(&[1.0, 2.0, 3.0], 4.0);
+/// let pred = model.predict(&[1.0, 2.0, 3.0]);
+/// ```
+pub fn mgrade(d_in: usize, d_hidden: usize) -> mgrade::StreamingmGRADE {
+    mgrade::StreamingmGRADE::new(
+        mgrade::mGRADEConfig::builder()
+            .d_in(d_in)
+            .d_hidden(d_hidden)
+            .build()
+            .expect("mgrade() factory: invalid parameters"),
     )
 }
 

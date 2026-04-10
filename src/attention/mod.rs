@@ -16,7 +16,7 @@
 //! The attention layer processes each feature vector as a timestep, maintaining
 //! per-head recurrent state that captures temporal dependencies via linear
 //! attention mechanisms (RetNet, Hawk, GLA, DeltaNet, GatedDeltaNet, RWKV, mLSTM,
-//! DeltaProduct, RWKV7).
+//! DeltaProduct, RWKV7, HGRN2).
 //! The RLS readout learns a linear mapping from the attention output to the target.
 //!
 //! # Components
@@ -156,6 +156,30 @@ pub fn rwkv7(d_model: usize, n_heads: usize) -> StreamingAttentionModel {
             .mode(AttentionMode::RWKV7)
             .build()
             .expect("rwkv7() factory: invalid parameters"),
+    )
+}
+
+/// Create an HGRN2 model (lower-bounded gated linear RNN with state expansion).
+///
+/// HGRN2 uses per-dimension forget gates with a lower bound ensuring minimum
+/// memory retention. The outer-product state update provides expressivity
+/// comparable to GLA, while the lower bound prevents catastrophic forgetting.
+///
+/// ```ignore
+/// use irithyll::attention::hgrn2;
+/// use irithyll::learner::StreamingLearner;
+///
+/// let mut model = hgrn2(8, 2, 0.9);
+/// model.train(&[1.0; 8], 0.5);
+/// ```
+pub fn hgrn2(d_model: usize, n_heads: usize, lower_bound: f64) -> StreamingAttentionModel {
+    StreamingAttentionModel::new(
+        StreamingAttentionConfig::builder()
+            .d_model(d_model)
+            .n_heads(n_heads)
+            .mode(AttentionMode::HGRN2 { lower_bound })
+            .build()
+            .expect("hgrn2() factory: invalid parameters"),
     )
 }
 

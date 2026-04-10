@@ -35,6 +35,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::math;
+use crate::rng::standard_normal;
 use crate::ssm::discretize::trapezoidal_complex;
 use crate::ssm::init::s4d_inv_complex;
 use crate::ssm::projection::{dot, mat_vec, softplus, Xorshift64};
@@ -179,6 +180,57 @@ impl SelectiveSSMv3 {
     #[inline]
     pub fn n_groups(&self) -> usize {
         self.n_groups
+    }
+
+    /// Surgically reinitialize a single group, preserving all other groups.
+    ///
+    /// Resets group `g`'s complex hidden state to zero, reinitializes its
+    /// weight rows in `w_b` and `w_c`, and resets the skip connections for
+    /// the group's channels to 1.0. All other groups are left untouched.
+    ///
+    /// # Arguments
+    ///
+    /// * `g` — group index to reinitialize (must be < `n_groups`)
+    /// * `rng` — mutable RNG state for generating fresh weights
+    ///
+    /// # Panics
+    ///
+    /// Panics if `g >= n_groups`.
+    pub fn reinitialize_group(&mut self, g: usize, rng: &mut u64) {
+        assert!(
+            g < self.n_groups,
+            "group index {} out of range (n_groups={})",
+            g,
+            self.n_groups
+        );
+
+        let scale = 0.1;
+        let cpg = self.d_in / self.n_groups; // channels per group
+
+        // Zero complex state: h[(g * n_state + n) * 2] (re) and +1 (im)
+        for n in 0..self.n_state {
+            let h_idx = (g * self.n_state + n) * 2;
+            self.h[h_idx] = 0.0;
+            self.h[h_idx + 1] = 0.0;
+        }
+
+        // Reinit w_b group slice: rows [g*n_state..(g+1)*n_state], each row is d_in wide
+        let wb_start = g * self.n_state * self.d_in;
+        for i in 0..self.n_state * self.d_in {
+            self.w_b[wb_start + i] = standard_normal(rng) * scale;
+        }
+
+        // Reinit w_c group slice: same layout
+        let wc_start = g * self.n_state * self.d_in;
+        for i in 0..self.n_state * self.d_in {
+            self.w_c[wc_start + i] = standard_normal(rng) * scale;
+        }
+
+        // Reset d_skip for channels in this group to default passthrough
+        let ch_start = g * cpg;
+        for d in ch_start..ch_start + cpg {
+            self.d_skip[d] = 1.0;
+        }
     }
 
     /// Compute the Mamba-3 forward pass for one timestep.
@@ -520,5 +572,112 @@ mod tests {
         assert_eq!(ssm.n_state(), 4);
         assert_eq!(ssm.n_groups(), 3);
         assert_eq!(ssm.output_dim(), 6);
+    }
+
+    #[test]
+    fn reinitialize_group_preserves_others() {
+        // 6 channels, 4 state dims, 3 groups (2 channels per group)
+        let mut ssm = SelectiveSSMv3::new(6, 4, 3, 42);
+
+        // Forward 10 steps to build up state
+        for step in 0..10 {
+            let s = step as f64;
+            let x = vec![s * 0.1, s * -0.2, s * 0.3, s * -0.1, s * 0.2, s * -0.3];
+            let _ = ssm.forward(&x);
+        }
+
+        // Snapshot state for groups 0 and 2 before reinit
+        let state_before: Vec<f64> = ssm.state().to_vec();
+        let n_state = ssm.n_state();
+
+        // Snapshot w_b rows for group 0 (rows 0..n_state) and group 2 (rows 2*n_state..3*n_state)
+        let d_in = ssm.d_in();
+        let wb_g0: Vec<f64> = ssm.w_b[0..n_state * d_in].to_vec();
+        let wb_g2: Vec<f64> = ssm.w_b[2 * n_state * d_in..3 * n_state * d_in].to_vec();
+        let wc_g0: Vec<f64> = ssm.w_c[0..n_state * d_in].to_vec();
+        let wc_g2: Vec<f64> = ssm.w_c[2 * n_state * d_in..3 * n_state * d_in].to_vec();
+
+        // Reinitialize group 1
+        let mut rng = 0xBEEF_u64;
+        ssm.reinitialize_group(1, &mut rng);
+
+        // Group 0 state unchanged (complex: indices 0..2*n_state)
+        for n in 0..n_state {
+            let idx = n * 2; // group 0 starts at 0
+            assert!(
+                math::abs(ssm.h[idx] - state_before[idx]) < 1e-15,
+                "group 0 state re[{}] should be preserved",
+                n
+            );
+            assert!(
+                math::abs(ssm.h[idx + 1] - state_before[idx + 1]) < 1e-15,
+                "group 0 state im[{}] should be preserved",
+                n
+            );
+        }
+
+        // Group 2 state unchanged
+        for n in 0..n_state {
+            let idx = (2 * n_state + n) * 2;
+            assert!(
+                math::abs(ssm.h[idx] - state_before[idx]) < 1e-15,
+                "group 2 state re[{}] should be preserved",
+                n
+            );
+            assert!(
+                math::abs(ssm.h[idx + 1] - state_before[idx + 1]) < 1e-15,
+                "group 2 state im[{}] should be preserved",
+                n
+            );
+        }
+
+        // Group 1 state zeroed
+        for n in 0..n_state {
+            let idx = (n_state + n) * 2;
+            assert!(
+                math::abs(ssm.h[idx]) < 1e-15,
+                "group 1 state re[{}] should be zero after reinit, got {}",
+                n,
+                ssm.h[idx]
+            );
+            assert!(
+                math::abs(ssm.h[idx + 1]) < 1e-15,
+                "group 1 state im[{}] should be zero after reinit, got {}",
+                n,
+                ssm.h[idx + 1]
+            );
+        }
+
+        // Group 0 and 2 w_b/w_c unchanged
+        assert_eq!(
+            &ssm.w_b[0..n_state * d_in],
+            wb_g0.as_slice(),
+            "group 0 w_b should be preserved"
+        );
+        assert_eq!(
+            &ssm.w_b[2 * n_state * d_in..3 * n_state * d_in],
+            wb_g2.as_slice(),
+            "group 2 w_b should be preserved"
+        );
+        assert_eq!(
+            &ssm.w_c[0..n_state * d_in],
+            wc_g0.as_slice(),
+            "group 0 w_c should be preserved"
+        );
+        assert_eq!(
+            &ssm.w_c[2 * n_state * d_in..3 * n_state * d_in],
+            wc_g2.as_slice(),
+            "group 2 w_c should be preserved"
+        );
+
+        // d_skip for group 1 channels (indices 2, 3) should be 1.0
+        assert!(
+            math::abs(ssm.d_skip[2] - 1.0) < 1e-15,
+            "d_skip[2] should be 1.0 after group 1 reinit"
+        );
+        assert!(
+            math::abs(ssm.d_skip[3] - 1.0) < 1e-15,
+            "d_skip[3] should be 1.0 after group 1 reinit"
+        );
     }
 }

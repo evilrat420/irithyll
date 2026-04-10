@@ -173,6 +173,44 @@ pub fn vector_sigmoid_gate(w_gate: &[f64], x: &[f64], d_key: usize) -> Vec<f64> 
     g
 }
 
+/// Per-dimension lower-bounded sigmoid gate (HGRN2).
+///
+/// Computes `lower_bound + (1 - lower_bound) * sigmoid(dot_i)` for each
+/// dimension, where `dot_i = w_gate_row_i . x`. The output is clamped
+/// to `[lower_bound, 1)`, ensuring minimum memory retention.
+///
+/// # Arguments
+///
+/// * `w_gate` -- gate weight matrix, `d_key x d_model` row-major
+/// * `x` -- input vector (length `d_model`)
+/// * `d_key` -- number of output dimensions
+/// * `lower_bound` -- minimum gate value (typically 0.9)
+///
+/// # Returns
+///
+/// Vector of length `d_key` with gate values in [lower_bound, 1).
+pub fn vector_lower_bounded_gate(
+    w_gate: &[f64],
+    x: &[f64],
+    d_key: usize,
+    lower_bound: f64,
+) -> Vec<f64> {
+    let d_model = x.len();
+    debug_assert_eq!(
+        w_gate.len(),
+        d_key * d_model,
+        "w_gate must be d_key * d_model"
+    );
+    let range = 1.0 - lower_bound;
+    let mut g = Vec::with_capacity(d_key);
+    for i in 0..d_key {
+        let row = &w_gate[i * d_model..(i + 1) * d_model];
+        let raw = dot(row, x);
+        g.push(lower_bound + range * math::sigmoid(raw));
+    }
+    g
+}
+
 /// Extended sigmoid for DeltaProduct beta (range [0, 2]).
 ///
 /// Computes `2 * sigmoid(w . x)`, mapping to [0, 2] for Householder
@@ -368,6 +406,58 @@ mod tests {
             (mid - 1.0).abs() < 1e-6,
             "zero input should give 1.0, got {}",
             mid
+        );
+    }
+
+    #[test]
+    fn vector_lower_bounded_gate_range() {
+        // With large positive weights, sigmoid -> ~1, so gate -> ~1.0
+        // With large negative weights, sigmoid -> ~0, so gate -> lower_bound
+        let w = vec![10.0, 0.0, -10.0, 0.0]; // 2 dims, d_model=2
+        let x = vec![1.0, 0.0];
+        let lower_bound = 0.9;
+        let g = vector_lower_bounded_gate(&w, &x, 2, lower_bound);
+        // Dim 0: lb + (1-lb)*sigmoid(10) ~ 0.9 + 0.1*1.0 ~ 1.0
+        assert!(
+            g[0] > 0.999,
+            "large positive should give ~1.0, got {}",
+            g[0]
+        );
+        // Dim 1: lb + (1-lb)*sigmoid(-10) ~ 0.9 + 0.1*0.0 ~ 0.9
+        assert!(
+            (g[1] - lower_bound).abs() < 0.001,
+            "large negative should give ~lower_bound ({}), got {}",
+            lower_bound,
+            g[1]
+        );
+    }
+
+    #[test]
+    fn vector_lower_bounded_gate_zero_bound() {
+        // With lower_bound=0, should match regular sigmoid
+        let w = vec![0.0, 0.0]; // 1 dim, d_model=2
+        let x = vec![0.0, 0.0];
+        let g = vector_lower_bounded_gate(&w, &x, 1, 0.0);
+        assert!(
+            (g[0] - 0.5).abs() < 1e-12,
+            "with lb=0 and zero input, gate should be sigmoid(0)=0.5, got {}",
+            g[0]
+        );
+    }
+
+    #[test]
+    fn vector_lower_bounded_gate_at_midpoint() {
+        // At zero input, sigmoid(0)=0.5, so gate = lb + (1-lb)*0.5
+        let w = vec![0.0, 0.0]; // 1 dim, d_model=2
+        let x = vec![0.0, 0.0];
+        let lb = 0.9;
+        let g = vector_lower_bounded_gate(&w, &x, 1, lb);
+        let expected = lb + (1.0 - lb) * 0.5; // 0.9 + 0.1*0.5 = 0.95
+        assert!(
+            (g[0] - expected).abs() < 1e-12,
+            "at zero input with lb=0.9, gate should be {}, got {}",
+            expected,
+            g[0]
         );
     }
 

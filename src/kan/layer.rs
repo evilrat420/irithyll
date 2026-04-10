@@ -303,6 +303,99 @@ impl KANLayer {
         }
     }
 
+    /// Surgically reinitialize all edges connected to a specific output node.
+    ///
+    /// When hidden node `j` dies (low utility), all incoming edges to node `j`
+    /// have their B-spline coefficients, velocity, Adagrad accumulators, and
+    /// scale weights reset to fresh values. This preserves all other nodes'
+    /// learned representations.
+    ///
+    /// # Arguments
+    ///
+    /// * `j` — output node index to reinitialize (must be < `n_out`)
+    /// * `rng` — mutable RNG state for generating fresh coefficients
+    ///
+    /// # Panics
+    ///
+    /// Panics if `j >= n_out`.
+    pub fn reinitialize_output_node(&mut self, j: usize, rng: &mut u64) {
+        assert!(
+            j < self.n_out,
+            "output node index {} out of range (n_out={})",
+            j,
+            self.n_out
+        );
+
+        let scale = (2.0 / (self.n_in + self.n_out) as f64).sqrt();
+
+        // Reinit all incoming edges (j, i) for i in 0..n_in.
+        for i in 0..self.n_in {
+            let edge = j * self.n_in + i;
+            let coeff_base = edge * self.n_coeffs;
+
+            // Reset B-spline coefficients with Xavier-scaled random values.
+            for c in 0..self.n_coeffs {
+                self.coefficients[coeff_base + c] = standard_normal(rng) * scale;
+            }
+
+            // Zero velocity and reset Adagrad accumulator.
+            for c in 0..self.n_coeffs {
+                self.velocity[coeff_base + c] = 0.0;
+                self.grad_sq_accum[coeff_base + c] = 1e-6;
+            }
+
+            // Reset scale weights.
+            self.w_b[edge] = 1.0 / self.n_in as f64;
+            self.w_s[edge] = 1.0;
+        }
+    }
+
+    /// Surgically reinitialize all edges that use a specific input node.
+    ///
+    /// When hidden node `j` in one layer feeds into the next layer as input,
+    /// reinitialize all outgoing edges from that input. This covers the
+    /// outgoing side of a dead hidden unit.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` — input node index to reinitialize (must be < `n_in`)
+    /// * `rng` — mutable RNG state for generating fresh coefficients
+    ///
+    /// # Panics
+    ///
+    /// Panics if `i >= n_in`.
+    pub fn reinitialize_input_node(&mut self, i: usize, rng: &mut u64) {
+        assert!(
+            i < self.n_in,
+            "input node index {} out of range (n_in={})",
+            i,
+            self.n_in
+        );
+
+        let scale = (2.0 / (self.n_in + self.n_out) as f64).sqrt();
+
+        // Reinit all outgoing edges (j, i) for j in 0..n_out.
+        for j in 0..self.n_out {
+            let edge = j * self.n_in + i;
+            let coeff_base = edge * self.n_coeffs;
+
+            // Reset B-spline coefficients with Xavier-scaled random values.
+            for c in 0..self.n_coeffs {
+                self.coefficients[coeff_base + c] = standard_normal(rng) * scale;
+            }
+
+            // Zero velocity and reset Adagrad accumulator.
+            for c in 0..self.n_coeffs {
+                self.velocity[coeff_base + c] = 0.0;
+                self.grad_sq_accum[coeff_base + c] = 1e-6;
+            }
+
+            // Reset scale weights.
+            self.w_b[edge] = 1.0 / self.n_in as f64;
+            self.w_s[edge] = 1.0;
+        }
+    }
+
     /// Input dimension.
     #[allow(dead_code)]
     pub fn n_in(&self) -> usize {

@@ -1,45 +1,55 @@
-//! Streaming sLSTM (stabilized LSTM) with exponential gating.
+//! Streaming mGRADE (Minimal Recurrent Gating with Delay Convolutions).
 //!
-//! sLSTM (Beck et al., 2024 -- xLSTM) replaces sigmoid gates with exponential
-//! gates and adds log-domain stabilization for numerically stable long-range
-//! memory. The output gate remains sigmoid. A normalizer state tracks
-//! cumulative gate products to prevent unbounded cell growth.
+//! mGRADE (arXiv July 2025) combines a minGRU cell -- the simplest possible
+//! gated recurrence -- with a learnable delay convolution that captures fast
+//! temporal patterns. An RLS readout maps the combined representation to
+//! predictions.
 //!
 //! # Architecture
 //!
 //! ```text
-//! x_t -> [sLSTM Cell: exp gates -> log stabilizer -> cell update] -> h_t -> [RLS Readout] -> y_hat_t
+//! x_t -> [DelayConv1D] -> delayed_features -> [MinGRU] -> h_t -> [h_t; delay_out] -> [RLS Readout] -> y_hat_t
 //! ```
+//!
+//! The readout sees `d_hidden + d_in` features (minGRU hidden state +
+//! delay conv output), giving it access to both the recurrent summary and
+//! the raw delayed temporal features.
 //!
 //! # References
 //!
-//! - Beck et al. (2024) "xLSTM: Extended Long Short-Term Memory" NeurIPS
+//! - mGRADE (arXiv July 2025) -- minimal recurrent gating with delay convolutions
+//! - Feng et al. (2024) "Were RNNs All We Needed?" -- minGRU
 
 use crate::error::ConfigError;
 use crate::learner::StreamingLearner;
 use crate::learners::RecursiveLeastSquares;
-use irithyll_core::continual::{ContinualStrategy, NeuronRegeneration};
 
 // ---------------------------------------------------------------------------
-// SLSTMConfig
+// mGRADEConfig
 // ---------------------------------------------------------------------------
 
-/// Configuration for [`StreamingsLSTM`].
+/// Configuration for [`StreamingmGRADE`].
 ///
 /// Create via the builder pattern:
 ///
 /// ```
-/// use irithyll::lstm::SLSTMConfig;
+/// use irithyll::mgrade::mGRADEConfig;
 ///
-/// let config = SLSTMConfig::builder()
-///     .d_model(32)
+/// let config = mGRADEConfig::builder()
+///     .d_in(3)
+///     .d_hidden(32)
 ///     .build()
 ///     .unwrap();
 /// ```
 #[derive(Debug, Clone)]
-pub struct SLSTMConfig {
-    /// Hidden state dimension (default: 32).
-    pub d_model: usize,
+#[allow(non_camel_case_types)]
+pub struct mGRADEConfig {
+    /// Input feature dimension (required).
+    pub d_in: usize,
+    /// MinGRU hidden state dimension (default: 32).
+    pub d_hidden: usize,
+    /// Delay convolution kernel size (default: 4).
+    pub kernel_size: usize,
     /// RLS forgetting factor for readout (default: 0.998).
     pub forgetting_factor: f64,
     /// Initial P matrix diagonal for RLS (default: 100.0).
@@ -48,78 +58,89 @@ pub struct SLSTMConfig {
     pub warmup: usize,
     /// RNG seed (default: 42).
     pub seed: u64,
-    /// Enable plasticity maintenance via neuron regeneration (default: false).
-    ///
-    /// When enabled, tracks per-hidden-unit state energy and periodically
-    /// reinitializes dead units to maintain learning capacity over long
-    /// streams (Dohare et al., Nature 2024).
-    pub plasticity: bool,
 }
 
-impl Default for SLSTMConfig {
+impl Default for mGRADEConfig {
     fn default() -> Self {
         Self {
-            d_model: 32,
+            d_in: 0,
+            d_hidden: 32,
+            kernel_size: 4,
             forgetting_factor: 0.998,
             delta_rls: 100.0,
             warmup: 10,
             seed: 42,
-            plasticity: false,
         }
     }
 }
 
-impl std::fmt::Display for SLSTMConfig {
+impl std::fmt::Display for mGRADEConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "SLSTMConfig(d_model={}, ff={}, delta_rls={}, warmup={}, seed={}, plasticity={})",
-            self.d_model,
+            "mGRADEConfig(d_in={}, d_hidden={}, kernel_size={}, ff={}, warmup={}, seed={})",
+            self.d_in,
+            self.d_hidden,
+            self.kernel_size,
             self.forgetting_factor,
-            self.delta_rls,
             self.warmup,
-            self.seed,
-            self.plasticity
+            self.seed
         )
     }
 }
 
 // ---------------------------------------------------------------------------
-// SLSTMConfigBuilder
+// mGRADEConfigBuilder
 // ---------------------------------------------------------------------------
 
-/// Builder for [`SLSTMConfig`] with validation.
+/// Builder for [`mGRADEConfig`] with validation.
 ///
 /// # Example
 ///
 /// ```
-/// use irithyll::lstm::SLSTMConfig;
+/// use irithyll::mgrade::mGRADEConfig;
 ///
-/// let config = SLSTMConfig::builder()
-///     .d_model(16)
-///     .forgetting_factor(0.995)
+/// let config = mGRADEConfig::builder()
+///     .d_in(5)
+///     .d_hidden(16)
+///     .kernel_size(4)
 ///     .build()
 ///     .unwrap();
 ///
-/// assert_eq!(config.d_model, 16);
+/// assert_eq!(config.d_hidden, 16);
 /// ```
-pub struct SLSTMConfigBuilder {
-    config: SLSTMConfig,
+#[allow(non_camel_case_types)]
+pub struct mGRADEConfigBuilder {
+    config: mGRADEConfig,
 }
 
-impl SLSTMConfig {
+#[allow(non_camel_case_types)]
+impl mGRADEConfig {
     /// Create a new builder with default values.
-    pub fn builder() -> SLSTMConfigBuilder {
-        SLSTMConfigBuilder {
-            config: SLSTMConfig::default(),
+    pub fn builder() -> mGRADEConfigBuilder {
+        mGRADEConfigBuilder {
+            config: mGRADEConfig::default(),
         }
     }
 }
 
-impl SLSTMConfigBuilder {
-    /// Set the hidden state dimension (default: 32).
-    pub fn d_model(mut self, d: usize) -> Self {
-        self.config.d_model = d;
+#[allow(non_camel_case_types)]
+impl mGRADEConfigBuilder {
+    /// Set the input feature dimension (required).
+    pub fn d_in(mut self, d: usize) -> Self {
+        self.config.d_in = d;
+        self
+    }
+
+    /// Set the MinGRU hidden state dimension (default: 32).
+    pub fn d_hidden(mut self, d: usize) -> Self {
+        self.config.d_hidden = d;
+        self
+    }
+
+    /// Set the delay convolution kernel size (default: 4).
+    pub fn kernel_size(mut self, k: usize) -> Self {
+        self.config.kernel_size = k;
         self
     }
 
@@ -147,28 +168,31 @@ impl SLSTMConfigBuilder {
         self
     }
 
-    /// Enable or disable plasticity maintenance (default: false).
-    ///
-    /// When enabled, tracks per-hidden-unit state energy and periodically
-    /// reinitializes dead units to maintain learning capacity over long
-    /// streams (Dohare et al., Nature 2024).
-    pub fn plasticity(mut self, p: bool) -> Self {
-        self.config.plasticity = p;
-        self
-    }
-
     /// Build the config, validating all parameters.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError`] if `d_model` is 0.
-    pub fn build(self) -> Result<SLSTMConfig, ConfigError> {
+    /// Returns [`ConfigError`] if:
+    /// - `d_in` is 0
+    /// - `d_hidden` is 0
+    /// - `kernel_size` is less than 2
+    pub fn build(self) -> Result<mGRADEConfig, ConfigError> {
         let c = &self.config;
-        if c.d_model == 0 {
+        if c.d_in == 0 {
+            return Err(ConfigError::out_of_range("d_in", "must be > 0", c.d_in));
+        }
+        if c.d_hidden == 0 {
             return Err(ConfigError::out_of_range(
-                "d_model",
+                "d_hidden",
                 "must be > 0",
-                c.d_model,
+                c.d_hidden,
+            ));
+        }
+        if c.kernel_size < 2 {
+            return Err(ConfigError::out_of_range(
+                "kernel_size",
+                "must be >= 2",
+                c.kernel_size,
             ));
         }
         Ok(self.config)
@@ -176,29 +200,31 @@ impl SLSTMConfigBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// StreamingsLSTM
+// StreamingmGRADE
 // ---------------------------------------------------------------------------
 
-/// Streaming sLSTM model with RLS readout.
+/// Streaming mGRADE model with RLS readout.
 ///
-/// Processes one sample at a time. The sLSTM cell uses exponential gating
-/// with log-domain stabilization for numerically stable long-range memory.
-/// An RLS readout maps the cell hidden state to predictions.
+/// Processes one sample at a time. A delay convolution captures fast temporal
+/// patterns, a minGRU cell provides recurrent gating, and an RLS readout maps
+/// the combined representation to predictions.
 ///
 /// # Example
 ///
 /// ```no_run
-/// use irithyll::lstm::{StreamingsLSTM, SLSTMConfig};
+/// use irithyll::mgrade::{StreamingmGRADE, mGRADEConfig};
 /// use irithyll::StreamingLearner;
 ///
-/// let config = SLSTMConfig::builder().d_model(16).build().unwrap();
-/// let mut model = StreamingsLSTM::new(config);
+/// let config = mGRADEConfig::builder().d_in(3).d_hidden(16).build().unwrap();
+/// let mut model = StreamingmGRADE::new(config);
 /// model.train(&[1.0, 2.0, 3.0], 4.0);
 /// let pred = model.predict(&[1.0, 2.0, 3.0]);
 /// ```
-pub struct StreamingsLSTM {
-    config: SLSTMConfig,
-    cell: irithyll_core::lstm::SLSTMCell,
+#[allow(non_camel_case_types)]
+pub struct StreamingmGRADE {
+    config: mGRADEConfig,
+    delay_conv: irithyll_core::mgrade::DelayConv1D,
+    min_gru: irithyll_core::mgrade::MinGRUCell,
     readout: RecursiveLeastSquares,
     last_features: Vec<f64>,
     total_seen: u64,
@@ -217,43 +243,24 @@ pub struct StreamingsLSTM {
     prev_change: f64,
     /// Change from two steps ago, for acceleration-based alignment.
     prev_prev_change: f64,
-    /// Optional plasticity guard for maintaining learning capacity.
-    ///
-    /// Tracks per-hidden-unit state energy and reinitializes dead units
-    /// to prevent loss of plasticity over long streams.
-    plasticity_guard: Option<NeuronRegeneration>,
-    /// Snapshot of hidden state from previous step, used for plasticity
-    /// utility computation (delta |h|).
-    prev_h_energy: Vec<f64>,
 }
 
-impl StreamingsLSTM {
-    /// Create a new StreamingsLSTM from config.
-    pub fn new(config: SLSTMConfig) -> Self {
-        let cell = irithyll_core::lstm::SLSTMCell::new(config.d_model, config.seed);
+#[allow(non_camel_case_types)]
+impl StreamingmGRADE {
+    /// Create a new StreamingmGRADE from config.
+    pub fn new(config: mGRADEConfig) -> Self {
+        let delay_conv =
+            irithyll_core::mgrade::DelayConv1D::new(config.d_in, config.kernel_size, config.seed);
+        let min_gru = irithyll_core::mgrade::MinGRUCell::new(config.d_hidden, config.seed);
         let readout = RecursiveLeastSquares::with_delta(config.forgetting_factor, config.delta_rls);
-        let last_features = vec![0.0; config.d_model];
-
-        // Create plasticity guard if enabled.
-        // Tracks d_model hidden units (group_size=1), regenerating the bottom 1%
-        // every 500 steps with utility EWMA alpha=0.99.
-        let plasticity_guard = if config.plasticity {
-            Some(NeuronRegeneration::new(
-                config.d_model, // n_params = one per hidden unit
-                1,              // group_size = 1 (per-unit tracking)
-                0.01,           // regen_fraction = 1%
-                500,            // regen_interval
-                0.99,           // utility_alpha
-                config.seed.wrapping_add(0x_DEAD_CAFE),
-            ))
-        } else {
-            None
-        };
-        let prev_h_energy = vec![0.0; config.d_model];
+        // Readout sees d_hidden + d_in features
+        let readout_dim = config.d_hidden + config.d_in;
+        let last_features = vec![0.0; readout_dim];
 
         Self {
             config,
-            cell,
+            delay_conv,
+            min_gru,
             readout,
             last_features,
             total_seen: 0,
@@ -265,8 +272,6 @@ impl StreamingsLSTM {
             alignment_ewma: 0.0,
             prev_change: 0.0,
             prev_prev_change: 0.0,
-            plasticity_guard,
-            prev_h_energy,
         }
     }
 
@@ -277,7 +282,7 @@ impl StreamingsLSTM {
     }
 
     /// Access the config.
-    pub fn config(&self) -> &SLSTMConfig {
+    pub fn config(&self) -> &mGRADEConfig {
         &self.config
     }
 
@@ -291,9 +296,20 @@ impl StreamingsLSTM {
     pub fn prediction_uncertainty(&self) -> f64 {
         self.readout.noise_variance().sqrt()
     }
+
+    /// Build readout features from delay conv output and minGRU hidden state.
+    ///
+    /// Layout: [hidden_state; delay_output]
+    fn build_readout_features(hidden: &[f64], delay_out: &[f64], out: &mut Vec<f64>) {
+        let total = hidden.len() + delay_out.len();
+        out.resize(total, 0.0);
+        out[..hidden.len()].copy_from_slice(hidden);
+        out[hidden.len()..].copy_from_slice(delay_out);
+    }
 }
 
-impl StreamingLearner for StreamingsLSTM {
+#[allow(non_camel_case_types)]
+impl StreamingLearner for StreamingmGRADE {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
         // 1. Uncertainty-modulated RLS forgetting factor
         let current_uncertainty = self.readout.noise_variance().sqrt();
@@ -321,7 +337,8 @@ impl StreamingLearner for StreamingsLSTM {
                 && self.rolling_uncertainty > 1e-10
                 && short_rmse > 1.5 * self.rolling_uncertainty
             {
-                self.cell.reset();
+                self.min_gru.reset();
+                self.delay_conv.reset();
             }
 
             // Alignment tracking
@@ -345,13 +362,17 @@ impl StreamingLearner for StreamingsLSTM {
             self.prev_prediction = current_pred;
         }
 
-        // 3. Forward through sLSTM cell (updates state)
-        // Clone immediately to release the borrow on self.cell.
-        let cell_output = self.cell.forward(features).to_vec();
+        // 3. Forward through delay conv then minGRU (updates state)
+        let delay_output = self.delay_conv.forward(features);
+        let cell_output = self.min_gru.forward(&delay_output).to_vec();
         self.total_seen += 1;
 
-        // 4. Track output utilization
-        let frob_sq: f64 = cell_output.iter().map(|s| s * s).sum();
+        // 4. Build readout features: [hidden_state; delay_output]
+        let mut readout_features = std::mem::take(&mut self.last_features);
+        Self::build_readout_features(&cell_output, &delay_output, &mut readout_features);
+
+        // 5. Track output utilization
+        let frob_sq: f64 = readout_features.iter().map(|s| s * s).sum();
         const FROB_ALPHA: f64 = 0.001;
         self.max_frob_sq_ewma = if frob_sq > self.max_frob_sq_ewma {
             frob_sq
@@ -359,45 +380,25 @@ impl StreamingLearner for StreamingsLSTM {
             (1.0 - FROB_ALPHA) * self.max_frob_sq_ewma + FROB_ALPHA * frob_sq
         };
 
-        // 5. Train RLS readout (after warmup)
+        // 6. Train RLS readout (after warmup)
         if self.past_warmup() {
-            self.readout.train_one(&cell_output, target, weight);
+            self.readout.train_one(&readout_features, target, weight);
             self.samples_trained += 1;
         }
 
-        // 6. Plasticity maintenance (Dohare et al., Nature 2024):
-        //    Track per-unit hidden state activation as utility signal.
-        //    When a unit dies (utility drops to bottom fraction), surgically
-        //    reinitialize its weight columns while preserving all other units.
-        if let Some(ref mut guard) = self.plasticity_guard {
-            let mut h_energy: Vec<f64> = self.cell.hidden_state().iter().map(|x| x.abs()).collect();
-            guard.pre_update(&self.prev_h_energy, &mut h_energy);
-            guard.post_update(&self.prev_h_energy);
-            // Surgical per-unit reinit: only dead units get recycled.
-            // Uses reinitialize_unit() which reinits weight rows in W_f/W_i/W_o/W_z,
-            // resets biases (forget=1.0), and zeros h/c/n/m for just that unit.
-            let mut reinit_rng = self
-                .config
-                .seed
-                .wrapping_add(0xCAFE_BABE_u64.wrapping_mul(self.total_seen));
-            for j in 0..guard.n_groups() {
-                if guard.was_regenerated(j) {
-                    self.cell.reinitialize_unit(j, &mut reinit_rng);
-                }
-            }
-            self.prev_h_energy = self.cell.hidden_state().iter().map(|x| x.abs()).collect();
-        }
-
         // 7. Cache for predict()
-        self.last_features = cell_output;
+        self.last_features = readout_features;
     }
 
     fn predict(&self, features: &[f64]) -> f64 {
         if self.total_seen == 0 {
             return 0.0;
         }
-        let cell_features = self.cell.forward_predict(features);
-        self.readout.predict(&cell_features)
+        let delay_output = self.delay_conv.forward_predict(features);
+        let cell_output = self.min_gru.forward_predict(&delay_output);
+        let mut readout_features = vec![0.0; self.config.d_hidden + self.config.d_in];
+        Self::build_readout_features(&cell_output, &delay_output, &mut readout_features);
+        self.readout.predict(&readout_features)
     }
 
     #[inline]
@@ -406,7 +407,8 @@ impl StreamingLearner for StreamingsLSTM {
     }
 
     fn reset(&mut self) {
-        self.cell.reset();
+        self.delay_conv.reset();
+        self.min_gru.reset();
         self.readout.reset();
         self.last_features.iter_mut().for_each(|f| *f = 0.0);
         self.total_seen = 0;
@@ -418,10 +420,6 @@ impl StreamingLearner for StreamingsLSTM {
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
         self.max_frob_sq_ewma = 0.0;
-        if let Some(ref mut guard) = self.plasticity_guard {
-            guard.reset();
-        }
-        self.prev_h_energy.fill(0.0);
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -447,10 +445,13 @@ impl StreamingLearner for StreamingsLSTM {
 // Debug impl
 // ---------------------------------------------------------------------------
 
-impl std::fmt::Debug for StreamingsLSTM {
+#[allow(non_camel_case_types)]
+impl std::fmt::Debug for StreamingmGRADE {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamingsLSTM")
-            .field("d_model", &self.config.d_model)
+        f.debug_struct("StreamingmGRADE")
+            .field("d_in", &self.config.d_in)
+            .field("d_hidden", &self.config.d_hidden)
+            .field("kernel_size", &self.config.kernel_size)
             .field("warmup", &self.config.warmup)
             .field("total_seen", &self.total_seen)
             .field("samples_trained", &self.samples_trained)
@@ -463,7 +464,8 @@ impl std::fmt::Debug for StreamingsLSTM {
 // DiagnosticSource impl
 // ---------------------------------------------------------------------------
 
-impl crate::automl::DiagnosticSource for StreamingsLSTM {
+#[allow(non_camel_case_types)]
+impl crate::automl::DiagnosticSource for StreamingmGRADE {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         // RLS saturation: 1.0 - trace(P) / (delta * d).
         let rls_saturation = {
@@ -477,7 +479,7 @@ impl crate::automl::DiagnosticSource for StreamingsLSTM {
             }
         };
 
-        // sLSTM output Frobenius ratio: current ||h||_2^2 / max(||h||_2^2).
+        // Output Frobenius ratio: current ||features||_2^2 / max(||features||_2^2).
         let state_frob_ratio = {
             let frob_sq: f64 = self.last_features.iter().map(|s| s * s).sum();
             if self.max_frob_sq_ewma > 1e-15 {
@@ -517,33 +519,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slstm_config_builder_default() {
-        let config = SLSTMConfig::builder().build().unwrap();
-        assert_eq!(config.d_model, 32);
+    fn mgrade_config_builder_default() {
+        let config = mGRADEConfig::builder().d_in(3).build().unwrap();
+        assert_eq!(config.d_hidden, 32);
+        assert_eq!(config.kernel_size, 4);
         assert_eq!(config.warmup, 10);
     }
 
     #[test]
-    fn slstm_config_rejects_zero_d_model() {
-        assert!(SLSTMConfig::builder().d_model(0).build().is_err());
+    fn mgrade_config_rejects_zero_d_in() {
+        assert!(mGRADEConfig::builder().build().is_err());
     }
 
     #[test]
-    fn slstm_new_creates_model() {
-        let config = SLSTMConfig::builder().d_model(16).build().unwrap();
-        let model = StreamingsLSTM::new(config);
+    fn mgrade_config_rejects_zero_d_hidden() {
+        assert!(mGRADEConfig::builder().d_in(3).d_hidden(0).build().is_err());
+    }
+
+    #[test]
+    fn mgrade_config_rejects_kernel_size_one() {
+        assert!(mGRADEConfig::builder()
+            .d_in(3)
+            .kernel_size(1)
+            .build()
+            .is_err());
+    }
+
+    #[test]
+    fn mgrade_new_creates_model() {
+        let config = mGRADEConfig::builder()
+            .d_in(3)
+            .d_hidden(16)
+            .build()
+            .unwrap();
+        let model = StreamingmGRADE::new(config);
         assert_eq!(model.n_samples_seen(), 0);
         assert!(!model.past_warmup());
     }
 
     #[test]
-    fn slstm_train_and_predict_finite() {
-        let config = SLSTMConfig::builder()
-            .d_model(16)
+    fn mgrade_train_and_predict_finite() {
+        let config = mGRADEConfig::builder()
+            .d_in(2)
+            .d_hidden(16)
             .warmup(5)
             .build()
             .unwrap();
-        let mut model = StreamingsLSTM::new(config);
+        let mut model = StreamingmGRADE::new(config);
         for i in 0..50 {
             let x = [i as f64 * 0.1, (i as f64).sin()];
             let y = x[0] * 2.0 + 1.0;
@@ -555,11 +577,16 @@ mod tests {
     }
 
     #[test]
-    fn slstm_reset_clears_state() {
-        let config = SLSTMConfig::builder().d_model(8).warmup(3).build().unwrap();
-        let mut model = StreamingsLSTM::new(config);
+    fn mgrade_reset_clears_state() {
+        let config = mGRADEConfig::builder()
+            .d_in(2)
+            .d_hidden(8)
+            .warmup(3)
+            .build()
+            .unwrap();
+        let mut model = StreamingmGRADE::new(config);
         for i in 0..20 {
-            model.train(&[i as f64], i as f64 * 2.0);
+            model.train(&[i as f64, (i as f64) * 0.5], i as f64 * 2.0);
         }
         assert!(model.n_samples_seen() > 0);
         model.reset();
@@ -568,16 +595,21 @@ mod tests {
     }
 
     #[test]
-    fn slstm_predict_before_train_returns_zero() {
-        let config = SLSTMConfig::builder().d_model(8).build().unwrap();
-        let model = StreamingsLSTM::new(config);
+    fn mgrade_predict_before_train_returns_zero() {
+        let config = mGRADEConfig::builder().d_in(2).d_hidden(8).build().unwrap();
+        let model = StreamingmGRADE::new(config);
         assert_eq!(model.predict(&[1.0, 2.0]), 0.0);
     }
 
     #[test]
-    fn slstm_diagnostics_array_finite() {
-        let config = SLSTMConfig::builder().d_model(8).warmup(3).build().unwrap();
-        let mut model = StreamingsLSTM::new(config);
+    fn mgrade_diagnostics_array_finite() {
+        let config = mGRADEConfig::builder()
+            .d_in(1)
+            .d_hidden(8)
+            .warmup(3)
+            .build()
+            .unwrap();
+        let mut model = StreamingmGRADE::new(config);
         for i in 0..30 {
             model.train(&[i as f64 * 0.1], i as f64);
         }
@@ -591,98 +623,25 @@ mod tests {
     }
 
     #[test]
-    fn slstm_readout_weights_available_after_training() {
-        let config = SLSTMConfig::builder().d_model(8).warmup(3).build().unwrap();
-        let mut model = StreamingsLSTM::new(config);
+    fn mgrade_readout_weights_available_after_training() {
+        let config = mGRADEConfig::builder()
+            .d_in(2)
+            .d_hidden(8)
+            .warmup(3)
+            .build()
+            .unwrap();
+        let mut model = StreamingmGRADE::new(config);
         assert!(model.readout_weights().is_none());
         for i in 0..20 {
-            model.train(&[i as f64], i as f64);
+            model.train(&[i as f64, (i as f64) * 0.5], i as f64);
         }
         assert!(model.readout_weights().is_some());
     }
 
     #[test]
-    fn slstm_streaming_learner_boxable() {
-        let config = SLSTMConfig::builder().d_model(8).build().unwrap();
-        let model = StreamingsLSTM::new(config);
+    fn mgrade_streaming_learner_boxable() {
+        let config = mGRADEConfig::builder().d_in(2).d_hidden(8).build().unwrap();
+        let model = StreamingmGRADE::new(config);
         let _boxed: Box<dyn StreamingLearner> = Box::new(model);
-    }
-
-    #[test]
-    fn slstm_plasticity_disabled_by_default() {
-        let config = SLSTMConfig::builder().d_model(8).build().unwrap();
-        assert!(!config.plasticity, "plasticity should default to false");
-        let model = StreamingsLSTM::new(config);
-        assert!(
-            model.plasticity_guard.is_none(),
-            "guard should be None when plasticity is disabled"
-        );
-    }
-
-    #[test]
-    fn slstm_plasticity_enabled_creates_guard() {
-        let config = SLSTMConfig::builder()
-            .d_model(16)
-            .plasticity(true)
-            .build()
-            .unwrap();
-        assert!(config.plasticity, "plasticity should be true when set");
-        let model = StreamingsLSTM::new(config);
-        assert!(
-            model.plasticity_guard.is_some(),
-            "guard should be Some when plasticity is enabled"
-        );
-        let guard = model.plasticity_guard.as_ref().unwrap();
-        assert_eq!(
-            guard.n_groups(),
-            16,
-            "should have one group per hidden unit"
-        );
-    }
-
-    #[test]
-    fn slstm_plasticity_train_runs_without_panic() {
-        let config = SLSTMConfig::builder()
-            .d_model(8)
-            .warmup(3)
-            .plasticity(true)
-            .build()
-            .unwrap();
-        let mut model = StreamingsLSTM::new(config);
-        for i in 0..600 {
-            let x = [i as f64 * 0.01, (i as f64 * 0.1).sin()];
-            let y = x[0] * 2.0 + 1.0;
-            model.train(&x, y);
-        }
-        let pred = model.predict(&[1.0, 0.5]);
-        assert!(
-            pred.is_finite(),
-            "plasticity-enabled model should produce finite predictions, got {pred}"
-        );
-    }
-
-    #[test]
-    fn slstm_plasticity_reset_clears_guard() {
-        let config = SLSTMConfig::builder()
-            .d_model(8)
-            .warmup(3)
-            .plasticity(true)
-            .build()
-            .unwrap();
-        let mut model = StreamingsLSTM::new(config);
-        for i in 0..20 {
-            model.train(&[i as f64], i as f64);
-        }
-        model.reset();
-        let guard = model.plasticity_guard.as_ref().unwrap();
-        assert_eq!(
-            guard.n_updates(),
-            0,
-            "plasticity guard should be reset after model reset"
-        );
-        assert!(
-            model.prev_h_energy.iter().all(|&e| e == 0.0),
-            "prev_h_energy should be zeroed after reset"
-        );
     }
 }

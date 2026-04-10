@@ -20,6 +20,7 @@
 /// - **MLSTM** -- xLSTM matrix memory with forget+input gates (Beck et al., 2024)
 /// - **DeltaProduct** -- Product of n_h Householder delta rules (Siems et al., NeurIPS 2025)
 /// - **RWKV7** -- Vector-gated delta rule with DPLR transitions (Peng et al., 2025)
+/// - **HGRN2** -- Lower-bounded gated linear RNN with state expansion (Qin et al., ICML 2024)
 #[derive(Clone, Debug)]
 pub enum AttentionMode {
     /// Fixed exponential decay: `S = gamma * S + k * v^T`.
@@ -65,6 +66,17 @@ pub enum AttentionMode {
     /// and decoupled removal/replacement keys. The transition matrix is
     /// diagonal-plus-low-rank (DPLR), enabling state tracking beyond TC^0.
     RWKV7,
+    /// HGRN2: gated linear RNN with outer-product state expansion (Qin et al., ICML 2024).
+    ///
+    /// Uses a lower-bounded forget gate for minimum memory retention.
+    /// The state update is outer-product based (like GLA) but with the
+    /// bounded gate ensuring the model never completely forgets.
+    /// `alpha_t = lower_bound + (1 - lower_bound) * sigmoid(raw_t)` per dimension.
+    HGRN2 {
+        /// Lower bound for forget gate (default: 0.9, range 0.0..1.0).
+        /// Higher values ensure stronger memory retention.
+        lower_bound: f64,
+    },
 }
 
 /// Full configuration for a multi-head streaming attention layer.
@@ -161,8 +173,9 @@ mod tests {
             AttentionMode::MLSTM,
             AttentionMode::DeltaProduct { n_compositions: 3 },
             AttentionMode::RWKV7,
+            AttentionMode::HGRN2 { lower_bound: 0.9 },
         ];
-        assert_eq!(modes.len(), 9, "should have exactly 9 modes");
+        assert_eq!(modes.len(), 10, "should have exactly 10 modes");
     }
 
     #[test]
