@@ -96,6 +96,10 @@ pub mod continual;
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub mod lstm;
 
+#[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
+pub mod turbo_quant;
+
 // Convenience re-exports -- inference
 pub use error::FormatError;
 pub use packed::{EnsembleHeader, PackedNode, TreeEntry};

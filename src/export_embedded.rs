@@ -3,12 +3,14 @@
 //! Converts the tree ensemble into a compact, zero-alloc-friendly binary
 //! that can be loaded by [`irithyll_core::EnsembleView`] on embedded targets.
 //!
-//! Two export paths are provided:
+//! Three export paths are provided:
 //!
 //! - [`export_packed`] — f32 format (12-byte nodes), loaded by [`irithyll_core::EnsembleView`]
 //! - [`export_packed_i16`] — int16 quantized format (8-byte nodes), loaded by
 //!   [`irithyll_core::QuantizedEnsembleView`]. Per-feature threshold quantization
 //!   and global leaf quantization eliminate all float ops from the inference hot loop.
+//! - [`export_turbo_quantized_weights`] — 3.5-bit TurboQuant format for weight vectors
+//!   (neural model readout weights). 4.6× compression vs f64.
 //!
 //! # Usage
 //!
@@ -560,6 +562,63 @@ pub fn export_distributional_packed(
 /// Cast a `repr(C)` struct to its byte representation.
 fn as_bytes<T: Sized>(val: &T) -> &[u8] {
     unsafe { core::slice::from_raw_parts(val as *const T as *const u8, core::mem::size_of::<T>()) }
+}
+
+/// Quantize a weight vector to 3.5-bit TurboQuant format.
+///
+/// Compresses `weights` using irithyll-core's TurboQuant: 11-level linear grid
+/// with mixed-radix base-11 packing (7 values per `u32`). Returns the packed
+/// binary that can be loaded by [`irithyll_core::turbo_quant::TurboQuantizedView`].
+///
+/// This is useful for exporting neural model readout weights (RLS, TTT, sLSTM)
+/// for memory-constrained embedded inference. Compression ratio is ~4.6× vs f64.
+///
+/// # Example
+///
+/// ```no_run
+/// use irithyll::export_embedded::export_turbo_quantized_weights;
+///
+/// let weights = vec![0.1, -0.5, 0.3, 0.0, -0.2, 0.4, 0.1];
+/// let packed = export_turbo_quantized_weights(&weights);
+/// // Load with irithyll_core::turbo_quant::TurboQuantizedView::from_bytes(&packed)
+/// ```
+pub fn export_turbo_quantized_weights(weights: &[f64]) -> Vec<u8> {
+    irithyll_core::turbo_quant::quantize_weights(weights).to_bytes()
+}
+
+/// Validate TurboQuant quantization quality against original weights.
+///
+/// Returns the maximum absolute error across all weights. A well-quantized
+/// vector should have max error < `range / 10` (one quantization step).
+///
+/// # Panics
+///
+/// Panics if `packed` is not a valid TurboQuant binary.
+pub fn validate_turbo_quantized(weights: &[f64], packed: &[u8]) -> f64 {
+    let view = irithyll_core::turbo_quant::TurboQuantizedView::from_bytes(packed)
+        .expect("validate_turbo_quantized: invalid packed binary");
+
+    assert_eq!(
+        view.n_weights(),
+        weights.len(),
+        "weight count mismatch: original {} vs packed {}",
+        weights.len(),
+        view.n_weights()
+    );
+
+    // Predict with unit features to extract individual dequantized weights
+    let mut max_diff: f64 = 0.0;
+    for (i, &w) in weights.iter().enumerate() {
+        let mut unit = vec![0.0; weights.len()];
+        unit[i] = 1.0;
+        let dequant = view.predict(&unit);
+        let diff = (w - dequant).abs();
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+
+    max_diff
 }
 
 // ---------------------------------------------------------------------------

@@ -20,7 +20,6 @@
 //! where neuron 0's predecessor is neuron N-1 (ring closure).
 
 use super::prng::Xorshift64Rng;
-use crate::math;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -140,31 +139,24 @@ impl CycleReservoir {
         // We need the old state to compute the new state, so clone it.
         let old_state = self.state.clone();
 
+        // 1. Batch all input dot products via mat_vec (replaces n individual simd_dot calls).
+        let mut input_terms = vec![0.0; n];
+        crate::simd::simd_mat_vec(&self.w_input, input, n, d, &mut input_terms);
+
+        // 2. Compute all pre-activations.
+        let mut pre = vec![0.0; n];
         for i in 0..n {
-            // Predecessor index in the ring.
             let prev = if i == 0 { n - 1 } else { i - 1 };
+            pre[i] = self.w_cycle[prev] * old_state[prev] + input_terms[i] + self.bias[i];
+        }
 
-            // Cycle contribution: w_cycle[prev] * old_state[prev].
-            // w_cycle[prev] is the weight from neuron prev to neuron i.
-            let cycle_term = self.w_cycle[prev] * old_state[prev];
+        // 3. Batch tanh.
+        let mut x_tilde = vec![0.0; n];
+        crate::simd::simd_tanh(&pre, &mut x_tilde);
 
-            // Input contribution: dot(w_input[i], input).
-            let row_start = i * d;
-            let input_term = crate::simd::simd_dot(&self.w_input[row_start..row_start + d], input);
-
-            // Pre-activation with bias.
-            let pre_activation = cycle_term + input_term + self.bias[i];
-
-            // Nonlinearity.
-            let x_tilde = math::tanh(pre_activation);
-
-            // Leaky integration.
-            self.state[i] = one_minus_leak * old_state[i] + leak * x_tilde;
-
-            // Defensive clamp: tanh already bounds x_tilde to [-1, 1] and leaky
-            // integration preserves this bound, but clamp to [-10, 10] as a
-            // numerical safety guard against any floating-point edge cases.
-            self.state[i] = self.state[i].clamp(-10.0, 10.0);
+        // 4. Leaky integration with defensive clamp.
+        for i in 0..n {
+            self.state[i] = (one_minus_leak * old_state[i] + leak * x_tilde[i]).clamp(-10.0, 10.0);
         }
     }
 

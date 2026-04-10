@@ -131,6 +131,15 @@ pub use irithyll_core;
 pub use irithyll_core::{EnsembleView, FormatError, PackedNode};
 pub use irithyll_core::{PackedNodeI16, QuantizedEnsembleHeader, QuantizedEnsembleView};
 
+// Re-exports -- TurboQuant quantization (8-bit, 3.5-bit, 2.5-bit)
+pub use irithyll_core::turbo_quant::{
+    quantize, quantize_f32, quantize_i16, quantize_weights, quantize_weights_with_seed, QuantMode,
+    TurboQuantized, TurboQuantizedView,
+};
+
+// Re-exports -- SIMD activations
+pub use irithyll_core::simd::{simd_exp, simd_sigmoid, simd_silu, simd_tanh};
+
 // Re-exports -- core types
 pub use drift::{DriftDetector, DriftSignal};
 pub use ensemble::adaptive::AdaptiveSGBT;

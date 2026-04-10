@@ -32,6 +32,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::mem;
 
 use crate::math;
 use crate::rng::standard_normal;
@@ -79,6 +80,11 @@ pub struct SLSTMCell {
     n: Vec<f64>,
     m: Vec<f64>,
 
+    // Pre-allocated scratch buffer, partitioned during forward().
+    // Layout: [pre_f | pre_i | pre_o | pre_z | xh | o_gate | z_gate | f_prime | i_prime]
+    // Sizes:   d_h     d_h     d_h     d_h    d_total  d_h     d_h      d_h      d_h
+    scratch: Vec<f64>,
+
     d_input: usize,
     d_hidden: usize,
     initialized: bool,
@@ -109,6 +115,7 @@ impl SLSTMCell {
             c: vec![0.0; d_hidden],
             n: vec![1.0; d_hidden],
             m: vec![0.0; d_hidden],
+            scratch: Vec::new(),
             d_input: 0,
             d_hidden,
             initialized: false,
@@ -148,6 +155,11 @@ impl SLSTMCell {
         self.b_o = vec![0.0; self.d_hidden];
         self.b_z = vec![0.0; self.d_hidden];
 
+        // Scratch: 4*d_hidden (pre_f, pre_i, pre_o, pre_z)
+        //        + d_total (xh)
+        //        + 4*d_hidden (o_gate, z_gate, f_prime, i_prime)
+        self.scratch = vec![0.0; 8 * self.d_hidden + d_total];
+
         self.initialized = true;
     }
 
@@ -168,60 +180,71 @@ impl SLSTMCell {
         let d_h = self.d_hidden;
         let d_total = self.d_input + d_h;
 
+        // Take scratch out of self to avoid borrow conflicts with other fields.
+        let mut scratch = mem::take(&mut self.scratch);
+
+        // Partition scratch:
+        // [pre_f | pre_i | pre_o | pre_z | xh | o_gate | z_gate | f_prime | i_prime]
+        let (pre_f, rest) = scratch.split_at_mut(d_h);
+        let (pre_i, rest) = rest.split_at_mut(d_h);
+        let (pre_o, rest) = rest.split_at_mut(d_h);
+        let (pre_z, rest) = rest.split_at_mut(d_h);
+        let (xh, rest) = rest.split_at_mut(d_total);
+        let (o_gate, rest) = rest.split_at_mut(d_h);
+        let (z_gate, rest) = rest.split_at_mut(d_h);
+        let (f_prime, i_prime) = rest.split_at_mut(d_h);
+
+        // 1. Build xh = [x, h_{t-1}] — snapshot of h before any updates.
+        xh[..self.d_input].copy_from_slice(x);
+        xh[self.d_input..].copy_from_slice(&self.h);
+
+        // 2. Batch matrix-vector for all 4 gates.
+        crate::simd::simd_mat_vec(&self.w_f, xh, d_h, d_total, pre_f);
+        crate::simd::simd_mat_vec(&self.w_i, xh, d_h, d_total, pre_i);
+        crate::simd::simd_mat_vec(&self.w_o, xh, d_h, d_total, pre_o);
+        crate::simd::simd_mat_vec(&self.w_z, xh, d_h, d_total, pre_z);
+
+        // 3. Add biases + clamp forget/input gates.
         for j in 0..d_h {
-            let row_offset = j * d_total;
+            pre_f[j] += self.b_f[j];
+            pre_i[j] += self.b_i[j];
+            pre_o[j] += self.b_o[j];
+            pre_z[j] += self.b_z[j];
+            pre_f[j] = clamp(pre_f[j], -PRE_GATE_CLAMP, PRE_GATE_CLAMP);
+            pre_i[j] = clamp(pre_i[j], -PRE_GATE_CLAMP, PRE_GATE_CLAMP);
+        }
 
-            // Compute pre-activations: dot(w[j], [x, h]) + b[j]
-            let mut pre_f = self.b_f[j];
-            let mut pre_i = self.b_i[j];
-            let mut pre_o = self.b_o[j];
-            let mut pre_z = self.b_z[j];
+        // 4. Batch activations: sigmoid for output gate, tanh for candidate.
+        crate::simd::simd_sigmoid(pre_o, o_gate);
+        crate::simd::simd_tanh(pre_z, z_gate);
 
-            for (k, &xk) in x.iter().enumerate() {
-                pre_f += self.w_f[row_offset + k] * xk;
-                pre_i += self.w_i[row_offset + k] * xk;
-                pre_o += self.w_o[row_offset + k] * xk;
-                pre_z += self.w_z[row_offset + k] * xk;
-            }
-            let h_offset = row_offset + self.d_input;
-            for k in 0..d_h {
-                let hk = self.h[k];
-                pre_f += self.w_f[h_offset + k] * hk;
-                pre_i += self.w_i[h_offset + k] * hk;
-                pre_o += self.w_o[h_offset + k] * hk;
-                pre_z += self.w_z[h_offset + k] * hk;
-            }
-
-            // Clamp pre-activations for forget and input gates to prevent exp overflow
-            pre_f = clamp(pre_f, -PRE_GATE_CLAMP, PRE_GATE_CLAMP);
-            pre_i = clamp(pre_i, -PRE_GATE_CLAMP, PRE_GATE_CLAMP);
-
-            // Log-domain stabilizer
-            let m_old = self.m[j];
-            let log_f = pre_f + m_old;
-            let m_new = if log_f > pre_i { log_f } else { pre_i };
-
-            // Stabilized exponential gates
-            let f_prime = math::exp(log_f - m_new);
-            let i_prime = math::exp(pre_i - m_new);
-
-            // Standard gates
-            let o = math::sigmoid(pre_o);
-            let z = math::tanh(pre_z);
-
-            // State updates
-            self.c[j] = f_prime * self.c[j] + i_prime * z;
-            self.n[j] = f_prime * self.n[j] + i_prime;
+        // 5. Compute stabilizers; reuse pre_f/pre_i in-place as exp inputs.
+        for j in 0..d_h {
+            let log_f = pre_f[j] + self.m[j];
+            let m_new = if log_f > pre_i[j] { log_f } else { pre_i[j] };
+            pre_f[j] = log_f - m_new;
+            pre_i[j] -= m_new;
             self.m[j] = m_new;
+        }
 
-            // Normalized output
+        // 6. Batch exp for stabilized gates.
+        crate::simd::simd_exp(pre_f, f_prime);
+        crate::simd::simd_exp(pre_i, i_prime);
+
+        // 7. State updates.
+        for j in 0..d_h {
+            self.c[j] = f_prime[j] * self.c[j] + i_prime[j] * z_gate[j];
+            self.n[j] = f_prime[j] * self.n[j] + i_prime[j];
             let denom = if math::abs(self.n[j]) > 1.0 {
                 math::abs(self.n[j])
             } else {
                 1.0
             };
-            self.h[j] = o * (self.c[j] / denom);
+            self.h[j] = o_gate[j] * (self.c[j] / denom);
         }
+
+        // Put scratch back.
+        self.scratch = scratch;
 
         &self.h
     }
@@ -252,56 +275,69 @@ impl SLSTMCell {
         let d_h = self.d_hidden;
         let d_total = self.d_input + d_h;
 
-        let mut h_out = vec![0.0; d_h];
         let mut c_tmp = self.c.clone();
         let mut n_tmp = self.n.clone();
         let mut m_tmp = self.m.clone();
 
+        // Local scratch (cold path — allocation is acceptable).
+        let mut pre_f = vec![0.0; d_h];
+        let mut pre_i = vec![0.0; d_h];
+        let mut pre_o = vec![0.0; d_h];
+        let mut pre_z = vec![0.0; d_h];
+        let mut xh = vec![0.0; d_total];
+        let mut o_gate = vec![0.0; d_h];
+        let mut z_gate = vec![0.0; d_h];
+        let mut f_prime = vec![0.0; d_h];
+        let mut i_prime = vec![0.0; d_h];
+
+        // 1. Build xh = [x, h_{t-1}].
+        xh[..self.d_input].copy_from_slice(x);
+        xh[self.d_input..].copy_from_slice(&self.h);
+
+        // 2. Batch matrix-vector for all 4 gates.
+        crate::simd::simd_mat_vec(&self.w_f, &xh, d_h, d_total, &mut pre_f);
+        crate::simd::simd_mat_vec(&self.w_i, &xh, d_h, d_total, &mut pre_i);
+        crate::simd::simd_mat_vec(&self.w_o, &xh, d_h, d_total, &mut pre_o);
+        crate::simd::simd_mat_vec(&self.w_z, &xh, d_h, d_total, &mut pre_z);
+
+        // 3. Add biases + clamp forget/input gates.
         for j in 0..d_h {
-            let row_offset = j * d_total;
+            pre_f[j] += self.b_f[j];
+            pre_i[j] += self.b_i[j];
+            pre_o[j] += self.b_o[j];
+            pre_z[j] += self.b_z[j];
+            pre_f[j] = clamp(pre_f[j], -PRE_GATE_CLAMP, PRE_GATE_CLAMP);
+            pre_i[j] = clamp(pre_i[j], -PRE_GATE_CLAMP, PRE_GATE_CLAMP);
+        }
 
-            let mut pre_f = self.b_f[j];
-            let mut pre_i = self.b_i[j];
-            let mut pre_o = self.b_o[j];
-            let mut pre_z = self.b_z[j];
+        // 4. Batch activations.
+        crate::simd::simd_sigmoid(&pre_o, &mut o_gate);
+        crate::simd::simd_tanh(&pre_z, &mut z_gate);
 
-            for (k, &xk) in x.iter().enumerate() {
-                pre_f += self.w_f[row_offset + k] * xk;
-                pre_i += self.w_i[row_offset + k] * xk;
-                pre_o += self.w_o[row_offset + k] * xk;
-                pre_z += self.w_z[row_offset + k] * xk;
-            }
-            let h_offset = row_offset + self.d_input;
-            for k in 0..d_h {
-                let hk = self.h[k];
-                pre_f += self.w_f[h_offset + k] * hk;
-                pre_i += self.w_i[h_offset + k] * hk;
-                pre_o += self.w_o[h_offset + k] * hk;
-                pre_z += self.w_z[h_offset + k] * hk;
-            }
-
-            pre_f = clamp(pre_f, -PRE_GATE_CLAMP, PRE_GATE_CLAMP);
-            pre_i = clamp(pre_i, -PRE_GATE_CLAMP, PRE_GATE_CLAMP);
-
-            let m_old = m_tmp[j];
-            let log_f = pre_f + m_old;
-            let m_new = if log_f > pre_i { log_f } else { pre_i };
-
-            let f_prime = math::exp(log_f - m_new);
-            let i_prime = math::exp(pre_i - m_new);
-            let o = math::sigmoid(pre_o);
-            let z = math::tanh(pre_z);
-
-            c_tmp[j] = f_prime * c_tmp[j] + i_prime * z;
-            n_tmp[j] = f_prime * n_tmp[j] + i_prime;
+        // 5. Compute stabilizers; reuse pre_f/pre_i as exp inputs.
+        for j in 0..d_h {
+            let log_f = pre_f[j] + m_tmp[j];
+            let m_new = if log_f > pre_i[j] { log_f } else { pre_i[j] };
+            pre_f[j] = log_f - m_new;
+            pre_i[j] -= m_new;
             m_tmp[j] = m_new;
+        }
 
+        // 6. Batch exp.
+        crate::simd::simd_exp(&pre_f, &mut f_prime);
+        crate::simd::simd_exp(&pre_i, &mut i_prime);
+
+        // 7. State updates.
+        let mut h_out = vec![0.0; d_h];
+        for j in 0..d_h {
+            c_tmp[j] = f_prime[j] * c_tmp[j] + i_prime[j] * z_gate[j];
+            n_tmp[j] = f_prime[j] * n_tmp[j] + i_prime[j];
             let denom = if math::abs(n_tmp[j]) > 1.0 {
                 math::abs(n_tmp[j])
             } else {
                 1.0
             };
-            h_out[j] = o * (c_tmp[j] / denom);
+            h_out[j] = o_gate[j] * (c_tmp[j] / denom);
         }
 
         h_out
@@ -316,6 +352,7 @@ impl SLSTMCell {
         self.c.fill(0.0);
         self.n.fill(1.0);
         self.m.fill(0.0);
+        self.scratch.fill(0.0);
     }
 
     /// Reference to the current hidden state vector.

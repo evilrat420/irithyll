@@ -7,6 +7,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+use core::mem;
 
 use super::config::{AttentionConfig, AttentionMode};
 use super::gating::{
@@ -96,6 +97,14 @@ pub struct MultiHeadAttention {
     w_out: Vec<f64>,
     /// Flat state cache for readout (avoids re-allocation).
     state_cache: Vec<f64>,
+    /// Scratch buffer for key projection (d_key), avoids per-call heap allocation.
+    scratch_k: Vec<f64>,
+    /// Scratch buffer for value projection (d_value), avoids per-call heap allocation.
+    scratch_v: Vec<f64>,
+    /// Scratch buffer for query projection (d_key), avoids per-call heap allocation.
+    scratch_q: Vec<f64>,
+    /// Scratch buffer for concatenated head outputs (n_heads * d_value).
+    scratch_concat: Vec<f64>,
 }
 
 impl MultiHeadAttention {
@@ -206,6 +215,10 @@ impl MultiHeadAttention {
             heads,
             w_out,
             state_cache: vec![0.0; state_size],
+            scratch_k: vec![0.0; d_key],
+            scratch_v: vec![0.0; d_value],
+            scratch_q: vec![0.0; d_key],
+            scratch_concat: vec![0.0; concat_dim],
         }
     }
 
@@ -235,13 +248,17 @@ impl AttentionLayer for MultiHeadAttention {
         let n_heads = self.config.n_heads;
         let concat_dim = n_heads * d_value;
 
-        let mut concat_output = vec![0.0; concat_dim];
+        // Take scratch buffers out of self to avoid borrow conflicts with self.heads
+        let mut k = mem::take(&mut self.scratch_k);
+        let mut v = mem::take(&mut self.scratch_v);
+        let mut q = mem::take(&mut self.scratch_q);
+        let mut concat_output = mem::take(&mut self.scratch_concat);
 
         for (h, head) in self.heads.iter_mut().enumerate() {
-            // Project input to key, value, query
-            let mut k = vec![0.0; d_key];
-            let mut v = vec![0.0; d_value];
-            let mut q = vec![0.0; d_key];
+            // Zero and reuse scratch buffers for key, value, query projections
+            k.iter_mut().for_each(|x| *x = 0.0);
+            v.iter_mut().for_each(|x| *x = 0.0);
+            q.iter_mut().for_each(|x| *x = 0.0);
             mat_vec(&head.w_key, input, d_key, d_model, &mut k);
             mat_vec(&head.w_value, input, d_value, d_model, &mut v);
             mat_vec(&head.w_query, input, d_key, d_model, &mut q);
@@ -393,6 +410,11 @@ impl AttentionLayer for MultiHeadAttention {
             concat_output[offset..offset + d_value].copy_from_slice(&head_output);
         }
 
+        // Return scratch buffers to self
+        self.scratch_k = k;
+        self.scratch_v = v;
+        self.scratch_q = q;
+
         // Output projection: w_out * concat_output
         let mut output = vec![0.0; d_model];
         mat_vec(
@@ -402,6 +424,9 @@ impl AttentionLayer for MultiHeadAttention {
             concat_dim,
             &mut output,
         );
+
+        // Return concat scratch to self
+        self.scratch_concat = concat_output;
 
         // Update state cache
         self.update_state_cache();

@@ -16,13 +16,28 @@
 //! C_t     = W_C * x_t                             // N-dim output projection
 //! A       = -exp(log_A)                           // fixed, always negative diagonal
 //!
-//! For each input channel d in 0..d_in:
-//!   For each state dim n in 0..N:
-//!     A_bar = exp(Delta_t * A_n)
-//!     B_bar = (A_bar - 1) / A_n * B_t[n]
-//!     h[d,n] = A_bar * h[d,n] + B_bar * x_t[d]
-//!   output[d] = C_t^T * h[d,:] + D[d] * x_t[d]
+//! // Pre-compute discretized coefficients (independent of channel d):
+//! A_bar[n] = exp(Delta_t * A_n)
+//! B_bar[n] = (A_bar[n] - 1) / A_n * B_t[n]
+//!
+//! // State update (state-dim-major layout: h[n, d]):
+//! For each state dim n in 0..N:
+//!   For each input channel d in 0..d_in:
+//!     h[n,d] = A_bar[n] * h[n,d] + B_bar[n] * x_t[d]
+//!
+//! // Output accumulation:
+//! For each state dim n in 0..N:
+//!   For each input channel d in 0..d_in:
+//!     output[d] += C_t[n] * h[n,d]
+//! output[d] += D[d] * x_t[d]
 //! ```
+//!
+//! The hidden state uses a transposed (state-dim-major) layout where each
+//! state dimension's channels are contiguous in memory. This enables the
+//! compiler to auto-vectorize the inner d-loop (scalar `a`/`b` broadcast
+//! over contiguous `h` and `input` slices) and maximizes cache line
+//! utilization. The discretized coefficients `A_bar` and `B_bar` are hoisted
+//! out of the channel loop since they depend only on the state index `n`.
 //!
 //! Each input channel maintains its own N-dimensional state vector, allowing
 //! the model to track per-channel temporal patterns independently.
@@ -80,7 +95,7 @@ pub struct SelectiveSSM {
     w_c: Vec<f64>,
     /// Skip connection weights (d_in).
     d_skip: Vec<f64>,
-    /// Hidden state (d_in * N, laid out as [channel_0_state, channel_1_state, ...]).
+    /// Hidden state (d_in * N, state-dim-major: [state_0_channels, state_1_channels, ...]).
     h: Vec<f64>,
     /// Number of state dimensions per channel.
     n_state: usize,
@@ -173,36 +188,47 @@ impl SelectiveSSM {
         let mut c_t = vec![0.0; n_state];
         mat_vec(&self.w_c, input, n_state, d_in, &mut c_t);
 
-        // 4. For each input channel, update state and compute output
-        let mut output = vec![0.0; d_in];
+        // 4. Pre-compute discretized coefficients (independent of channel d)
+        //    This hoists 2*n_state exp() calls out of the d_in loop, saving
+        //    (d_in - 1) * 2 * n_state redundant transcendental evaluations.
+        let mut a_bar_vec = vec![0.0; n_state];
+        let mut b_bar_vec = vec![0.0; n_state];
+        for n in 0..n_state {
+            let a_n = -math::exp(self.log_a[n]); // negative real diagonal
+            let ab = math::exp(delta * a_n); // ZOH discretization
+            a_bar_vec[n] = ab;
+            b_bar_vec[n] = if math::abs(a_n) < 1e-12 {
+                delta * b_t[n]
+            } else {
+                (ab - 1.0) / a_n * b_t[n]
+            };
+        }
 
-        for d in 0..d_in {
-            let h_offset = d * n_state;
-            let mut y = 0.0;
-
-            for n in 0..n_state {
-                let a_n = -math::exp(self.log_a[n]); // negative real diagonal
-
-                // ZOH discretization: A_bar = exp(delta * A_n)
-                let a_bar = math::exp(delta * a_n);
-
-                // B_bar = (A_bar - 1) / A_n * B_t[n]
-                // Handle A_n ~ 0 (shouldn't happen with s4d_inv, but be safe)
-                let b_bar = if math::abs(a_n) < 1e-12 {
-                    delta * b_t[n]
-                } else {
-                    (a_bar - 1.0) / a_n * b_t[n]
-                };
-
-                // State update: h[d,n] = A_bar * h[d,n] + B_bar * input[d]
-                self.h[h_offset + n] = a_bar * self.h[h_offset + n] + b_bar * input[d];
-
-                // Accumulate output: y += C_t[n] * h[d,n]
-                y += c_t[n] * self.h[h_offset + n];
+        // 5. State update: for each state dim, process all channels contiguously.
+        //    State layout is state-dim-major: h[n * d_in + d], so the inner
+        //    d-loop touches contiguous memory with scalar a/b broadcasts —
+        //    ideal for auto-vectorization and cache utilization.
+        for n in 0..n_state {
+            let h_offset = n * d_in;
+            let a = a_bar_vec[n];
+            let b = b_bar_vec[n];
+            for (d, x_d) in input.iter().enumerate().take(d_in) {
+                self.h[h_offset + d] = a * self.h[h_offset + d] + b * x_d;
             }
+        }
 
-            // Add skip connection
-            output[d] = y + self.d_skip[d] * input[d];
+        // 6. Output accumulation: y[d] = sum_n C_t[n] * h[n, d]
+        let mut output = vec![0.0; d_in];
+        for (n, &c_n) in c_t.iter().enumerate().take(n_state) {
+            let h_offset = n * d_in;
+            for (d, out_d) in output.iter_mut().enumerate().take(d_in) {
+                *out_d += c_n * self.h[h_offset + d];
+            }
+        }
+
+        // 7. Add skip connection
+        for (out_d, (&skip, &x_d)) in output.iter_mut().zip(self.d_skip.iter().zip(input.iter())) {
+            *out_d += skip * x_d;
         }
 
         output
