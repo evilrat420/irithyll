@@ -48,6 +48,8 @@ pub enum Algorithm {
     DeltaProduct,
     /// RWKV-7 attention (vector-gated delta rule with DPLR transitions).
     Rwkv7,
+    /// Streaming sLSTM (exponential gating with log-domain stabilization).
+    Slstm,
 }
 
 /// Unified model factory for AutoML.
@@ -596,6 +598,51 @@ impl Factory {
         }
     }
 
+    /// Create a factory for streaming sLSTM.
+    ///
+    /// sLSTM uses exponential gating with log-domain stabilization
+    /// (Beck et al., 2024 -- xLSTM). Hidden state dimension and RLS
+    /// forgetting factor are searchable.
+    ///
+    /// # Config Space (3 params)
+    /// | Index | Name | Type | Range |
+    /// |-------|------|------|-------|
+    /// | 0 | `d_model` | Int | [8, 256] |
+    /// | 1 | `forgetting_factor` | Float | [0.95, 0.9999] linear |
+    /// | 2 | `warmup` | Int | [5, 100] |
+    pub fn slstm(n_features: usize) -> Self {
+        let space = ConfigSpace::new()
+            .push(HyperParam::Int {
+                name: "d_model",
+                low: 8,
+                high: 256,
+            })
+            .push(HyperParam::Float {
+                name: "forgetting_factor",
+                low: 0.95,
+                high: 0.9999,
+                log_scale: false,
+            })
+            .push(HyperParam::Int {
+                name: "warmup",
+                low: 5,
+                high: 100,
+            });
+
+        Self {
+            algorithm: Algorithm::Slstm,
+            n_features,
+            space,
+            warmup: 10,
+            complexity: 2500,
+            seed: 42,
+            accuracy_based_pruning: false,
+            proactive_prune_interval: None,
+            prune_half_life: None,
+            projection: None,
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Builder-style overrides
     // -----------------------------------------------------------------------
@@ -791,6 +838,11 @@ impl Factory {
     pub fn projected_sgbt(d_in: usize, rank: usize) -> Self {
         Factory::sgbt(rank).with_projection(d_in, rank, 0.999)
     }
+
+    /// Convenience: projected sLSTM. The inner sLSTM sees `rank`-dimensional features.
+    pub fn projected_slstm(d_in: usize, rank: usize) -> Self {
+        Factory::slstm(rank).with_projection(d_in, rank, 0.999)
+    }
 }
 
 impl ModelFactory for Factory {
@@ -812,6 +864,7 @@ impl ModelFactory for Factory {
                 Algorithm::Ttt => "Projected<TTT>",
                 Algorithm::DeltaProduct => "Projected<DeltaProduct>",
                 Algorithm::Rwkv7 => "Projected<RWKV7>",
+                Algorithm::Slstm => "Projected<sLSTM>",
             }
         } else {
             match self.algorithm {
@@ -826,6 +879,7 @@ impl ModelFactory for Factory {
                 Algorithm::Ttt => "TTT",
                 Algorithm::DeltaProduct => "DeltaProduct",
                 Algorithm::Rwkv7 => "RWKV7",
+                Algorithm::Slstm => "sLSTM",
             }
         }
     }
@@ -1065,6 +1119,21 @@ impl ModelFactory for Factory {
                     .expect("Factory::create(Rwkv7): invalid config from search space");
 
                 Box::new(StreamingAttentionModel::new(attn_config))
+            }
+            Algorithm::Slstm => {
+                let d_model = config.get(0) as usize;
+                let ff = config.get(1);
+                let warmup = config.get(2) as usize;
+
+                let slstm_config = crate::lstm::SLSTMConfig::builder()
+                    .d_model(d_model)
+                    .forgetting_factor(ff)
+                    .warmup(warmup)
+                    .seed(self.seed)
+                    .build()
+                    .expect("Factory::create(Slstm): invalid config");
+
+                Box::new(crate::lstm::StreamingsLSTM::new(slstm_config))
             }
         };
 

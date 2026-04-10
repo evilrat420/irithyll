@@ -116,6 +116,8 @@ pub mod ssm;
 pub mod time_series;
 pub mod ttt;
 
+pub mod lstm;
+
 #[cfg(feature = "arrow")]
 pub mod arrow_support;
 
@@ -237,6 +239,9 @@ pub use snn::{SpikeNet, SpikeNetConfig, SpikeNetConfigBuilder, SpikePreprocessor
 
 // Re-exports -- test-time training
 pub use ttt::{StreamingTTT, TTTConfig, TTTConfigBuilder};
+
+// Re-exports -- sLSTM (stabilized LSTM with exponential gating)
+pub use lstm::{SLSTMConfig, SLSTMConfigBuilder, StreamingsLSTM};
 
 // Re-exports -- Kolmogorov-Arnold Networks
 pub use kan::{KANConfig, KANConfigBuilder, StreamingKAN};
@@ -677,6 +682,27 @@ pub fn streaming_ttt(d_model: usize, eta: f64) -> ttt::StreamingTTT {
             .eta(eta)
             .build()
             .expect("streaming_ttt() factory: invalid parameters"),
+    )
+}
+
+/// Create a streaming sLSTM (stabilized LSTM with exponential gating).
+///
+/// Uses exponential gates with log-domain stabilization for numerically
+/// stable long-range memory. RLS readout maps hidden state to predictions.
+///
+/// ```no_run
+/// use irithyll::{streaming_slstm, StreamingLearner};
+///
+/// let mut model = streaming_slstm(16);
+/// model.train(&[1.0, 2.0], 3.0);
+/// let pred = model.predict(&[1.0, 2.0]);
+/// ```
+pub fn streaming_slstm(d_model: usize) -> lstm::StreamingsLSTM {
+    lstm::StreamingsLSTM::new(
+        lstm::SLSTMConfig::builder()
+            .d_model(d_model)
+            .build()
+            .expect("streaming_slstm() factory: invalid parameters"),
     )
 }
 
