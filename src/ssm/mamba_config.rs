@@ -26,6 +26,17 @@ pub enum MambaVersion {
     V1,
     /// Mamba-3: MIMO groups, complex states, trapezoidal discretization.
     V3,
+    /// BD-LRU: Block-diagonal linear recurrence with dense m×m blocks.
+    ///
+    /// Groups `d_in` channels into `d_in / block_size` blocks, each with a
+    /// dense `block_size × block_size` A matrix for cross-channel state mixing
+    /// within each block. Row-wise L1 normalization ensures stability.
+    ///
+    /// Based on Dubinin, Orvieto & Effenberger (2026).
+    BlockDiagonal {
+        /// Size of each block (must divide `d_in`, typically 2-8).
+        block_size: usize,
+    },
 }
 
 /// Configuration for a [`StreamingMamba`](super::StreamingMamba) model.
@@ -62,8 +73,13 @@ pub struct MambaConfig {
     ///
     /// When `version` is V3 and `n_groups` was set to 0 at build time,
     /// it is auto-derived as `d_in / 4` clamped to `[1, d_in]`.
-    /// When `version` is V1, this field is ignored.
+    /// When `version` is V1 or BlockDiagonal, this field is ignored.
     pub n_groups: usize,
+    /// Block size for BlockDiagonal version (default: 4, only used for BlockDiagonal).
+    ///
+    /// Must divide `d_in` evenly. Typical values: 2, 4, 8.
+    /// When `version` is V1 or V3, this field is ignored (stored as 1).
+    pub block_size: usize,
 }
 
 impl MambaConfig {
@@ -88,6 +104,12 @@ impl fmt::Display for MambaConfig {
                 f,
                 "MambaConfig(v3, d_in={}, n_state={}, n_groups={}, ff={}, delta={}, seed={}, warmup={})",
                 self.d_in, self.n_state, self.n_groups, self.forgetting_factor, self.delta_rls,
+                self.seed, self.warmup
+            ),
+            MambaVersion::BlockDiagonal { block_size } => write!(
+                f,
+                "MambaConfig(bd, d_in={}, n_state={}, block_size={}, ff={}, delta={}, seed={}, warmup={})",
+                self.d_in, self.n_state, block_size, self.forgetting_factor, self.delta_rls,
                 self.seed, self.warmup
             ),
         }
@@ -125,6 +147,7 @@ pub struct MambaConfigBuilder {
     warmup: usize,
     version: MambaVersion,
     n_groups: usize,
+    block_size: usize,
 }
 
 impl Default for MambaConfigBuilder {
@@ -138,6 +161,7 @@ impl Default for MambaConfigBuilder {
             warmup: 10,
             version: MambaVersion::V1,
             n_groups: 1,
+            block_size: 4,
         }
     }
 }
@@ -198,6 +222,14 @@ impl MambaConfigBuilder {
         self
     }
 
+    /// Set the block size for BlockDiagonal version (default: 4).
+    ///
+    /// Must divide `d_in` evenly. Typical values: 2, 4, 8.
+    pub fn block_size(mut self, block_size: usize) -> Self {
+        self.block_size = block_size;
+        self
+    }
+
     /// Build the config, validating all parameters.
     ///
     /// # Errors
@@ -236,11 +268,11 @@ impl MambaConfigBuilder {
             ));
         }
 
-        // Version-specific validation for n_groups.
-        let n_groups = match self.version {
+        // Version-specific validation for n_groups and block_size.
+        let (n_groups, block_size) = match self.version {
             MambaVersion::V1 => {
-                // V1 ignores n_groups; store 1 for consistency.
-                1
+                // V1 ignores n_groups and block_size; store 1 for consistency.
+                (1, 1)
             }
             MambaVersion::V3 => {
                 let g = if self.n_groups == 0 {
@@ -262,8 +294,41 @@ impl MambaConfigBuilder {
                         format!("n_groups ({}) must divide d_in ({}) evenly for V3", g, d_in),
                     ));
                 }
-                g
+                (g, 1)
             }
+            MambaVersion::BlockDiagonal { block_size: _ } => {
+                let bs = self.block_size;
+                if bs < 2 {
+                    return Err(ConfigError::out_of_range(
+                        "block_size",
+                        "must be >= 2 for BlockDiagonal (use V1 for block_size=1)",
+                        bs,
+                    ));
+                }
+                if bs > 16 {
+                    return Err(ConfigError::out_of_range(
+                        "block_size",
+                        "must be <= 16 for BlockDiagonal (dense matmul cost is O(m^2))",
+                        bs,
+                    ));
+                }
+                if d_in % bs != 0 {
+                    return Err(ConfigError::invalid(
+                        "block_size",
+                        format!(
+                            "block_size ({}) must divide d_in ({}) evenly for BlockDiagonal",
+                            bs, d_in
+                        ),
+                    ));
+                }
+                (1, bs)
+            }
+        };
+
+        // Reconstruct the version with validated block_size.
+        let version = match self.version {
+            MambaVersion::BlockDiagonal { .. } => MambaVersion::BlockDiagonal { block_size },
+            other => other,
         };
 
         Ok(MambaConfig {
@@ -273,8 +338,9 @@ impl MambaConfigBuilder {
             delta_rls: self.delta_rls,
             seed: self.seed,
             warmup: self.warmup,
-            version: self.version,
+            version,
             n_groups,
+            block_size,
         })
     }
 }
@@ -481,5 +547,83 @@ mod tests {
             s.contains("n_groups=2"),
             "V3 display should contain n_groups"
         );
+    }
+
+    // ---- BlockDiagonal tests ----
+
+    #[test]
+    fn bd_basic_config() {
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .n_state(16)
+            .version(MambaVersion::BlockDiagonal { block_size: 4 })
+            .block_size(4)
+            .build()
+            .unwrap();
+        assert_eq!(
+            config.version,
+            MambaVersion::BlockDiagonal { block_size: 4 }
+        );
+        assert_eq!(config.block_size, 4);
+        assert_eq!(config.d_in, 8);
+    }
+
+    #[test]
+    fn bd_block_size_must_divide_d_in() {
+        let result = MambaConfig::builder()
+            .d_in(7)
+            .version(MambaVersion::BlockDiagonal { block_size: 4 })
+            .block_size(4)
+            .build();
+        assert!(result.is_err(), "block_size=4 should not divide d_in=7");
+    }
+
+    #[test]
+    fn bd_block_size_too_small() {
+        let result = MambaConfig::builder()
+            .d_in(4)
+            .version(MambaVersion::BlockDiagonal { block_size: 1 })
+            .block_size(1)
+            .build();
+        assert!(result.is_err(), "block_size=1 should be invalid (use V1)");
+    }
+
+    #[test]
+    fn bd_block_size_too_large() {
+        let result = MambaConfig::builder()
+            .d_in(32)
+            .version(MambaVersion::BlockDiagonal { block_size: 32 })
+            .block_size(32)
+            .build();
+        assert!(result.is_err(), "block_size=32 should exceed maximum 16");
+    }
+
+    #[test]
+    fn bd_display_format() {
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::BlockDiagonal { block_size: 4 })
+            .block_size(4)
+            .build()
+            .unwrap();
+        let s = format!("{}", config);
+        assert!(s.contains("bd"), "BD display should contain 'bd'");
+        assert!(
+            s.contains("block_size=4"),
+            "BD display should contain block_size"
+        );
+    }
+
+    #[test]
+    fn bd_various_block_sizes() {
+        for bs in [2, 4, 8] {
+            let config = MambaConfig::builder()
+                .d_in(8)
+                .version(MambaVersion::BlockDiagonal { block_size: bs })
+                .block_size(bs)
+                .build()
+                .unwrap();
+            assert_eq!(config.block_size, bs, "block_size should be {}", bs);
+        }
     }
 }

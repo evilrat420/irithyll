@@ -654,6 +654,30 @@ pub fn mamba_preprocessor(d_in: usize, n_state: usize) -> ssm::MambaPreprocessor
     ssm::MambaPreprocessor::new(d_in, n_state, 42)
 }
 
+/// Create a streaming Mamba with BD-LRU block-diagonal recurrence.
+///
+/// Channels are grouped into blocks of `block_size` with dense cross-channel
+/// mixing within each block.
+///
+/// ```
+/// use irithyll::{mamba_bd, StreamingLearner};
+///
+/// let mut model = mamba_bd(8, 16, 4);
+/// model.train(&[0.1; 8], 1.0);
+/// let pred = model.predict(&[0.1; 8]);
+/// ```
+pub fn mamba_bd(d_in: usize, n_state: usize, block_size: usize) -> ssm::StreamingMamba {
+    ssm::StreamingMamba::new(
+        ssm::MambaConfig::builder()
+            .d_in(d_in)
+            .n_state(n_state)
+            .version(ssm::MambaVersion::BlockDiagonal { block_size })
+            .block_size(block_size)
+            .build()
+            .expect("mamba_bd() factory: invalid parameters"),
+    )
+}
+
 /// Create a spiking neural network with e-prop learning.
 ///
 /// ```

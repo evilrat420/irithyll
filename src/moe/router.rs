@@ -93,6 +93,7 @@ impl LinearRouter {
     ///
     /// Returns indices sorted by descending probability.
     /// If k >= n_experts, returns all indices.
+    #[allow(dead_code)]
     pub fn select_top_k(&self, features: &[f64], k: usize) -> Vec<usize> {
         let probs = self.probabilities(features);
         let mut indexed: Vec<(usize, f64)> = probs.into_iter().enumerate().collect();
@@ -105,10 +106,46 @@ impl LinearRouter {
             .collect()
     }
 
+    /// Select top-k experts with warmup penalties applied to logits.
+    ///
+    /// `warmup_penalties[k]` is added to expert k's logit before softmax.
+    /// Use negative values to suppress cold experts.
+    pub fn select_top_k_with_penalties(
+        &self,
+        features: &[f64],
+        k: usize,
+        warmup_penalties: &[f64],
+    ) -> Vec<usize> {
+        let probs = self.probabilities_with_penalties(features, warmup_penalties);
+        let mut indexed: Vec<(usize, f64)> = probs.into_iter().enumerate().collect();
+        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed
+            .into_iter()
+            .take(k.min(self.k_experts))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Compute softmax probabilities with warmup penalties applied to logits.
+    pub fn probabilities_with_penalties(
+        &self,
+        features: &[f64],
+        warmup_penalties: &[f64],
+    ) -> Vec<f64> {
+        let mut logits = self.logits(features);
+        for (i, &penalty) in warmup_penalties.iter().enumerate() {
+            if i < logits.len() {
+                logits[i] += penalty;
+            }
+        }
+        softmax(&logits)
+    }
+
     /// Compute renormalized probabilities for the given active indices.
     ///
     /// Returns (index, renormalized_weight) pairs where weights sum to 1.0
     /// among the active experts only.
+    #[allow(dead_code)]
     pub fn renormalized_weights(
         &self,
         features: &[f64],
@@ -118,6 +155,28 @@ impl LinearRouter {
         let sum: f64 = active_indices.iter().map(|&i| probs[i]).sum();
         if sum < 1e-16 {
             // Uniform fallback
+            let w = 1.0 / active_indices.len() as f64;
+            return active_indices.iter().map(|&i| (i, w)).collect();
+        }
+        active_indices
+            .iter()
+            .map(|&i| (i, probs[i] / sum))
+            .collect()
+    }
+
+    /// Compute renormalized weights with warmup penalties applied to logits.
+    ///
+    /// Returns (index, renormalized_weight) pairs where weights sum to 1.0
+    /// among the active experts only, using penalty-adjusted probabilities.
+    pub fn renormalized_weights_with_penalties(
+        &self,
+        features: &[f64],
+        active_indices: &[usize],
+        warmup_penalties: &[f64],
+    ) -> Vec<(usize, f64)> {
+        let probs = self.probabilities_with_penalties(features, warmup_penalties);
+        let sum: f64 = active_indices.iter().map(|&i| probs[i]).sum();
+        if sum < 1e-16 {
             let w = 1.0 / active_indices.len() as f64;
             return active_indices.iter().map(|&i| (i, w)).collect();
         }

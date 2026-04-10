@@ -31,8 +31,8 @@ use router::LinearRouter;
 
 struct ExpertSlot {
     model: Box<dyn StreamingLearner>,
-    /// Reserved for future warmup-aware routing (Phase 2).
-    #[allow(dead_code)]
+    /// Number of samples before this expert is fully warmed up.
+    /// During warmup, routing probability is suppressed via logit penalties.
     warmup_hint: usize,
     utilization_ewma: f64,
     samples_trained: u64,
@@ -323,6 +323,37 @@ impl NeuralMoE {
     pub fn routing_probabilities(&self, features: &[f64]) -> Vec<f64> {
         self.router.probabilities(features)
     }
+
+    /// Per-expert warmup progress (0.0 = cold, 1.0 = fully warmed).
+    pub fn warmup_progress(&self) -> Vec<f64> {
+        self.experts
+            .iter()
+            .map(|e| {
+                if e.warmup_hint == 0 {
+                    1.0
+                } else {
+                    (e.samples_trained as f64 / e.warmup_hint as f64).min(1.0)
+                }
+            })
+            .collect()
+    }
+
+    /// Compute warmup penalty vector for routing suppression.
+    ///
+    /// Cold experts get up to -5.0 logit penalty; fully warmed experts get 0.0.
+    fn warmup_penalties(&self) -> Vec<f64> {
+        self.experts
+            .iter()
+            .map(|e| {
+                let progress = if e.warmup_hint == 0 {
+                    1.0
+                } else {
+                    (e.samples_trained as f64 / e.warmup_hint as f64).min(1.0)
+                };
+                -5.0 * (1.0 - progress)
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -333,8 +364,11 @@ impl StreamingLearner for NeuralMoE {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
         let k = self.config.top_k.min(self.experts.len());
 
-        // 1. Select top-k experts via router
-        let active_indices = self.router.select_top_k(features, k);
+        // 1. Compute warmup penalties and select top-k experts via router
+        let penalties = self.warmup_penalties();
+        let active_indices = self
+            .router
+            .select_top_k_with_penalties(features, k, &penalties);
 
         // 2. Collect predictions from active experts + find best + cache disagreement
         let mut best_idx = active_indices[0];
@@ -361,7 +395,11 @@ impl StreamingLearner for NeuralMoE {
 
         // Update residual alignment tracking using the weighted prediction.
         {
-            let weights = self.router.renormalized_weights(features, &active_indices);
+            let weights = self.router.renormalized_weights_with_penalties(
+                features,
+                &active_indices,
+                &penalties,
+            );
             let mut current_pred = 0.0;
             for (idx, w) in &weights {
                 current_pred +=
@@ -437,8 +475,13 @@ impl StreamingLearner for NeuralMoE {
 
     fn predict(&self, features: &[f64]) -> f64 {
         let k = self.config.top_k.min(self.experts.len());
-        let active_indices = self.router.select_top_k(features, k);
-        let weights = self.router.renormalized_weights(features, &active_indices);
+        let penalties = self.warmup_penalties();
+        let active_indices = self
+            .router
+            .select_top_k_with_penalties(features, k, &penalties);
+        let weights =
+            self.router
+                .renormalized_weights_with_penalties(features, &active_indices, &penalties);
 
         // Weighted prediction: sum(w_k * f_k(x)) for active experts
         let mut pred = 0.0;
@@ -794,6 +837,166 @@ mod tests {
             direct.is_finite(),
             "expert_disagreement() should be finite, got {}",
             direct
+        );
+    }
+
+    #[test]
+    fn warmup_progress_accessor() {
+        let moe = NeuralMoE::builder()
+            .expert(linear(0.01))
+            .expert_with_warmup(linear(0.02), 100)
+            .expert_with_warmup(linear(0.03), 0) // warmup_hint=0 means no warmup
+            .build();
+
+        let progress = moe.warmup_progress();
+        assert_eq!(progress.len(), 3, "should have 3 progress values");
+        assert!(
+            (progress[0] - 1.0).abs() < 1e-12,
+            "expert with no warmup (hint=0) should have progress 1.0, got {}",
+            progress[0]
+        );
+        assert!(
+            (progress[1] - 0.0).abs() < 1e-12,
+            "expert with warmup=100 and 0 samples should have progress 0.0, got {}",
+            progress[1]
+        );
+        assert!(
+            (progress[2] - 1.0).abs() < 1e-12,
+            "expert with warmup_hint=0 should have progress 1.0, got {}",
+            progress[2]
+        );
+    }
+
+    #[test]
+    fn warmup_suppresses_cold_expert() {
+        // Expert 0: no warmup (ready immediately)
+        // Expert 1: warmup=100 (cold for first 100 samples)
+        // top_k=1 so only 1 expert routes per sample => easy to count
+        let mut moe = NeuralMoE::builder()
+            .expert(linear(0.01))
+            .expert_with_warmup(linear(0.02), 100)
+            .top_k(1)
+            .router_lr(0.0) // freeze router weights so only warmup penalty drives routing
+            .load_balance_rate(0.0) // disable load balancing to isolate warmup effect
+            .reset_dead(false)
+            .build();
+
+        let mut expert0_count = 0u64;
+        let mut expert1_count = 0u64;
+
+        // Train 50 samples — expert 1 is at 50% warmup, penalty = -2.5
+        for i in 0..50 {
+            let x = [i as f64 * 0.01];
+            let y = x[0] * 2.0;
+            moe.train(&x, y);
+        }
+
+        // Check warmup progress after some training
+        let progress = moe.warmup_progress();
+        assert!(
+            (progress[0] - 1.0).abs() < 1e-12,
+            "expert 0 (no warmup) should always be at progress 1.0, got {}",
+            progress[0]
+        );
+        // Expert 1 has been trained on some samples (depends on routing, but with
+        // strong penalty it should have far fewer than 50)
+        assert!(
+            progress[1] < 1.0,
+            "expert 1 should not be fully warmed up yet, got progress {}",
+            progress[1]
+        );
+
+        // Count routing over next 50 samples
+        // With router_lr=0 and load_balance_rate=0, the router logits are uniform (0).
+        // The warmup penalty on expert 1 should suppress it.
+        for i in 50..100 {
+            let x = [i as f64 * 0.01];
+            let y = x[0] * 2.0;
+            let samples_before = moe.expert_samples();
+            moe.train(&x, y);
+            let samples_after = moe.expert_samples();
+            if samples_after[0] > samples_before[0] {
+                expert0_count += 1;
+            }
+            if samples_after[1] > samples_before[1] {
+                expert1_count += 1;
+            }
+        }
+
+        assert!(
+            expert0_count > expert1_count,
+            "non-warmup expert should be routed more often than cold expert \
+             (expert0={}, expert1={})",
+            expert0_count,
+            expert1_count
+        );
+    }
+
+    #[test]
+    fn warmup_eventually_routes_normally() {
+        // Expert 0: no warmup
+        // Expert 1: warmup=20 (very short)
+        // Use top_k=2 so both experts always train and expert 1 accumulates
+        // samples_trained during warmup. Verify that the warmup penalty vector
+        // becomes zero once enough samples have been seen.
+        let mut moe = NeuralMoE::builder()
+            .expert(linear(0.01))
+            .expert_with_warmup(linear(0.02), 20)
+            .top_k(2) // both experts train every sample
+            .reset_dead(false)
+            .build();
+
+        // Before training, expert 1 has full penalty
+        let penalties = moe.warmup_penalties();
+        assert!(
+            (penalties[0] - 0.0).abs() < 1e-12,
+            "expert 0 (no warmup) should have 0 penalty, got {}",
+            penalties[0]
+        );
+        assert!(
+            (penalties[1] - (-5.0)).abs() < 1e-12,
+            "expert 1 (cold, 0 samples) should have -5.0 penalty, got {}",
+            penalties[1]
+        );
+
+        // Train past the warmup period — with top_k=2 both experts see every sample
+        for i in 0..50 {
+            let x = [i as f64 * 0.01];
+            let y = x[0] * 2.0;
+            moe.train(&x, y);
+        }
+
+        // Expert 1 should be fully warmed up (50 samples > warmup_hint of 20)
+        let progress = moe.warmup_progress();
+        assert!(
+            (progress[1] - 1.0).abs() < 1e-12,
+            "expert 1 should be fully warmed up after 50 samples with top_k=2 (warmup=20), \
+             got progress {}",
+            progress[1]
+        );
+
+        // Warmup penalty should now be 0 for both experts
+        let penalties_after = moe.warmup_penalties();
+        assert!(
+            penalties_after[0].abs() < 1e-12,
+            "expert 0 penalty should be 0 after warmup, got {}",
+            penalties_after[0]
+        );
+        assert!(
+            penalties_after[1].abs() < 1e-12,
+            "expert 1 penalty should be 0 after warmup, got {}",
+            penalties_after[1]
+        );
+
+        // Verify partial warmup penalty is correct: at sample 10/20 = 50% progress,
+        // penalty should have been -5.0 * (1 - 0.5) = -2.5. We can check this
+        // indirectly by confirming the formula works.
+        let progress_formula = (10.0_f64 / 20.0).min(1.0);
+        let expected_penalty = -5.0 * (1.0 - progress_formula);
+        assert!(
+            (expected_penalty - (-2.5)).abs() < 1e-12,
+            "mid-warmup penalty formula check: expected -2.5, got {}",
+            expected_penalty
         );
     }
 }

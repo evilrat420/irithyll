@@ -2639,6 +2639,257 @@ impl PyAutoTuner {
 }
 
 // ---------------------------------------------------------------------------
+// StreamingsLSTM (sLSTM with exponential gating)
+// ---------------------------------------------------------------------------
+
+/// Streaming sLSTM with exponential gating and RLS readout.
+///
+/// A stabilised LSTM variant with exponential forget/input gates and a
+/// normalised memory cell. Trained online via recursive least squares.
+///
+/// Example::
+///
+///     model = StreamingsLSTM(d_model=8, forgetting_factor=0.998, warmup=10)
+///     model.train(np.array([1.0] * 8), 5.0)
+///     pred = model.predict(np.array([1.0] * 8))
+///
+#[pyclass(name = "StreamingsLSTM")]
+struct PySLSTM {
+    inner: irithyll::lstm::StreamingsLSTM,
+}
+
+#[pymethods]
+impl PySLSTM {
+    #[new]
+    #[pyo3(signature = (d_model=8, forgetting_factor=0.998, warmup=10))]
+    fn new(d_model: usize, forgetting_factor: f64, warmup: usize) -> PyResult<Self> {
+        let config = irithyll::lstm::SLSTMConfig::builder()
+            .d_model(d_model)
+            .forgetting_factor(forgetting_factor)
+            .warmup(warmup)
+            .build()
+            .map_err(|e| PyValueError::new_err(format!("{}", e)))?;
+        Ok(Self {
+            inner: irithyll::lstm::StreamingsLSTM::new(config),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: PyReadonlyArray1<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(features.as_slice().unwrap(), target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: PyReadonlyArray1<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(features.as_slice().unwrap())
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    /// Raw diagnostic signals for adaptive tuning.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::StreamingLearner;
+        self.inner.diagnostics_array()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!("StreamingsLSTM(samples={})", self.inner.n_samples_seen())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TurboQuant (quantization utilities)
+// ---------------------------------------------------------------------------
+
+/// TurboQuant quantization utilities for weight compression.
+///
+/// Provides static methods for quantizing weight vectors and running
+/// inference directly from quantized bytes.
+///
+/// Example::
+///
+///     weights = np.array([0.1, -0.3, 0.5, 0.2])
+///     qbytes = TurboQuant.quantize(weights, mode="8bit")
+///     pred = TurboQuant.predict_from_bytes(qbytes, np.array([1.0, 2.0, 3.0, 4.0]))
+///
+#[pyclass(name = "TurboQuant")]
+struct PyTurboQuant;
+
+#[pymethods]
+impl PyTurboQuant {
+    /// Quantize a weight vector at the given mode ("8bit", "3.5bit", "2.5bit").
+    ///
+    /// Args:
+    ///     weights: numpy 1D array of weight values (f64)
+    ///     mode: quantization mode string (default: "8bit")
+    ///
+    /// Returns:
+    ///     list[int]: packed binary bytes
+    #[staticmethod]
+    #[pyo3(signature = (weights, mode="8bit"))]
+    fn quantize(weights: PyReadonlyArray1<f64>, mode: &str) -> PyResult<Vec<u8>> {
+        let w = weights.as_slice().unwrap();
+        let qmode = match mode {
+            "8bit" => irithyll::QuantMode::Bits8,
+            "3.5bit" => irithyll::QuantMode::Bits3_5,
+            "2.5bit" => irithyll::QuantMode::Bits2_5,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown mode: {}. Use '8bit', '3.5bit', or '2.5bit'",
+                    mode
+                )));
+            }
+        };
+        let quantized = irithyll::quantize(w, qmode, 42);
+        Ok(quantized.to_bytes())
+    }
+
+    /// Predict from quantized weights and input features.
+    ///
+    /// Args:
+    ///     bytes: packed quantized weight bytes (from ``quantize``)
+    ///     features: numpy 1D array of input features
+    ///
+    /// Returns:
+    ///     float: dot-product prediction
+    #[staticmethod]
+    fn predict_from_bytes(bytes: &[u8], features: PyReadonlyArray1<f64>) -> PyResult<f64> {
+        let view = irithyll::TurboQuantizedView::from_bytes(bytes)
+            .map_err(|e| PyValueError::new_err(format!("Invalid TurboQuant bytes: {}", e)))?;
+        Ok(view.predict(features.as_slice().unwrap()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StreamingAttention (multi-mode linear attention)
+// ---------------------------------------------------------------------------
+
+/// Streaming linear attention model with configurable attention mode.
+///
+/// Supports all attention modes: GLA (default), RetNet, Hawk, DeltaNet,
+/// GatedDeltaNet, RWKV, mLSTM, DeltaProduct, RWKV7. All process one
+/// sample at a time with O(1) memory per timestep.
+///
+/// Example::
+///
+///     model = StreamingAttention(d_model=8, n_heads=2, mode="rwkv7")
+///     model.train([1.0] * 8, 5.0)
+///     pred = model.predict([1.0] * 8)
+///
+#[pyclass(name = "StreamingAttention")]
+struct PyStreamingAttention {
+    inner: irithyll::StreamingAttentionModel,
+}
+
+#[pymethods]
+impl PyStreamingAttention {
+    /// Create a streaming attention model with the given mode.
+    ///
+    /// Args:
+    ///     d_model: model dimension (must be divisible by n_heads)
+    ///     n_heads: number of attention heads (default: 2)
+    ///     mode: attention mode string (default: "gla"). One of:
+    ///         "gla", "retnet", "hawk", "deltanet", "gated_deltanet",
+    ///         "rwkv", "mlstm", "delta_product", "rwkv7"
+    ///     seed: RNG seed (default: 42)
+    #[new]
+    #[pyo3(signature = (d_model, n_heads=2, mode="gla", seed=42))]
+    fn new(d_model: usize, n_heads: usize, mode: &str, seed: u64) -> PyResult<Self> {
+        use irithyll::attention::AttentionMode;
+
+        let attention_mode = match mode {
+            "gla" => AttentionMode::GLA,
+            "retnet" => AttentionMode::RetNet { gamma: 0.99 },
+            "hawk" => AttentionMode::Hawk,
+            "deltanet" => AttentionMode::DeltaNet,
+            "gated_deltanet" => AttentionMode::GatedDeltaNet { beta_scale: 1.0 },
+            "rwkv" => AttentionMode::RWKV {
+                initial_decay: 0.95,
+            },
+            "mlstm" => AttentionMode::MLSTM,
+            "delta_product" => AttentionMode::DeltaProduct { n_compositions: 3 },
+            "rwkv7" => AttentionMode::RWKV7,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown attention mode '{}'. Use one of: gla, retnet, hawk, deltanet, \
+                     gated_deltanet, rwkv, mlstm, delta_product, rwkv7",
+                    other
+                )));
+            }
+        };
+
+        let config = irithyll::StreamingAttentionConfig::builder()
+            .d_model(d_model)
+            .n_heads(n_heads)
+            .mode(attention_mode)
+            .seed(seed)
+            .build()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self {
+            inner: irithyll::StreamingAttentionModel::new(config),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    /// Raw diagnostic signals for adaptive tuning.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use irithyll::StreamingLearner;
+        self.inner.diagnostics_array()
+    }
+
+    /// Prediction uncertainty estimate.
+    fn prediction_uncertainty(&self) -> f64 {
+        self.inner.prediction_uncertainty()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!(
+            "StreamingAttention(samples={})",
+            self.inner.n_samples_seen()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
 
@@ -2665,5 +2916,8 @@ fn irithyll_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyProjectionConfig>()?;
     m.add_class::<PyProjectedLearner>()?;
     m.add_class::<PyAutoTuner>()?;
+    m.add_class::<PySLSTM>()?;
+    m.add_class::<PyTurboQuant>()?;
+    m.add_class::<PyStreamingAttention>()?;
     Ok(())
 }

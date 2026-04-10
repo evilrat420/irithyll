@@ -50,6 +50,8 @@ pub enum Algorithm {
     Rwkv7,
     /// Streaming sLSTM (exponential gating with log-domain stabilization).
     Slstm,
+    /// Streaming Mamba BD-LRU (block-diagonal linear recurrence).
+    MambaBD,
 }
 
 /// Unified model factory for AutoML.
@@ -643,6 +645,49 @@ impl Factory {
         }
     }
 
+    /// Create a factory for streaming Mamba with BD-LRU (block-diagonal recurrence).
+    ///
+    /// `d_in` is the input feature dimension, which must be divisible by
+    /// candidate block sizes.
+    ///
+    /// # Config Space (3 params)
+    ///
+    /// - `n_state`: 4..64 (hidden state dimension per channel)
+    /// - `forgetting_factor`: 0.95..0.9999
+    /// - `warmup`: 5..50
+    pub fn mamba_bd(d_in: usize) -> Self {
+        let space = ConfigSpace::new()
+            .push(HyperParam::Int {
+                name: "n_state",
+                low: 4,
+                high: 64,
+            })
+            .push(HyperParam::Float {
+                name: "forgetting_factor",
+                low: 0.95,
+                high: 0.9999,
+                log_scale: false,
+            })
+            .push(HyperParam::Int {
+                name: "warmup",
+                low: 5,
+                high: 50,
+            });
+
+        Self {
+            algorithm: Algorithm::MambaBD,
+            n_features: d_in,
+            space,
+            warmup: 10,
+            complexity: 6000,
+            seed: 42,
+            accuracy_based_pruning: false,
+            proactive_prune_interval: None,
+            prune_half_life: None,
+            projection: None,
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Builder-style overrides
     // -----------------------------------------------------------------------
@@ -865,6 +910,7 @@ impl ModelFactory for Factory {
                 Algorithm::DeltaProduct => "Projected<DeltaProduct>",
                 Algorithm::Rwkv7 => "Projected<RWKV7>",
                 Algorithm::Slstm => "Projected<sLSTM>",
+                Algorithm::MambaBD => "Projected<MambaBD>",
             }
         } else {
             match self.algorithm {
@@ -880,6 +926,7 @@ impl ModelFactory for Factory {
                 Algorithm::DeltaProduct => "DeltaProduct",
                 Algorithm::Rwkv7 => "RWKV7",
                 Algorithm::Slstm => "sLSTM",
+                Algorithm::MambaBD => "MambaBD",
             }
         }
     }
@@ -1134,6 +1181,32 @@ impl ModelFactory for Factory {
                     .expect("Factory::create(Slstm): invalid config");
 
                 Box::new(crate::lstm::StreamingsLSTM::new(slstm_config))
+            }
+            Algorithm::MambaBD => {
+                let n_state = config.get(0) as usize;
+                let ff = config.get(1);
+                let warmup = config.get(2) as usize;
+
+                // Auto-select block_size: largest power-of-2 in [2,8] that divides d_in.
+                let d_in = self.n_features;
+                let block_size = [8, 4, 2]
+                    .iter()
+                    .copied()
+                    .find(|&bs| d_in % bs == 0)
+                    .unwrap_or(2);
+
+                let mamba_config = crate::ssm::MambaConfig::builder()
+                    .d_in(d_in)
+                    .n_state(n_state)
+                    .version(crate::ssm::MambaVersion::BlockDiagonal { block_size })
+                    .block_size(block_size)
+                    .forgetting_factor(ff)
+                    .warmup(warmup)
+                    .seed(self.seed)
+                    .build()
+                    .expect("Factory::create(MambaBD): invalid config");
+
+                Box::new(crate::ssm::StreamingMamba::new(mamba_config))
             }
         };
 

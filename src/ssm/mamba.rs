@@ -57,7 +57,7 @@
 //! maintaining the contract that `predict()` is read-only. If no training has
 //! occurred, returns 0.0.
 
-use irithyll_core::ssm::{SSMLayer, SelectiveSSM, SelectiveSSMv3};
+use irithyll_core::ssm::{SSMLayer, SelectiveSSM, SelectiveSSMBD, SelectiveSSMv3};
 
 use crate::learner::StreamingLearner;
 use crate::learners::RecursiveLeastSquares;
@@ -67,12 +67,14 @@ use crate::ssm::mamba_config::{MambaConfig, MambaVersion};
 // SSM variant dispatch
 // ---------------------------------------------------------------------------
 
-/// Internal SSM variant for V1/V3 dispatch.
+/// Internal SSM variant for V1/V3/BD dispatch.
 enum SSMVariant {
     /// Mamba-1: per-channel scalar processing, real states, ZOH discretization.
     V1(SelectiveSSM),
     /// Mamba-3: MIMO groups, complex states, trapezoidal discretization.
     V3(SelectiveSSMv3),
+    /// BD-LRU: block-diagonal linear recurrence with dense m×m blocks.
+    BD(SelectiveSSMBD),
 }
 
 impl SSMVariant {
@@ -81,6 +83,7 @@ impl SSMVariant {
         match self {
             SSMVariant::V1(ssm) => ssm.forward(input),
             SSMVariant::V3(ssm) => ssm.forward(input),
+            SSMVariant::BD(ssm) => ssm.forward(input),
         }
     }
 
@@ -89,6 +92,7 @@ impl SSMVariant {
         match self {
             SSMVariant::V1(ssm) => ssm.state(),
             SSMVariant::V3(ssm) => ssm.state(),
+            SSMVariant::BD(ssm) => ssm.state(),
         }
     }
 
@@ -97,6 +101,7 @@ impl SSMVariant {
         match self {
             SSMVariant::V1(ssm) => ssm.reset(),
             SSMVariant::V3(ssm) => ssm.reset(),
+            SSMVariant::BD(ssm) => ssm.reset(),
         }
     }
 }
@@ -206,6 +211,12 @@ impl StreamingMamba {
                 config.n_groups,
                 config.seed,
             )),
+            MambaVersion::BlockDiagonal { block_size } => SSMVariant::BD(SelectiveSSMBD::new(
+                config.d_in,
+                config.n_state,
+                block_size,
+                config.seed,
+            )),
         };
         let readout = RecursiveLeastSquares::with_delta(config.forgetting_factor, config.delta_rls);
         let readout_dim = Self::readout_dim_for_config(&config);
@@ -255,10 +266,12 @@ impl StreamingMamba {
     ///
     /// - V1: `2 * d_in` (gated output + per-channel state energy)
     /// - V3: `d_in + n_groups` (SSM output + per-group state energy)
+    /// - BlockDiagonal: `d_in + n_blocks` (gated output + per-block state energy)
     fn readout_dim_for_config(config: &MambaConfig) -> usize {
         match config.version {
             MambaVersion::V1 => config.d_in * 2,
             MambaVersion::V3 => config.d_in + config.n_groups,
+            MambaVersion::BlockDiagonal { block_size } => config.d_in + config.d_in / block_size,
         }
     }
 
@@ -272,6 +285,9 @@ impl StreamingMamba {
         match self.config.version {
             MambaVersion::V1 => self.build_readout_features_v1(gated_output, state),
             MambaVersion::V3 => self.build_readout_features_v3(gated_output, state),
+            MambaVersion::BlockDiagonal { block_size } => {
+                self.build_readout_features_bd(gated_output, state, block_size)
+            }
         }
     }
 
@@ -341,6 +357,37 @@ impl StreamingMamba {
             let group_end = group_start + channels_per_group * state_per_channel;
             let group_slice = &state[group_start..group_end.min(state.len())];
             let energy: f64 = group_slice.iter().map(|&s| s * s).sum::<f64>();
+            rf.push(energy.sqrt());
+        }
+
+        rf
+    }
+
+    /// BD-LRU readout features: gated SSM output (`d_in`) + per-block state energy (`n_blocks`).
+    ///
+    /// State layout: `n_blocks * n_state * block_size`. Each block's state energy
+    /// is the L2 norm over all state elements in that block, providing a compact
+    /// per-block activation summary analogous to V3's per-group energy.
+    fn build_readout_features_bd(
+        &self,
+        gated_output: &[f64],
+        state: &[f64],
+        block_size: usize,
+    ) -> Vec<f64> {
+        let d_in = self.config.d_in;
+        let n_state = self.config.n_state;
+        let n_blocks = d_in / block_size;
+        let block_state_size = n_state * block_size;
+        let mut rf = Vec::with_capacity(d_in + n_blocks);
+
+        // Primary: gated SSM output
+        rf.extend_from_slice(gated_output);
+
+        // Secondary: per-block state energy
+        for b in 0..n_blocks {
+            let start = b * block_state_size;
+            let end = (start + block_state_size).min(state.len());
+            let energy: f64 = state[start..end].iter().map(|&s| s * s).sum::<f64>();
             rf.push(energy.sqrt());
         }
 
