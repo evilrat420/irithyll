@@ -220,6 +220,32 @@ impl StreamingLearner for StackedEnsemble {
         self.meta_learner.reset();
         self.samples_seen = 0;
     }
+
+    /// Aggregate diagnostics from the first base learner as representative signal.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        if let Some(first) = self.base_learners.first() {
+            first.diagnostics_array()
+        } else {
+            [0.0; 5]
+        }
+    }
+
+    /// Sum of replacement counts across all base learners and the meta-learner.
+    fn replacement_count(&self) -> u64 {
+        self.base_learners
+            .iter()
+            .map(|l| l.replacement_count())
+            .sum::<u64>()
+            + self.meta_learner.replacement_count()
+    }
+
+    /// Forward config adjustments to all base learners and the meta-learner.
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        for learner in &mut self.base_learners {
+            learner.adjust_config(lr_multiplier, lambda_delta);
+        }
+        self.meta_learner.adjust_config(lr_multiplier, lambda_delta);
+    }
 }
 
 // ---------------------------------------------------------------------------

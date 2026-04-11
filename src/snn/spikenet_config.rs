@@ -20,7 +20,7 @@ use crate::error::ConfigError;
 /// | `alpha` | 0.95 | Membrane decay (0 = no memory, 1 = no decay) |
 /// | `kappa` | 0.99 | Eligibility trace decay |
 /// | `kappa_out` | 0.90 | Readout membrane decay |
-/// | `eta` | 0.001 | Learning rate |
+/// | `learning_rate` | 0.001 | Learning rate |
 /// | `v_thr` | 0.50 | Firing threshold |
 /// | `gamma` | 0.30 | Surrogate gradient dampening |
 /// | `spike_threshold` | 0.05 | Delta encoding threshold |
@@ -39,7 +39,7 @@ pub struct SpikeNetConfig {
     /// Readout membrane decay factor (0.0 to 1.0).
     pub kappa_out: f64,
     /// Learning rate. Positive, typically 0.0001 to 0.1.
-    pub eta: f64,
+    pub learning_rate: f64,
     /// Firing threshold. Positive, typically 0.1 to 1.0.
     pub v_thr: f64,
     /// Surrogate gradient dampening factor (0.0 to 1.0).
@@ -64,7 +64,7 @@ impl Default for SpikeNetConfig {
             alpha: 0.95,
             kappa: 0.99,
             kappa_out: 0.90,
-            eta: 0.001,
+            learning_rate: 0.001,
             v_thr: 0.50,
             gamma: 0.30,
             spike_threshold: 0.05,
@@ -119,11 +119,19 @@ impl SpikeNetConfig {
                 self.kappa_out,
             ));
         }
-        if self.eta <= 0.0 {
-            return Err(ConfigError::out_of_range("eta", "must be > 0.0", self.eta));
+        if self.learning_rate <= 0.0 {
+            return Err(ConfigError::out_of_range(
+                "learning_rate",
+                "must be > 0.0",
+                self.learning_rate,
+            ));
         }
-        if self.eta > 1.0 {
-            return Err(ConfigError::out_of_range("eta", "must be <= 1.0", self.eta));
+        if self.learning_rate > 1.0 {
+            return Err(ConfigError::out_of_range(
+                "learning_rate",
+                "must be <= 1.0",
+                self.learning_rate,
+            ));
         }
         if self.v_thr <= 0.0 {
             return Err(ConfigError::out_of_range(
@@ -231,15 +239,16 @@ impl SpikeNetConfigBuilder {
         self
     }
 
-    /// Set the learning rate. Alias for setting `eta`.
+    /// Set the learning rate.
     pub fn learning_rate(mut self, lr: f64) -> Self {
-        self.config.eta = lr;
+        self.config.learning_rate = lr;
         self
     }
 
-    /// Set the learning rate directly.
+    /// Set the learning rate. Deprecated: use [`learning_rate`](Self::learning_rate) instead.
+    #[deprecated(since = "0.0.0", note = "use learning_rate() instead")]
     pub fn eta(mut self, eta: f64) -> Self {
-        self.config.eta = eta;
+        self.config.learning_rate = eta;
         self
     }
 
@@ -322,7 +331,7 @@ mod tests {
 
         assert_eq!(config.n_hidden, 32);
         assert_eq!(config.n_outputs, 2);
-        assert!((config.eta - 0.005).abs() < 1e-10);
+        assert!((config.learning_rate - 0.005).abs() < 1e-10);
         assert!((config.alpha - 0.9).abs() < 1e-10);
     }
 
@@ -366,7 +375,7 @@ mod tests {
             .alpha(0.85)
             .kappa(0.95)
             .kappa_out(0.8)
-            .eta(0.01)
+            .learning_rate(0.01)
             .v_thr(0.3)
             .gamma(0.5)
             .spike_threshold(0.1)
@@ -380,7 +389,7 @@ mod tests {
         assert!((config.alpha - 0.85).abs() < 1e-10);
         assert!((config.kappa - 0.95).abs() < 1e-10);
         assert!((config.kappa_out - 0.8).abs() < 1e-10);
-        assert!((config.eta - 0.01).abs() < 1e-10);
+        assert!((config.learning_rate - 0.01).abs() < 1e-10);
         assert!((config.v_thr - 0.3).abs() < 1e-10);
         assert!((config.gamma - 0.5).abs() < 1e-10);
         assert!((config.spike_threshold - 0.1).abs() < 1e-10);

@@ -526,8 +526,7 @@ mod tests {
         }
     }
 
-    unsafe impl Send for MeanLearner {}
-    unsafe impl Sync for MeanLearner {}
+    // MeanLearner is Send+Sync by composition (f64, u64 fields only).
 
     // -----------------------------------------------------------------------
     // Config builder tests

@@ -173,6 +173,80 @@ impl MulticlassSGBT {
     }
 }
 
+// ---------------------------------------------------------------------------
+// StreamingLearner impl
+// ---------------------------------------------------------------------------
+
+use crate::learner::StreamingLearner;
+
+impl StreamingLearner for MulticlassSGBT {
+    /// Train on a weighted observation. Target is the class index as f64.
+    fn train_one(&mut self, features: &[f64], target: f64, _weight: f64) {
+        // UFCS: call the inherent train_one(&impl Observation), not this trait method.
+        MulticlassSGBT::train_one(self, &SampleRef::new(features, target));
+    }
+
+    /// Predict the most likely class index as f64.
+    fn predict(&self, features: &[f64]) -> f64 {
+        MulticlassSGBT::predict(self, features) as f64
+    }
+
+    fn n_samples_seen(&self) -> u64 {
+        self.samples_seen
+    }
+
+    fn reset(&mut self) {
+        MulticlassSGBT::reset(self);
+    }
+
+    /// Diagnostic array aggregated from the first committee's signals.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use crate::automl::DiagnosticSource;
+        if let Some(first) = self.committees.first() {
+            use crate::learner::SGBTLearner;
+            let learner = SGBTLearner::new(first.clone());
+            match learner.config_diagnostics() {
+                Some(d) => [
+                    d.residual_alignment,
+                    d.regularization_sensitivity,
+                    d.depth_sufficiency,
+                    d.effective_dof,
+                    d.uncertainty,
+                ],
+                None => [0.0; 5],
+            }
+        } else {
+            [0.0; 5]
+        }
+    }
+
+    /// Forward learning rate / lambda adjustments to all committees.
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        for committee in &mut self.committees {
+            let new_lr = committee.config().learning_rate * lr_multiplier;
+            committee.set_learning_rate(new_lr);
+            let new_lambda = committee.config().lambda + lambda_delta;
+            committee.set_lambda(new_lambda);
+        }
+    }
+
+    /// Sum of replacement counts across all committees.
+    fn replacement_count(&self) -> u64 {
+        self.committees.iter().map(|c| c.total_replacements()).sum()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DiagnosticSource impl
+// ---------------------------------------------------------------------------
+
+impl crate::automl::DiagnosticSource for MulticlassSGBT {
+    fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
+        // Aggregate from first committee as representative signal
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

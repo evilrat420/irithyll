@@ -63,8 +63,15 @@ impl MulticlassSGBT {
     /// committee (N classes = 0 clones instead of N clones).
     pub fn train_one(&mut self, sample: &impl Observation) {
         self.samples_seen += 1;
-        let class_idx = sample.target() as usize;
+        let target = sample.target();
         let features = sample.features();
+
+        // Guard: skip non-finite inputs to prevent NaN/Inf from corrupting model state.
+        if !target.is_finite() || !features.iter().all(|f| f.is_finite()) {
+            return;
+        }
+
+        let class_idx = target as usize;
 
         for (c, committee) in self.committees.iter_mut().enumerate() {
             // Binary target: 1.0 for the correct class, 0.0 otherwise

@@ -51,6 +51,8 @@
 //! assert!(pred >= 0.0 && pred < 3.0);
 //! ```
 
+use irithyll_core::math::sigmoid;
+
 use crate::learner::StreamingLearner;
 use crate::learners::rls::RecursiveLeastSquares;
 
@@ -75,12 +77,6 @@ pub enum ClassificationMode {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Sigmoid function: 1 / (1 + exp(-x)).
-#[inline]
-fn sigmoid(x: f64) -> f64 {
-    1.0 / (1.0 + (-x).exp())
-}
 
 /// Numerically stable softmax: subtract max before exp to prevent overflow.
 fn stable_softmax(logits: &[f64]) -> Vec<f64> {

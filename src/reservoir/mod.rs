@@ -29,7 +29,7 @@ pub mod esn_preprocessor;
 pub mod ngrc;
 pub mod ngrc_config;
 
-pub use esn::EchoStateNetwork;
+pub use esn::{EchoStateNetwork, StreamingESN};
 pub use esn_config::{ESNConfig, ESNConfigBuilder};
 pub use esn_preprocessor::ESNPreprocessor;
 pub use ngrc::NextGenRC;

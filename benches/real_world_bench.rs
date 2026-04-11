@@ -39,7 +39,11 @@
 //!
 //! **Algorithms:**
 //! - SGBT, Dist-SGBT (tree ensembles)
-//! - ESN, Mamba, KAN, TTT, RLS, MoE (neural/linear models)
+//! - ESN, Mamba (V1), KAN, TTT, RLS, MoE (neural/linear models)
+//! - sLSTM, mGRADE, MambaV3, MambaBD, GLA (new v9.9.x+ models)
+//! - SpikeNet (spiking neural network)
+//! - ProjectedLearner+Mamba (projection wrapper combo)
+//! - NeuralMoE (3-expert neural ensemble)
 //! - Classification wrappers: binary_classifier() / multiclass_classifier()
 //!
 //! **Metrics:**
@@ -53,6 +57,7 @@ use irithyll::generators::{
     Agrawal, Friedman, Hyperplane, Lorenz, MackeyGlass, RandomRBF, StreamGenerator, Waveform, LED,
     SEA,
 };
+use irithyll::ssm::MambaVersion;
 use irithyll::*;
 use std::time::Instant;
 
@@ -1554,7 +1559,7 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
             irithyll::kan::KANConfig::builder()
                 .layer_sizes(vec![n_features, 20, 1])
                 .grid_size(8)
-                .lr(0.1)
+                .learning_rate(0.1)
                 .momentum(0.0)
                 .build()
                 .expect("kan config"),
@@ -1567,7 +1572,7 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
             irithyll::kan::KANConfig::builder()
                 .layer_sizes(vec![n_features, 20, 1])
                 .grid_size(8)
-                .lr(0.05)
+                .learning_rate(0.05)
                 .momentum(0.0)
                 .build()
                 .expect("kan clf config"),
@@ -1582,7 +1587,7 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
         irithyll::ttt::StreamingTTT::new(
             irithyll::ttt::TTTConfig::builder()
                 .d_model(64)
-                .eta(0.01)
+                .learning_rate(0.01)
                 .alpha(0.01)
                 .momentum(0.9)
                 .forgetting_factor(0.995)
@@ -1597,6 +1602,143 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
             .expert(sgbt(25, 0.05))
             .expert_with_warmup(esn(50, 0.95), 30)
             .expert(rls(0.999))
+            .top_k(2)
+            .build()
+    };
+
+    // ---------------------------------------------------------------------------
+    // NEW MODELS (v9.9.x+)
+    // ---------------------------------------------------------------------------
+
+    // sLSTM: d_model=32, exponential gating, RLS readout
+    let make_slstm = || {
+        StreamingLSTM::new(
+            SLSTMConfig::builder()
+                .d_model(32)
+                .forgetting_factor(0.998)
+                .build()
+                .expect("slstm config"),
+        )
+    };
+
+    // mGRADE: d_in=n_features, d_hidden=32, kernel_size=4
+    let make_mgrade = || {
+        StreamingMGrade::new(
+            mGRADEConfig::builder()
+                .d_in(n_features)
+                .d_hidden(32)
+                .kernel_size(4)
+                .build()
+                .expect("mgrade config"),
+        )
+    };
+
+    // Mamba V3: MIMO groups + complex states
+    let make_mamba_v3 = || {
+        irithyll::ssm::StreamingMamba::new(
+            irithyll::ssm::MambaConfig::builder()
+                .d_in(n_features)
+                .n_state(32)
+                .version(MambaVersion::V3)
+                .n_groups(0) // auto-derive: d_in/4 clamped to [1, d_in]
+                .forgetting_factor(0.998)
+                .build()
+                .expect("mamba_v3 config"),
+        )
+    };
+
+    // Mamba BD: block-diagonal linear recurrence
+    // block_size must divide d_in; compute inside closure since n_features varies per dataset
+    let make_mamba_bd = move || {
+        // BD: use block_size=2 if d_in is even and >= 4, else fall back to V1
+        let bd_block_size = if n_features >= 4 && n_features % 2 == 0 {
+            2
+        } else {
+            1
+        };
+        if bd_block_size > 1 {
+            irithyll::ssm::StreamingMamba::new(
+                irithyll::ssm::MambaConfig::builder()
+                    .d_in(n_features)
+                    .n_state(32)
+                    .version(MambaVersion::BlockDiagonal {
+                        block_size: bd_block_size,
+                    })
+                    .block_size(bd_block_size)
+                    .forgetting_factor(0.998)
+                    .build()
+                    .expect("mamba_bd config"),
+            )
+        } else {
+            // Odd-dim fallback: plain V1
+            irithyll::ssm::StreamingMamba::new(
+                irithyll::ssm::MambaConfig::builder()
+                    .d_in(n_features)
+                    .n_state(32)
+                    .build()
+                    .expect("mamba_bd_fallback config"),
+            )
+        }
+    };
+
+    // GLA streaming attention: d_model=n_features (must match input), 1 head
+    // n_heads must divide d_model, so use 1 head for arbitrary feature counts
+    let make_gla = || gla(n_features, 1);
+
+    // SpikeNet: 64 hidden LIF neurons, 1 output
+    let make_spike = || {
+        SpikeNet::new(
+            SpikeNetConfig::builder()
+                .n_hidden(64)
+                .n_outputs(1)
+                .build()
+                .expect("spike config"),
+        )
+    };
+
+    // ProjectedLearner wrapping Mamba V1 (rank=8 projection -> 32-state Mamba)
+    // Inner Mamba sees rank features, so d_in=rank
+    let proj_rank = 8usize.min(n_features);
+    let make_projected_mamba = move || {
+        let inner_mamba = irithyll::ssm::StreamingMamba::new(
+            irithyll::ssm::MambaConfig::builder()
+                .d_in(proj_rank)
+                .n_state(32)
+                .build()
+                .expect("projected_mamba inner config"),
+        );
+        let proj_config = ProjectionConfig::builder()
+            .rank(proj_rank)
+            .warmup(50)
+            .seed(0xABCD_1234)
+            .build()
+            .expect("projection config");
+        ProjectedLearner::from_learner(inner_mamba, n_features, proj_config)
+    };
+
+    // MoE with 3 neural experts (sLSTM, TTT, ESN) -- tests routing + ensemble overhead
+    let make_neural_moe = || {
+        NeuralMoE::builder()
+            .expert_with_warmup(
+                StreamingLSTM::new(
+                    SLSTMConfig::builder()
+                        .d_model(16)
+                        .build()
+                        .expect("neural_moe slstm"),
+                ),
+                20,
+            )
+            .expert_with_warmup(
+                irithyll::ttt::StreamingTTT::new(
+                    irithyll::ttt::TTTConfig::builder()
+                        .d_model(16)
+                        .learning_rate(0.01)
+                        .build()
+                        .expect("neural_moe ttt"),
+                ),
+                20,
+            )
+            .expert_with_warmup(esn(50, 0.95), 20)
             .top_k(2)
             .build()
     };
@@ -1627,6 +1769,39 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
                 name: "MoE (3 experts)",
                 model: Box::new(make_moe()),
             });
+            // --- New models (v9.9.x+) ---
+            algos.push(NamedModel {
+                name: "sLSTM (d=32)",
+                model: Box::new(make_slstm()),
+            });
+            algos.push(NamedModel {
+                name: "mGRADE (h=32)",
+                model: Box::new(make_mgrade()),
+            });
+            algos.push(NamedModel {
+                name: "MambaV3 (s=32)",
+                model: Box::new(make_mamba_v3()),
+            });
+            algos.push(NamedModel {
+                name: "MambaBD (s=32)",
+                model: Box::new(make_mamba_bd()),
+            });
+            algos.push(NamedModel {
+                name: "GLA (d=n,h=1)",
+                model: Box::new(make_gla()),
+            });
+            algos.push(NamedModel {
+                name: "SpikeNet (64n)",
+                model: Box::new(make_spike()),
+            });
+            algos.push(NamedModel {
+                name: "Proj+Mamba",
+                model: Box::new(make_projected_mamba()),
+            });
+            algos.push(NamedModel {
+                name: "NeuralMoE (3n)",
+                model: Box::new(make_neural_moe()),
+            });
         }
         Task::BinaryClassification => {
             algos.push(NamedModel {
@@ -1652,6 +1827,31 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
             algos.push(NamedModel {
                 name: "MoE-bin (3 exp)",
                 model: Box::new(binary_classifier(make_moe())),
+            });
+            // --- New models (v9.9.x+) ---
+            algos.push(NamedModel {
+                name: "sLSTM-bin (d=32)",
+                model: Box::new(binary_classifier(make_slstm())),
+            });
+            algos.push(NamedModel {
+                name: "mGRADE-bin (h=32)",
+                model: Box::new(binary_classifier(make_mgrade())),
+            });
+            algos.push(NamedModel {
+                name: "MambaV3-bin",
+                model: Box::new(binary_classifier(make_mamba_v3())),
+            });
+            algos.push(NamedModel {
+                name: "MambaBD-bin",
+                model: Box::new(binary_classifier(make_mamba_bd())),
+            });
+            algos.push(NamedModel {
+                name: "GLA-bin (d=n)",
+                model: Box::new(binary_classifier(make_gla())),
+            });
+            algos.push(NamedModel {
+                name: "SpikeNet-bin",
+                model: Box::new(binary_classifier(make_spike())),
             });
         }
         Task::MulticlassClassification { n_classes } => {
@@ -1679,6 +1879,27 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
             algos.push(NamedModel {
                 name: "MoE-mc (3 exp)",
                 model: Box::new(multiclass_classifier(make_moe(), nc)),
+            });
+            // --- New models (v9.9.x+) ---
+            algos.push(NamedModel {
+                name: "sLSTM-mc (d=32)",
+                model: Box::new(multiclass_classifier(make_slstm(), nc)),
+            });
+            algos.push(NamedModel {
+                name: "mGRADE-mc (h=32)",
+                model: Box::new(multiclass_classifier(make_mgrade(), nc)),
+            });
+            algos.push(NamedModel {
+                name: "MambaV3-mc",
+                model: Box::new(multiclass_classifier(make_mamba_v3(), nc)),
+            });
+            algos.push(NamedModel {
+                name: "MambaBD-mc",
+                model: Box::new(multiclass_classifier(make_mamba_bd(), nc)),
+            });
+            algos.push(NamedModel {
+                name: "GLA-mc (d=32)",
+                model: Box::new(multiclass_classifier(make_gla(), nc)),
             });
         }
     }
@@ -2051,8 +2272,10 @@ fn run_dataset(dataset: &dyn BenchmarkDataset) {
 fn main() {
     eprintln!();
     eprintln!("============================================================");
-    eprintln!("  irithyll v9.8.5 expanded benchmark suite");
-    eprintln!("  8+ algorithms x 25 datasets, prequential evaluation");
+    eprintln!("  irithyll expanded benchmark suite");
+    eprintln!("  16+ algorithms x 25 datasets, prequential evaluation");
+    eprintln!("  New models: sLSTM, mGRADE, MambaV3, MambaBD, GLA, SpikeNet");
+    eprintln!("  Combos: ProjectedLearner+Mamba, NeuralMoE (3 neural experts)");
     eprintln!("  Classification wrappers: binary_classifier / multiclass_classifier");
     eprintln!("============================================================");
 

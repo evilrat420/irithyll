@@ -1981,7 +1981,7 @@ impl PyStreamingTTT {
     fn new(d_model: usize, eta: f64, alpha: f64, momentum: f64, warmup: usize) -> PyResult<Self> {
         let config = irithyll::ttt::TTTConfig::builder()
             .d_model(d_model)
-            .eta(eta)
+            .learning_rate(eta)
             .alpha(alpha)
             .momentum(momentum)
             .warmup(warmup)
@@ -2066,7 +2066,7 @@ impl PyStreamingKAN {
     ) -> PyResult<Self> {
         let config = irithyll::kan::KANConfig::builder()
             .layer_sizes(layer_sizes)
-            .lr(lr)
+            .learning_rate(lr)
             .grid_size(grid_size)
             .spline_order(spline_order)
             .build()

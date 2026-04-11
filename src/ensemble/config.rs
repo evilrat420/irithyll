@@ -436,15 +436,6 @@ pub struct SGBTConfig {
     #[serde(default)]
     pub packed_refresh_interval: u64,
 
-    /// Enable per-node auto-bandwidth soft routing at prediction time.
-    ///
-    /// When `true`, predictions are continuous weighted blends instead of
-    /// piecewise-constant step functions. No training changes.
-    ///
-    /// Default: `false`.
-    #[serde(default)]
-    pub soft_routing: bool,
-
     /// Sigma-modulated adaptive tree replacement speed.
     ///
     /// When `Some((base_mts, k))`, trees are replaced faster during high
@@ -558,7 +549,6 @@ impl Default for SGBTConfig {
             shadow_warmup: None,
             leaf_model_type: LeafModelType::default(),
             packed_refresh_interval: 0,
-            soft_routing: false,
             adaptive_mts: None,
             adaptive_mts_floor: 0.0,
             proactive_prune_interval: None,
@@ -805,12 +795,6 @@ impl SGBTConfigBuilder {
     /// - [`TreeChain`](ScaleMode::TreeChain): dual-chain NGBoost with scale tree ensemble.
     pub fn scale_mode(mut self, mode: ScaleMode) -> Self {
         self.config.scale_mode = mode;
-        self
-    }
-
-    /// Enable per-node auto-bandwidth soft routing.
-    pub fn soft_routing(mut self, enabled: bool) -> Self {
-        self.config.soft_routing = enabled;
         self
     }
 
@@ -1134,10 +1118,10 @@ impl SGBTConfigBuilder {
         }
 
         // -- Empirical sigma alpha --
-        if c.empirical_sigma_alpha <= 0.0 || c.empirical_sigma_alpha >= 1.0 {
+        if !(0.0..=1.0).contains(&c.empirical_sigma_alpha) {
             return Err(ConfigError::out_of_range(
                 "empirical_sigma_alpha",
-                "must be in (0, 1)",
+                "must be in [0.0, 1.0]",
                 c.empirical_sigma_alpha,
             )
             .into());
@@ -1228,6 +1212,16 @@ impl SGBTConfigBuilder {
                 )
                 .into());
             }
+        }
+
+        // -- Packed cache refresh interval --
+        if c.packed_refresh_interval != 0 && c.packed_refresh_interval < 10 {
+            return Err(ConfigError::out_of_range(
+                "packed_refresh_interval",
+                "must be 0 (disabled) or >= 10",
+                c.packed_refresh_interval,
+            )
+            .into());
         }
 
         // -- Drift detector parameters --

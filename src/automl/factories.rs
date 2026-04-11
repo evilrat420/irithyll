@@ -385,7 +385,7 @@ impl Factory {
     /// |-------|------|------|-------|-------|
     /// | 0 | `n_heads` | Int | [1, 8] | -- |
     /// | 1 | `n_compositions` | Int | [1, 4] | -- |
-    /// | 2 | `forgetting_factor` | Float | [0.95, 0.9999] | log |
+    /// | 2 | `forgetting_factor` | Float | [0.95, 0.9999] | linear |
     /// | 3 | `warmup` | Int | [5, 50] | -- |
     pub fn delta_product(d_model: usize) -> Self {
         let space = ConfigSpace::new()
@@ -403,7 +403,7 @@ impl Factory {
                 name: "forgetting_factor",
                 low: 0.95,
                 high: 0.9999,
-                log_scale: true,
+                log_scale: false,
             })
             .push(HyperParam::Int {
                 name: "warmup",
@@ -435,7 +435,7 @@ impl Factory {
     /// | Index | Name | Type | Range | Scale |
     /// |-------|------|------|-------|-------|
     /// | 0 | `n_heads` | Int | [1, 8] | -- |
-    /// | 1 | `forgetting_factor` | Float | [0.95, 0.9999] | log |
+    /// | 1 | `forgetting_factor` | Float | [0.95, 0.9999] | linear |
     /// | 2 | `warmup` | Int | [5, 50] | -- |
     pub fn rwkv7(d_model: usize) -> Self {
         let space = ConfigSpace::new()
@@ -448,7 +448,7 @@ impl Factory {
                 name: "forgetting_factor",
                 low: 0.95,
                 high: 0.9999,
-                log_scale: true,
+                log_scale: false,
             })
             .push(HyperParam::Int {
                 name: "warmup",
@@ -567,7 +567,7 @@ impl Factory {
     /// |-------|------|------|-------|
     /// | 0 | `d_model` | Int | [8, 64] |
     /// | 1 | `eta` | Float | [0.001, 0.1] log |
-    /// | 2 | `alpha` | Float | [0.0, 0.01] linear |
+    /// | 2 | `alpha` | Float | [0.0001, 0.01] linear |
     pub fn ttt(n_features: usize) -> Self {
         let space = ConfigSpace::new()
             .push(HyperParam::Int {
@@ -583,7 +583,7 @@ impl Factory {
             })
             .push(HyperParam::Float {
                 name: "alpha",
-                low: 0.0,
+                low: 0.0001,
                 high: 0.01,
                 log_scale: false,
             });
@@ -946,6 +946,22 @@ impl Factory {
     pub fn projected_mgrade(d_in: usize, rank: usize) -> Self {
         Factory::mgrade(rank).with_projection(d_in, rank, 0.999)
     }
+
+    /// Create a projected Distributional factory.
+    ///
+    /// Equivalent to `Factory::distributional(rank).with_projection(d_in, rank, 0.999)`.
+    /// The inner DistributionalSGBT sees `rank`-dimensional projected features.
+    pub fn projected_distributional(d_in: usize, rank: usize) -> Self {
+        Factory::distributional(rank).with_projection(d_in, rank, 0.999)
+    }
+
+    /// Create a projected SpikeNet factory.
+    ///
+    /// Equivalent to `Factory::spike_net().with_projection(d_in, rank, 0.999)`.
+    /// The inner SpikeNet sees `rank`-dimensional projected features.
+    pub fn projected_spike_net(d_in: usize, rank: usize) -> Self {
+        Factory::spike_net().with_projection(d_in, rank, 0.999)
+    }
 }
 
 impl ModelFactory for Factory {
@@ -1153,7 +1169,7 @@ impl ModelFactory for Factory {
                 let spike_config = SpikeNetConfig::builder()
                     .n_hidden(n_hidden)
                     .alpha(alpha)
-                    .eta(eta)
+                    .learning_rate(eta)
                     .v_thr(v_thr)
                     .seed(self.seed)
                     .build()
@@ -1170,7 +1186,7 @@ impl ModelFactory for Factory {
                 let kan_config = crate::kan::KANConfig::builder()
                     .layer_sizes(vec![self.n_features, hidden_size, 1])
                     .grid_size(grid_size)
-                    .lr(lr)
+                    .learning_rate(lr)
                     .spline_order(spline_order)
                     .seed(self.seed)
                     .build()
@@ -1185,7 +1201,7 @@ impl ModelFactory for Factory {
 
                 let ttt_config = crate::ttt::TTTConfig::builder()
                     .d_model(d_model)
-                    .eta(eta)
+                    .learning_rate(eta)
                     .alpha(alpha)
                     .warmup(self.warmup)
                     .seed(self.seed)
@@ -1638,14 +1654,14 @@ mod tests {
         let kan = StreamingKAN::new(
             KANConfig::builder()
                 .layer_sizes(vec![3, 8, 1])
-                .lr(0.01)
+                .learning_rate(0.01)
                 .build()
                 .unwrap(),
         );
         let kan2 = StreamingKAN::new(
             KANConfig::builder()
                 .layer_sizes(vec![3, 12, 1])
-                .lr(0.005)
+                .learning_rate(0.005)
                 .build()
                 .unwrap(),
         );

@@ -20,7 +20,7 @@
 //! let config = KANConfig::builder()
 //!     .layer_sizes(vec![4, 20, 1])  // shallow: 1 hidden layer
 //!     .grid_size(8)
-//!     .lr(0.1)   // higher than MLP — B-spline sparse updates need it
+//!     .learning_rate(0.1)   // higher than MLP — B-spline sparse updates need it
 //!     .build()
 //!     .unwrap();
 //! ```
@@ -58,7 +58,7 @@ use irithyll_core::rng::standard_normal;
 ///
 /// let config = KANConfig::builder()
 ///     .layer_sizes(vec![3, 10, 1])
-///     .lr(0.1)
+///     .learning_rate(0.1)
 ///     .build()
 ///     .unwrap();
 /// ```
@@ -78,7 +78,7 @@ pub struct KANConfig {
     /// Online KAN convergence requires higher LR than MLPs because each sample
     /// only updates k+1 B-spline coefficients per edge (Hoang et al., 2026).
     /// Values 0.1-0.5 work for regression.
-    pub lr: f64,
+    pub learning_rate: f64,
     /// SGD momentum factor for B-spline coefficient updates (default: 0.0, disabled).
     ///
     /// Momentum on sparse B-spline updates magnifies overfitting in active
@@ -122,7 +122,7 @@ impl Default for KANConfig {
             layer_sizes: vec![1, 5, 1],
             spline_order: 3,
             grid_size: 8,
-            lr: 0.1,
+            learning_rate: 0.1,
             momentum: 0.0,
             coefficient_decay: 0.0,
             temporal: false,
@@ -140,7 +140,7 @@ impl std::fmt::Display for KANConfig {
             self.layer_sizes,
             self.spline_order,
             self.grid_size,
-            self.lr,
+            self.learning_rate,
             self.momentum,
             self.coefficient_decay,
             self.temporal,
@@ -164,7 +164,7 @@ impl std::fmt::Display for KANConfig {
 ///     .layer_sizes(vec![5, 10, 1])
 ///     .spline_order(3)
 ///     .grid_size(8)
-///     .lr(0.1)
+///     .learning_rate(0.1)
 ///     .build()
 ///     .unwrap();
 ///
@@ -213,8 +213,15 @@ impl KANConfigBuilder {
     ///
     /// Online KAN needs higher LR than MLPs due to sparse B-spline updates.
     /// Values 0.1-0.5 work for regression (Hoang et al., 2026).
+    pub fn learning_rate(mut self, lr: f64) -> Self {
+        self.config.learning_rate = lr;
+        self
+    }
+
+    /// Set the learning rate for SGD (deprecated alias for [`learning_rate`](Self::learning_rate)).
+    #[deprecated(since = "0.0.0", note = "use `learning_rate()` instead")]
     pub fn lr(mut self, lr: f64) -> Self {
-        self.config.lr = lr;
+        self.config.learning_rate = lr;
         self
     }
 
@@ -346,7 +353,7 @@ impl KANConfigBuilder {
 ///
 /// let config = KANConfig::builder()
 ///     .layer_sizes(vec![3, 10, 1])
-///     .lr(0.1)
+///     .learning_rate(0.1)
 ///     .build()
 ///     .unwrap();
 /// let mut model = StreamingKAN::new(config);
@@ -384,8 +391,7 @@ pub struct StreamingKAN {
     /// Gate weights W_gate for projecting input to a scalar gate value.
     /// Length = n_input (config.layer_sizes[0]).
     gate_weights: Vec<f64>,
-    /// Gate bias, initialized to 1.0 so sigmoid(b) ≈ 0.73, biasing toward
-    /// state preservation at initialization.
+    /// Gate bias, initialized to 0.0 so sigmoid(b) = 0.5, unbiased initial gating.
     gate_bias: f64,
     /// Optional plasticity guard for maintaining learning capacity.
     plasticity_guard: Option<NeuronRegeneration>,
@@ -429,7 +435,8 @@ impl StreamingKAN {
         } else {
             vec![0.0; n_in]
         };
-        let gate_bias = 1.0; // sigmoid(1.0) ≈ 0.73, biasing toward state preservation
+        // B.4: gate_bias initialized to 0.0; sigmoid(0) = 0.5, unbiased initial gating.
+        let gate_bias = 0.0;
 
         // Compute total hidden units (all layers except input and output).
         let n_hidden_total: usize = if config.layer_sizes.len() > 2 {
@@ -584,13 +591,20 @@ impl StreamingKAN {
             let delta2 = x - self.input_mean[i];
             self.input_var[i] += delta * delta2;
 
-            // Normalize to roughly zero-mean, unit-variance
-            let std = if n > 1.0 {
-                (self.input_var[i] / (n - 1.0)).sqrt().max(1e-8)
+            // Normalize to roughly zero-mean, unit-variance.
+            // B.3: If feature std < 1e-8 (constant feature), skip normalization
+            // for that feature to avoid div-by-zero / NaN contamination.
+            let raw_std = if n > 1.0 {
+                (self.input_var[i] / (n - 1.0)).sqrt()
             } else {
-                1.0
+                0.0
             };
-            normalized[i] = (x - self.input_mean[i]) / std;
+            if raw_std < 1e-8 {
+                // Constant feature: pass through centered at 0 in grid domain
+                normalized[i] = 0.0;
+                continue;
+            }
+            normalized[i] = (x - self.input_mean[i]) / raw_std;
             // Clamp to [-1+eps, 1-eps] — the full B-spline grid domain [-1, 1].
             // Using the full domain ensures all grid intervals participate.
             // Previous [-0.95, 0.95] clamp discarded ~44% of normalized data
@@ -626,8 +640,12 @@ impl StreamingLearner for StreamingKAN {
                     .enumerate()
                     .map(|(i, &x)| {
                         if i < self.input_mean.len() {
-                            let std = (self.input_var[i] / (n - 1.0)).sqrt().max(1e-8);
-                            ((x - self.input_mean[i]) / std).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+                            // B.3: skip normalization for constant features
+                            let raw_std = (self.input_var[i] / (n - 1.0)).sqrt();
+                            if raw_std < 1e-8 {
+                                return 0.0;
+                            }
+                            ((x - self.input_mean[i]) / raw_std).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
                         } else {
                             0.0
                         }
@@ -711,7 +729,7 @@ impl StreamingLearner for StreamingKAN {
             // but we use a simple heuristic: push gate toward better mixing.
             // dg/dW = g*(1-g) * (prev_state_i - pre_output_i) * x_j
             // Use small LR (0.01 * config.lr) and clip gradient.
-            let gate_lr = 0.01 * self.config.lr;
+            let gate_lr = 0.01 * self.config.learning_rate;
             let diff_sum: f64 = prev_state
                 .iter()
                 .zip(activations[pre_output_idx].iter())
@@ -746,12 +764,23 @@ impl StreamingLearner for StreamingKAN {
         self.target_mean += t_delta / tn;
         let t_delta2 = target - self.target_mean;
         self.target_var += t_delta * t_delta2;
-        let target_std = if tn > 2.0 {
-            (self.target_var / (tn - 1.0)).sqrt().max(1e-8)
+        // B.2: If target std < 1e-8 (constant target), use target_std=1.0 and
+        // skip normalization to avoid div-by-zero and NaN in gradient computation.
+        let raw_target_std = if tn > 2.0 {
+            (self.target_var / (tn - 1.0)).sqrt()
         } else {
-            1.0
+            0.0
         };
-        let normalized_target = (target - self.target_mean) / target_std;
+        let target_std = if raw_target_std < 1e-8 {
+            1.0
+        } else {
+            raw_target_std
+        };
+        let normalized_target = if raw_target_std < 1e-8 {
+            target - self.target_mean
+        } else {
+            (target - self.target_mean) / target_std
+        };
 
         // 4. Compute output error in normalized target space
         let prediction = current[0];
@@ -762,16 +791,37 @@ impl StreamingLearner for StreamingKAN {
         //    High error relative to baseline → increase lr (adapt faster).
         //    Low error → decrease lr (conserve).
         const LOSS_ALPHA: f64 = 0.001;
-        self.rolling_loss = (1.0 - LOSS_ALPHA) * self.rolling_loss + LOSS_ALPHA * sq_error;
+        if self.n_samples == 0 {
+            self.rolling_loss = sq_error;
+        } else {
+            self.rolling_loss = (1.0 - LOSS_ALPHA) * self.rolling_loss + LOSS_ALPHA * sq_error;
+        }
 
         let effective_lr = if self.n_samples > 500 && self.rolling_loss > 1e-10 {
             let ratio = (sq_error / self.rolling_loss).clamp(0.5, 2.0);
-            self.config.lr * ratio
+            self.config.learning_rate * ratio
         } else {
-            self.config.lr // Fixed LR during warmup
+            self.config.learning_rate // Fixed LR during warmup
         };
 
         let lr = effective_lr * weight;
+
+        // B.1: Finiteness guard — skip backward pass if any activation contains NaN/Inf.
+        // This keeps the model healthy when an upstream computation produced bad values.
+        let activations_finite = activations
+            .iter()
+            .all(|act| act.iter().all(|f| f.is_finite()));
+        if !activations_finite {
+            // Skip gradient update; cache denormalized prediction and return.
+            let denormalized = current[0] * target_std + self.target_mean;
+            self.last_output = if denormalized.is_finite() {
+                denormalized.clamp(-1e6, 1e6)
+            } else {
+                0.0
+            };
+            self.n_samples += 1;
+            return;
+        }
 
         // 5. Backward through layers (reverse order)
         let mut grad = vec![2.0 * error]; // dL/d_output for MSE
@@ -833,8 +883,12 @@ impl StreamingLearner for StreamingKAN {
                 0.0
             };
             const ALIGN_ALPHA: f64 = 0.05;
-            self.alignment_ewma =
-                (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+            if self.n_samples == 1 {
+                self.alignment_ewma = agreement;
+            } else {
+                self.alignment_ewma =
+                    (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+            }
         }
         self.prev_prev_change = self.prev_change;
         self.prev_change = current_change;
@@ -1001,7 +1055,8 @@ impl StreamingLearner for StreamingKAN {
         for w in &mut self.gate_weights {
             *w = standard_normal(&mut self.rng_state) * 0.01;
         }
-        self.gate_bias = 1.0;
+        // B.4: reset gate_bias to 0.0 (the initial value from new()), not 1.0
+        self.gate_bias = 0.0;
         if let Some(ref mut guard) = self.plasticity_guard {
             guard.reset();
         }
@@ -1024,7 +1079,7 @@ impl StreamingLearner for StreamingKAN {
 
     fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
         // Scale the SGD learning rate for B-spline coefficient updates.
-        self.config.lr *= lr_multiplier;
+        self.config.learning_rate *= lr_multiplier;
     }
 }
 
@@ -1034,7 +1089,7 @@ impl std::fmt::Debug for StreamingKAN {
             .field("layer_sizes", &self.config.layer_sizes)
             .field("spline_order", &self.config.spline_order)
             .field("grid_size", &self.config.grid_size)
-            .field("lr", &self.config.lr)
+            .field("learning_rate", &self.config.learning_rate)
             .field("n_params", &self.n_params())
             .field("n_samples", &self.n_samples)
             .finish()
@@ -1088,9 +1143,9 @@ mod tests {
         assert_eq!(config.spline_order, 3);
         assert_eq!(config.grid_size, 8);
         assert!(
-            (config.lr - 0.1).abs() < 1e-12,
-            "default lr should be 0.1, got {}",
-            config.lr
+            (config.learning_rate - 0.1).abs() < 1e-12,
+            "default learning_rate should be 0.1, got {}",
+            config.learning_rate
         );
         assert!(
             config.momentum.abs() < 1e-12,
@@ -1110,14 +1165,14 @@ mod tests {
             .layer_sizes(vec![3, 10, 1])
             .spline_order(4)
             .grid_size(8)
-            .lr(0.005)
+            .learning_rate(0.005)
             .seed(123)
             .build()
             .unwrap();
         assert_eq!(config.layer_sizes, vec![3, 10, 1]);
         assert_eq!(config.spline_order, 4);
         assert_eq!(config.grid_size, 8);
-        assert!((config.lr - 0.005).abs() < 1e-12);
+        assert!((config.learning_rate - 0.005).abs() < 1e-12);
         assert_eq!(config.seed, 123);
     }
 
@@ -1172,7 +1227,7 @@ mod tests {
     fn train_and_predict_finite() {
         let config = KANConfig::builder()
             .layer_sizes(vec![1, 5, 1])
-            .lr(0.01)
+            .learning_rate(0.01)
             .build()
             .unwrap();
         let mut model = StreamingKAN::new(config);
@@ -1236,7 +1291,7 @@ mod tests {
     fn multi_layer_kan() {
         let config = KANConfig::builder()
             .layer_sizes(vec![3, 8, 4, 1])
-            .lr(0.005)
+            .learning_rate(0.005)
             .build()
             .unwrap();
         let mut model = StreamingKAN::new(config);
@@ -1275,7 +1330,7 @@ mod tests {
         // for y = x^2 (nonlinear, within grid range).
         let config = KANConfig::builder()
             .layer_sizes(vec![1, 8, 1])
-            .lr(0.01)
+            .learning_rate(0.01)
             .seed(42)
             .build()
             .unwrap();
@@ -1367,7 +1422,7 @@ mod tests {
     fn kan_uncertainty_modulated_lr() {
         let config = KANConfig::builder()
             .layer_sizes(vec![2, 10, 1])
-            .lr(0.01)
+            .learning_rate(0.01)
             .build()
             .unwrap();
         let mut model = StreamingKAN::new(config);
@@ -1416,7 +1471,7 @@ mod tests {
         // Note: decay only activates after 2000 samples (warmup protection).
         let config = KANConfig::builder()
             .layer_sizes(vec![1, 5, 1])
-            .lr(0.01)
+            .learning_rate(0.01)
             .coefficient_decay(0.005) // moderate decay within adaptive clamp range
             .build()
             .unwrap();
@@ -1429,7 +1484,7 @@ mod tests {
         }
 
         // Now set lr to 0 so only decay acts on coefficients
-        model.config.lr = 0.0;
+        model.config.learning_rate = 0.0;
 
         // Snapshot the L2 norm of coefficients
         let norm_before: f64 = model
@@ -1463,14 +1518,14 @@ mod tests {
         // With explicit decay=0.0, behavior should be identical across two identical models.
         let config_no_decay = KANConfig::builder()
             .layer_sizes(vec![1, 5, 1])
-            .lr(0.01)
+            .learning_rate(0.01)
             .coefficient_decay(0.0)
             .seed(42)
             .build()
             .unwrap();
         let config_zero_decay = KANConfig::builder()
             .layer_sizes(vec![1, 5, 1])
-            .lr(0.01)
+            .learning_rate(0.01)
             .coefficient_decay(0.0)
             .seed(42)
             .build()
@@ -1516,7 +1571,7 @@ mod tests {
         // Note: decay only activates after 2000 samples (warmup protection).
         let config = KANConfig::builder()
             .layer_sizes(vec![1, 5, 1])
-            .lr(0.01)
+            .learning_rate(0.01)
             .coefficient_decay(0.001)
             .seed(42)
             .build()
@@ -1589,7 +1644,7 @@ mod tests {
         // Validate Hoang et al. (2026) finding: high LR + no momentum converges online.
         let config = KANConfig::builder()
             .layer_sizes(vec![2, 10, 1])
-            .lr(0.1)
+            .learning_rate(0.1)
             .momentum(0.0)
             .coefficient_decay(0.0)
             .build()
@@ -1636,7 +1691,7 @@ mod tests {
         // for large-magnitude targets (Power Plant ~450 MW, Feynman ~500).
         let config = KANConfig::builder()
             .layer_sizes(vec![4, 20, 1])
-            .lr(0.1)
+            .learning_rate(0.1)
             .momentum(0.0)
             .coefficient_decay(0.0)
             .build()
@@ -1680,7 +1735,7 @@ mod tests {
         let mut model2 = StreamingKAN::new(
             KANConfig::builder()
                 .layer_sizes(vec![4, 20, 1])
-                .lr(0.1)
+                .learning_rate(0.1)
                 .build()
                 .unwrap(),
         );
@@ -1744,7 +1799,7 @@ mod tests {
         let config = KANConfig::builder()
             .layer_sizes(vec![3, 8, 1])
             .temporal(true)
-            .lr(0.1)
+            .learning_rate(0.1)
             .build()
             .unwrap();
         let mut model = StreamingKAN::new(config);
@@ -1761,7 +1816,7 @@ mod tests {
         let config = KANConfig::builder()
             .layer_sizes(vec![2, 6, 1])
             .temporal(true)
-            .lr(0.05)
+            .learning_rate(0.05)
             .build()
             .unwrap();
         let mut model = StreamingKAN::new(config);
@@ -1783,7 +1838,7 @@ mod tests {
         let config = KANConfig::builder()
             .layer_sizes(vec![2, 4, 1])
             .temporal(true)
-            .lr(0.1)
+            .learning_rate(0.1)
             .build()
             .unwrap();
         let mut model = StreamingKAN::new(config);
@@ -1797,7 +1852,7 @@ mod tests {
         // Ensure temporal=false doesn't affect existing behavior
         let config = KANConfig::builder()
             .layer_sizes(vec![2, 4, 1])
-            .lr(0.1)
+            .learning_rate(0.1)
             .build()
             .unwrap();
         let mut model = StreamingKAN::new(config);
@@ -1843,7 +1898,7 @@ mod tests {
     fn kan_plasticity_train_runs_without_panic() {
         let config = KANConfig::builder()
             .layer_sizes(vec![2, 8, 1])
-            .lr(0.1)
+            .learning_rate(0.1)
             .plasticity(true)
             .build()
             .unwrap();
@@ -1882,7 +1937,7 @@ mod tests {
         // exercise cross-layer edge reinit.
         let config = KANConfig::builder()
             .layer_sizes(vec![2, 4, 3, 1])
-            .lr(0.1)
+            .learning_rate(0.1)
             .plasticity(true)
             .build()
             .unwrap();
@@ -1943,6 +1998,66 @@ mod tests {
         assert!(
             pred.is_finite(),
             "KAN should produce finite predictions after surgical reinit, got {pred}"
+        );
+    }
+
+    #[test]
+    fn learning_rate_and_lr_alias_set_same_field() {
+        // D1.1: both .learning_rate() and .learning_rate() (deprecated alias) must set the same field.
+        let config_a = KANConfig::builder()
+            .layer_sizes(vec![2, 4, 1])
+            .learning_rate(0.05)
+            .build()
+            .unwrap();
+        #[allow(deprecated)]
+        let config_b = KANConfig::builder()
+            .layer_sizes(vec![2, 4, 1])
+            .learning_rate(0.05)
+            .build()
+            .unwrap();
+        assert!(
+            (config_a.learning_rate - config_b.learning_rate).abs() < 1e-15,
+            "learning_rate and lr alias should set the same field: {} vs {}",
+            config_a.learning_rate,
+            config_b.learning_rate
+        );
+    }
+
+    #[test]
+    fn constant_target_does_not_produce_nan() {
+        // B.2: KAN should handle constant targets without collapsing to NaN.
+        let config = KANConfig::builder()
+            .layer_sizes(vec![2, 4, 1])
+            .learning_rate(0.01)
+            .build()
+            .unwrap();
+        let mut model = StreamingKAN::new(config);
+        for _ in 0..50 {
+            model.train(&[1.0, 2.0], 5.0); // constant target
+        }
+        let pred = model.predict(&[1.0, 2.0]);
+        assert!(
+            pred.is_finite(),
+            "KAN should produce finite predictions with constant target, got {pred}"
+        );
+    }
+
+    #[test]
+    fn constant_feature_does_not_produce_nan() {
+        // B.3: KAN should handle constant features without NaN from div-by-zero.
+        let config = KANConfig::builder()
+            .layer_sizes(vec![2, 4, 1])
+            .learning_rate(0.01)
+            .build()
+            .unwrap();
+        let mut model = StreamingKAN::new(config);
+        for i in 0..50 {
+            model.train(&[1.0, i as f64 * 0.1], i as f64); // first feature constant
+        }
+        let pred = model.predict(&[1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "KAN should produce finite predictions with constant feature, got {pred}"
         );
     }
 }

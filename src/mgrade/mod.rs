@@ -200,7 +200,7 @@ impl mGRADEConfigBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// StreamingmGRADE
+// StreamingMGrade
 // ---------------------------------------------------------------------------
 
 /// Streaming mGRADE model with RLS readout.
@@ -212,16 +212,15 @@ impl mGRADEConfigBuilder {
 /// # Example
 ///
 /// ```no_run
-/// use irithyll::mgrade::{StreamingmGRADE, mGRADEConfig};
+/// use irithyll::mgrade::{StreamingMGrade, mGRADEConfig};
 /// use irithyll::StreamingLearner;
 ///
 /// let config = mGRADEConfig::builder().d_in(3).d_hidden(16).build().unwrap();
-/// let mut model = StreamingmGRADE::new(config);
+/// let mut model = StreamingMGrade::new(config);
 /// model.train(&[1.0, 2.0, 3.0], 4.0);
 /// let pred = model.predict(&[1.0, 2.0, 3.0]);
 /// ```
-#[allow(non_camel_case_types)]
-pub struct StreamingmGRADE {
+pub struct StreamingMGrade {
     config: mGRADEConfig,
     delay_conv: irithyll_core::mgrade::DelayConv1D,
     min_gru: irithyll_core::mgrade::MinGRUCell,
@@ -243,11 +242,16 @@ pub struct StreamingmGRADE {
     prev_change: f64,
     /// Change from two steps ago, for acceleration-based alignment.
     prev_prev_change: f64,
+    /// Welford online mean for input normalization (per feature).
+    input_mean: Vec<f64>,
+    /// Welford online variance accumulator for input normalization (per feature).
+    input_var: Vec<f64>,
+    /// Count of samples seen for Welford normalization.
+    input_count: u64,
 }
 
-#[allow(non_camel_case_types)]
-impl StreamingmGRADE {
-    /// Create a new StreamingmGRADE from config.
+impl StreamingMGrade {
+    /// Create a new StreamingMGrade from config.
     pub fn new(config: mGRADEConfig) -> Self {
         let delay_conv =
             irithyll_core::mgrade::DelayConv1D::new(config.d_in, config.kernel_size, config.seed);
@@ -272,7 +276,39 @@ impl StreamingmGRADE {
             alignment_ewma: 0.0,
             prev_change: 0.0,
             prev_prev_change: 0.0,
+            input_mean: Vec::new(),
+            input_var: Vec::new(),
+            input_count: 0,
         }
+    }
+
+    /// Normalize a feature vector via Welford online mean/std, updating stats.
+    ///
+    /// Returns the normalized features clamped to [-5, 5].
+    fn normalize_input(&mut self, features: &[f64]) -> Vec<f64> {
+        let d = features.len();
+        if self.input_mean.len() != d {
+            self.input_mean = vec![0.0; d];
+            self.input_var = vec![0.0; d];
+        }
+        self.input_count += 1;
+        let n = self.input_count as f64;
+        let mut out = vec![0.0; d];
+        for i in 0..d {
+            let x = features[i];
+            let delta = x - self.input_mean[i];
+            self.input_mean[i] += delta / n;
+            let delta2 = x - self.input_mean[i];
+            self.input_var[i] += delta * delta2;
+            let std = if n > 1.0 {
+                (self.input_var[i] / (n - 1.0)).sqrt()
+            } else {
+                1.0
+            };
+            let std = if std < 1e-8 { 1.0 } else { std };
+            out[i] = ((x - self.input_mean[i]) / std).clamp(-5.0, 5.0);
+        }
+        out
     }
 
     /// Whether the model has seen enough samples for meaningful predictions.
@@ -308,14 +344,17 @@ impl StreamingmGRADE {
     }
 }
 
-#[allow(non_camel_case_types)]
-impl StreamingLearner for StreamingmGRADE {
+impl StreamingLearner for StreamingMGrade {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
         // 1. Uncertainty-modulated RLS forgetting factor
         let current_uncertainty = self.readout.noise_variance().sqrt();
         const UNCERTAINTY_ALPHA: f64 = 0.001;
-        self.rolling_uncertainty = (1.0 - UNCERTAINTY_ALPHA) * self.rolling_uncertainty
-            + UNCERTAINTY_ALPHA * current_uncertainty;
+        if self.total_seen == 0 {
+            self.rolling_uncertainty = current_uncertainty;
+        } else {
+            self.rolling_uncertainty = (1.0 - UNCERTAINTY_ALPHA) * self.rolling_uncertainty
+                + UNCERTAINTY_ALPHA * current_uncertainty;
+        }
 
         if self.rolling_uncertainty > 1e-10 {
             let ratio = (current_uncertainty / self.rolling_uncertainty).clamp(0.5, 3.0);
@@ -331,15 +370,17 @@ impl StreamingLearner for StreamingmGRADE {
 
             // Short-term error tracking for drift
             let sq_err = pred_error * pred_error;
-            self.short_term_error = 0.9 * self.short_term_error + 0.1 * sq_err;
-            let short_rmse = self.short_term_error.sqrt();
-            if self.samples_trained >= 100
-                && self.rolling_uncertainty > 1e-10
-                && short_rmse > 1.5 * self.rolling_uncertainty
-            {
-                self.min_gru.reset();
-                self.delay_conv.reset();
+            if self.samples_trained == 0 {
+                self.short_term_error = sq_err;
+            } else {
+                self.short_term_error = 0.9 * self.short_term_error + 0.1 * sq_err;
             }
+            // Note: resetting min_gru + delay_conv on drift detection is intentionally omitted.
+            // Resetting the recurrent state mid-stream destroys the feature distribution
+            // that the RLS readout was trained on, causing prediction explosions that
+            // cascade into further resets. Input normalization stabilizes feature scale
+            // at the source instead.
+            let _short_rmse = self.short_term_error.sqrt();
 
             // Alignment tracking
             let current_change = current_pred - self.prev_prediction;
@@ -355,23 +396,47 @@ impl StreamingLearner for StreamingmGRADE {
                 } else {
                     0.0
                 };
-                self.alignment_ewma = 0.95 * self.alignment_ewma + 0.05 * agreement;
+                if self.samples_trained == 1 {
+                    self.alignment_ewma = agreement;
+                } else {
+                    self.alignment_ewma = 0.95 * self.alignment_ewma + 0.05 * agreement;
+                }
             }
             self.prev_prev_change = self.prev_change;
             self.prev_change = current_change;
             self.prev_prediction = current_pred;
         }
 
-        // 3. Forward through delay conv then minGRU (updates state)
-        let delay_output = self.delay_conv.forward(features);
+        // 3. Guard: skip non-finite inputs to prevent NaN from entering recurrent state.
+        if !features.iter().all(|f| f.is_finite()) {
+            return;
+        }
+
+        // 4a. Normalize input via Welford online mean/std before feeding to the pipeline.
+        //     Raw feature scale can vary wildly (e.g. Friedman: 0-100, Lorenz: -20 to +20).
+        //     Without normalization, the delay conv receives large values and produces
+        //     unbounded linear combinations that cause RLS weight explosion.
+        let normalized = self.normalize_input(features);
+
+        // 4b. Forward through delay conv then minGRU (updates state).
+        let delay_output_raw = self.delay_conv.forward(&normalized);
+
+        // 4c. Clamp delay conv output via tanh to ensure it is bounded in [-1, 1].
+        //     The delay conv is a linear combination of buffered inputs, so without
+        //     squashing it is fully unbounded. All readout features must be bounded
+        //     so RLS weights stay stable — this mirrors Mamba's gated output approach.
+        let delay_output: Vec<f64> = delay_output_raw.iter().map(|&v| v.tanh()).collect();
+
         let cell_output = self.min_gru.forward(&delay_output).to_vec();
         self.total_seen += 1;
 
-        // 4. Build readout features: [hidden_state; delay_output]
+        // 5a. Build readout features: [hidden_state; tanh(delay_output)]
+        //     Both components are now bounded: hidden state in [-1,1] (minGRU interpolation),
+        //     delay output in [-1,1] (tanh squash above).
         let mut readout_features = std::mem::take(&mut self.last_features);
         Self::build_readout_features(&cell_output, &delay_output, &mut readout_features);
 
-        // 5. Track output utilization
+        // 5b. Track output utilization
         let frob_sq: f64 = readout_features.iter().map(|s| s * s).sum();
         const FROB_ALPHA: f64 = 0.001;
         self.max_frob_sq_ewma = if frob_sq > self.max_frob_sq_ewma {
@@ -382,6 +447,10 @@ impl StreamingLearner for StreamingmGRADE {
 
         // 6. Train RLS readout (after warmup)
         if self.past_warmup() {
+            if !readout_features.iter().all(|f| f.is_finite()) {
+                self.last_features = readout_features;
+                return;
+            }
             self.readout.train_one(&readout_features, target, weight);
             self.samples_trained += 1;
         }
@@ -394,7 +463,26 @@ impl StreamingLearner for StreamingmGRADE {
         if self.total_seen == 0 {
             return 0.0;
         }
-        let delay_output = self.delay_conv.forward_predict(features);
+        // Apply same Welford normalization as train_one (read-only: use frozen stats).
+        let d = features.len();
+        let mut normalized = vec![0.0; d];
+        if self.input_count > 0 && self.input_mean.len() == d {
+            let n = self.input_count as f64;
+            for i in 0..d {
+                let std = if n > 1.0 {
+                    (self.input_var[i] / (n - 1.0)).sqrt()
+                } else {
+                    1.0
+                };
+                let std = if std < 1e-8 { 1.0 } else { std };
+                normalized[i] = ((features[i] - self.input_mean[i]) / std).clamp(-5.0, 5.0);
+            }
+        } else {
+            normalized.copy_from_slice(features);
+        }
+        let delay_output_raw = self.delay_conv.forward_predict(&normalized);
+        // Apply tanh to delay conv output (matches train_one).
+        let delay_output: Vec<f64> = delay_output_raw.iter().map(|&v| v.tanh()).collect();
         let cell_output = self.min_gru.forward_predict(&delay_output);
         let mut readout_features = vec![0.0; self.config.d_hidden + self.config.d_in];
         Self::build_readout_features(&cell_output, &delay_output, &mut readout_features);
@@ -420,6 +508,9 @@ impl StreamingLearner for StreamingmGRADE {
         self.prev_prev_change = 0.0;
         self.alignment_ewma = 0.0;
         self.max_frob_sq_ewma = 0.0;
+        self.input_mean.clear();
+        self.input_var.clear();
+        self.input_count = 0;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -439,16 +530,28 @@ impl StreamingLearner for StreamingmGRADE {
     fn readout_weights(&self) -> Option<&[f64]> {
         self.readout.readout_weights()
     }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
+        self.config.forgetting_factor =
+            (self.config.forgetting_factor * lr_multiplier).clamp(0.9, 1.0);
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Backward-compatible type alias
+// ---------------------------------------------------------------------------
+
+/// Deprecated name. Use [`StreamingMGrade`] instead.
+#[allow(non_camel_case_types)]
+pub type StreamingmGRADE = StreamingMGrade;
 
 // ---------------------------------------------------------------------------
 // Debug impl
 // ---------------------------------------------------------------------------
 
-#[allow(non_camel_case_types)]
-impl std::fmt::Debug for StreamingmGRADE {
+impl std::fmt::Debug for StreamingMGrade {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamingmGRADE")
+        f.debug_struct("StreamingMGrade")
             .field("d_in", &self.config.d_in)
             .field("d_hidden", &self.config.d_hidden)
             .field("kernel_size", &self.config.kernel_size)
@@ -464,8 +567,7 @@ impl std::fmt::Debug for StreamingmGRADE {
 // DiagnosticSource impl
 // ---------------------------------------------------------------------------
 
-#[allow(non_camel_case_types)]
-impl crate::automl::DiagnosticSource for StreamingmGRADE {
+impl crate::automl::DiagnosticSource for StreamingMGrade {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         // RLS saturation: 1.0 - trace(P) / (delta * d).
         let rls_saturation = {
@@ -643,5 +745,125 @@ mod tests {
         let config = mGRADEConfig::builder().d_in(2).d_hidden(8).build().unwrap();
         let model = StreamingmGRADE::new(config);
         let _boxed: Box<dyn StreamingLearner> = Box::new(model);
+    }
+
+    #[test]
+    fn test_mgrade_nan_skipped() {
+        // Train past warmup then send a NaN sample; model must remain healthy.
+        let config = mGRADEConfig::builder()
+            .d_in(2)
+            .d_hidden(8)
+            .warmup(3)
+            .build()
+            .unwrap();
+        let mut model = StreamingMGrade::new(config);
+        for i in 0..20 {
+            model.train(&[i as f64 * 0.1, (i as f64).sin()], i as f64);
+        }
+        let samples_before = model.n_samples_seen();
+        model.train(&[f64::NAN, 1.0], 1.0);
+        assert_eq!(
+            model.n_samples_seen(),
+            samples_before,
+            "NaN input should not increment samples_trained: before={}, after={}",
+            samples_before,
+            model.n_samples_seen()
+        );
+        let pred = model.predict(&[1.0, 0.5]);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite after NaN input, got {pred}"
+        );
+    }
+
+    #[test]
+    fn test_mgrade_adjust_config() {
+        // adjust_config should scale forgetting_factor by lr_multiplier.
+        let config = mGRADEConfig::builder()
+            .d_in(2)
+            .d_hidden(8)
+            .forgetting_factor(0.998)
+            .build()
+            .unwrap();
+        let mut model = StreamingMGrade::new(config);
+        let ff_before = model.config().forgetting_factor;
+        model.adjust_config(0.99, 0.0);
+        let ff_after = model.config().forgetting_factor;
+        assert!(
+            ff_after < ff_before,
+            "forgetting_factor should decrease after adjust_config(0.99, ..): before={ff_before}, after={ff_after}"
+        );
+        assert!(
+            ff_after >= 0.9,
+            "forgetting_factor should not go below 0.9, got {ff_after}"
+        );
+    }
+
+    #[test]
+    fn test_mgrade_type_alias() {
+        // StreamingmGRADE alias and StreamingMGrade refer to the same type.
+        let config = mGRADEConfig::builder().d_in(2).d_hidden(8).build().unwrap();
+        let _model: StreamingMGrade = StreamingMGrade::new(config.clone());
+        let _alias: StreamingmGRADE = StreamingmGRADE::new(config);
+    }
+
+    /// Regression test: mGRADE must achieve reasonable RMSE on a sine regression task.
+    ///
+    /// Before the input normalization + delay conv tanh fix, the delay conv produced
+    /// unbounded linear combinations of raw inputs, causing RLS readout weight explosion
+    /// and RMSE ~300. After the fix, RMSE should be well under 5.0.
+    #[test]
+    fn test_mgrade_sine_regression_reasonable() {
+        let config = mGRADEConfig::builder()
+            .d_in(1)
+            .d_hidden(16)
+            .kernel_size(4)
+            .warmup(10)
+            .forgetting_factor(0.998)
+            .build()
+            .unwrap();
+        let mut model = StreamingMGrade::new(config);
+
+        // Train on sin(x) for 500 samples.
+        let n = 500usize;
+        for i in 0..n {
+            let x = i as f64 * 0.05;
+            model.train(&[x], x.sin());
+        }
+
+        // Compute RMSE by replaying the sequence with a fresh model.
+        let mut model2 = {
+            let config2 = mGRADEConfig::builder()
+                .d_in(1)
+                .d_hidden(16)
+                .kernel_size(4)
+                .warmup(10)
+                .forgetting_factor(0.998)
+                .build()
+                .unwrap();
+            StreamingMGrade::new(config2)
+        };
+        let mut sq_err_sum = 0.0;
+        let mut count = 0usize;
+        for i in 0..n {
+            let x = i as f64 * 0.05;
+            let y = x.sin();
+            if model2.past_warmup() {
+                let pred = model2.predict(&[x]);
+                let err = pred - y;
+                sq_err_sum += err * err;
+                count += 1;
+            }
+            model2.train(&[x], y);
+        }
+        let rmse = if count > 0 {
+            (sq_err_sum / count as f64).sqrt()
+        } else {
+            f64::INFINITY
+        };
+        assert!(
+            rmse < 5.0,
+            "mGRADE sine regression RMSE should be < 5.0 after fix, got {rmse:.4} (count={count})"
+        );
     }
 }

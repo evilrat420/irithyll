@@ -312,9 +312,16 @@ impl SelectiveSSMBD {
         let m = self.block_size;
         let n_blocks = self.n_blocks;
 
-        // 1. Compute delta = softplus(dot(w_delta, input) + b_delta)
+        // 1. Compute delta = softplus(dot(w_delta, input) + b_delta).
+        //    Clamp to 1.0: the Euler discretization (I + delta*A) is only
+        //    stable for small delta because A diagonal entries are negative
+        //    (S4D-Inv). For large delta the term (1 + delta*A[i,i]) goes
+        //    strongly negative, causing exponential state divergence on
+        //    datasets with large-magnitude features (e.g. Power Plant).
+        //    ZOH (exp(delta*A)) is unconditionally stable but more expensive;
+        //    clamping delta is the minimal fix that preserves the architecture.
         let delta_raw = dot(&self.w_delta, input) + self.b_delta;
-        let delta = softplus(delta_raw);
+        let delta = softplus(delta_raw).min(1.0);
 
         // 2. Compute B_t = W_B * input (shape: n_state)
         let mut b_t = vec![0.0; n_state];

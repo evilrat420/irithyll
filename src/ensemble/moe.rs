@@ -478,7 +478,7 @@ impl<L: Loss> MoESGBT<L> {
 
 use crate::learner::StreamingLearner;
 
-impl<L: Loss> StreamingLearner for MoESGBT<L> {
+impl<L: Loss + Clone> StreamingLearner for MoESGBT<L> {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
         let sample = SampleRef::weighted(features, target, weight);
         // UFCS: call the inherent train_one(&impl Observation), not this trait method.
@@ -495,6 +495,42 @@ impl<L: Loss> StreamingLearner for MoESGBT<L> {
 
     fn reset(&mut self) {
         MoESGBT::reset(self);
+    }
+
+    /// Aggregate diagnostics from the first expert as representative signal.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use crate::automl::DiagnosticSource;
+        if let Some(first) = self.experts.first() {
+            use crate::learner::SGBTLearner;
+            let learner = SGBTLearner::new(first.clone());
+            match learner.config_diagnostics() {
+                Some(d) => [
+                    d.residual_alignment,
+                    d.regularization_sensitivity,
+                    d.depth_sufficiency,
+                    d.effective_dof,
+                    d.uncertainty,
+                ],
+                None => [0.0; 5],
+            }
+        } else {
+            [0.0; 5]
+        }
+    }
+
+    /// Sum of replacement counts across all experts.
+    fn replacement_count(&self) -> u64 {
+        self.experts.iter().map(|e| e.total_replacements()).sum()
+    }
+
+    /// Forward learning rate / lambda adjustments to all experts.
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        for expert in &mut self.experts {
+            let new_lr = expert.config().learning_rate * lr_multiplier;
+            expert.set_learning_rate(new_lr);
+            let new_lambda = expert.config().lambda + lambda_delta;
+            expert.set_lambda(new_lambda);
+        }
     }
 }
 

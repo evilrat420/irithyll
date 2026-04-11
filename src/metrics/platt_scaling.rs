@@ -3,6 +3,8 @@
 //! Post-hoc calibration for streaming classifiers. Fits logistic
 //! regression on model logits to produce calibrated probabilities.
 
+use irithyll_core::math::sigmoid;
+
 /// Online Platt scaling for probability calibration.
 ///
 /// Maintains two parameters (a, b) such that:
@@ -38,12 +40,6 @@ pub struct OnlinePlattScaling {
     lr: f64,
     /// Number of updates performed.
     n_updates: u64,
-}
-
-/// Sigmoid function: 1 / (1 + exp(-x)).
-#[inline]
-fn sigmoid(x: f64) -> f64 {
-    1.0 / (1.0 + (-x).exp())
 }
 
 impl OnlinePlattScaling {

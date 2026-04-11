@@ -44,22 +44,46 @@ pub struct ConfigDiagnostics {
 // ConfigBounds
 // ===========================================================================
 
-/// Derived bounds for each config parameter.
+/// Derived bounds for each config parameter, produced by [`FeasibleRegion::config_bounds`].
+///
+/// Each field is a `(min, max)` tuple. The center of each range is the
+/// baseline config; perturbations probe the extremes.
 #[derive(Debug, Clone)]
 pub struct ConfigBounds {
-    /// (min, max) for max tree depth.
+    /// Allowed range for `max_depth` (tree depth cap).
+    ///
+    /// **Range:** derived from `log2(budget)`, clamped to [2, 6].
+    /// **Default center:** midpoint of the range.
     pub max_depth: (usize, usize),
-    /// (min, max) for number of boosting steps.
+    /// Allowed range for `n_steps` (number of boosting trees).
+    ///
+    /// **Range:** derived from `budget / 4`, clamped to [3, 50].
+    /// **Default center:** midpoint of the range.
     pub n_steps: (usize, usize),
-    /// (min, max) for grace period.
+    /// Allowed range for `grace_period` (Hoeffding bound samples before split).
+    ///
+    /// **Range:** derived from Hoeffding bound with `delta=0.05`, clamped to [3, 200].
+    /// **Default center:** midpoint of the range.
     pub grace_period: (usize, usize),
-    /// (min, max) for learning rate.
+    /// Allowed range for the boosting learning rate (shrinkage).
+    ///
+    /// **Range:** [0.05, 0.3] (fixed — empirically safe for SGBT).
+    /// **Default center:** geometric mean of min and max.
     pub learning_rate: (f64, f64),
-    /// (min, max) for L2 regularization lambda.
+    /// Allowed range for L2 regularization lambda.
+    ///
+    /// **Range:** derived from target standard deviation, clamped to [0.1, 5.0].
+    /// **Default center:** geometric mean of min and max.
     pub lambda: (f64, f64),
-    /// (min, max) for histogram bins.
+    /// Allowed range for the number of histogram bins per feature.
+    ///
+    /// **Range:** [8, min(64, n_samples/4)].
+    /// **Default center:** midpoint of the range.
     pub n_bins: (usize, usize),
-    /// (min, max) for feature subsample rate.
+    /// Allowed range for the feature subsample rate (column subsampling).
+    ///
+    /// **Range:** [0.5, 1.0] (fixed — always use at least half the features).
+    /// **Default center:** midpoint of the range.
     pub feature_subsample: (f64, f64),
 }
 

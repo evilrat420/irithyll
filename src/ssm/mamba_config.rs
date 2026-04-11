@@ -294,8 +294,10 @@ impl MambaConfigBuilder {
             }
             MambaVersion::V3 => {
                 let g = if self.n_groups == 0 {
-                    // Auto-derive: d_in / 4, clamped to [1, d_in].
-                    (d_in / 4).clamp(1, d_in)
+                    // Auto-derive: largest divisor of d_in that's <= d_in/4.
+                    // Falls back to 1 if no better divisor exists (e.g., prime d_in).
+                    let target = (d_in / 4).max(1);
+                    (1..=target).rev().find(|&g| d_in % g == 0).unwrap_or(1)
                 } else {
                     self.n_groups
                 };

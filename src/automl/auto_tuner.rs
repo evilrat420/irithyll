@@ -1026,12 +1026,11 @@ fn adjusted_metric(ewma_metric: f64, complexity: usize, n_seen: u64) -> f64 {
     ewma_metric + penalty
 }
 
-// Safety: AutoTuner contains only Send+Sync types.
-// - Box<dyn StreamingLearner>: StreamingLearner requires Send+Sync
-// - Box<dyn ModelFactory>: ModelFactory requires Send+Sync
-// - All other fields are owned, non-Rc, non-Cell types.
-unsafe impl Send for AutoTuner {}
-unsafe impl Sync for AutoTuner {}
+// AutoTuner is Send + Sync by composition:
+// - Box<dyn StreamingLearner>: StreamingLearner: Send + Sync (see trait definition)
+// - Box<dyn ModelFactory>: ModelFactory: Send + Sync (see trait definition)
+// - All other fields (Vec, f64, u64, bool, Option<Box<dyn DriftDetector>>): Send + Sync
+// Rust auto-derives Send + Sync; no unsafe impls needed.
 
 // ===========================================================================
 // DiagnosticSource impl

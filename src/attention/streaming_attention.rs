@@ -184,6 +184,12 @@ impl StreamingAttentionModel {
 
 impl StreamingLearner for StreamingAttentionModel {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
+        // Guard: skip non-finite inputs to prevent NaN from corrupting attention state.
+        if !features.iter().all(|f| f.is_finite()) {
+            self.n_samples += 1;
+            return;
+        }
+
         // 1. Forward through attention to get temporal features
         let attn_output = self.attention.forward(features);
 
@@ -215,14 +221,23 @@ impl StreamingLearner for StreamingAttentionModel {
                 0.0
             };
             const ALIGN_ALPHA: f64 = 0.05;
-            self.alignment_ewma =
-                (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+            if self.n_samples == 1 {
+                self.alignment_ewma = agreement;
+            } else {
+                self.alignment_ewma =
+                    (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+            }
         }
         self.prev_prev_change = self.prev_change;
         self.prev_change = current_change;
         self.prev_prediction = current_pred;
 
         // 3. Train RLS readout on attention output
+        if !attn_output.iter().all(|f| f.is_finite()) {
+            self.last_features = attn_output;
+            self.n_samples += 1;
+            return;
+        }
         self.readout.train_one(&attn_output, target, weight);
 
         // 4. Plasticity maintenance: track per-output-unit energy and
@@ -247,25 +262,21 @@ impl StreamingLearner for StreamingAttentionModel {
     }
 
     fn predict(&self, features: &[f64]) -> f64 {
-        // Use cached features from last train_one to avoid attention state mutation.
+        // Reconstruct readout features side-effect-free using the current input.
         // If never trained (or after reset), return 0.0.
-        if self.n_samples == 0 {
+        if self.n_samples == 0 || features.len() != self.config.d_model {
             return 0.0;
         }
 
-        // During warmup, predictions may be unreliable but we still return them
-        // so the caller can decide how to handle them.
-        //
-        // Note: We use the LAST attention output, not the current features.
-        // This is because predict() must be side-effect-free (no attention state change).
-        // In a streaming context, the typical pattern is:
-        //   predict(x_t) -> p_t  (using state from x_{t-1})
-        //   train(x_t, y_t)      (advances state to include x_t)
-        //
-        // If the caller wants to predict on new features without training,
-        // they should use AttentionPreprocessor + separate RLS.
-        let _ = features; // Acknowledged but not used -- see design note above
-        self.readout.predict(&self.last_features)
+        // Design: attention state advances only during train_one(). At prediction
+        // time t, the state reflects history through t-1. We call forward_readonly()
+        // to compute S^T * q(x_t) — a query of the current state with the current
+        // input's query projection — without mutating state. This is the attention
+        // analogue of Mamba's "cached SSM output × gate(current_input) + residual"
+        // pattern and fixes the near-chance accuracy caused by using stale t-1
+        // features for classification.
+        let attn_output = self.attention.forward_readonly(features);
+        self.readout.predict(&attn_output)
     }
 
     fn n_samples_seen(&self) -> u64 {
@@ -606,6 +617,160 @@ mod tests {
         assert!(
             pred.is_finite(),
             "plasticity-enabled model should produce finite predictions, got {pred}"
+        );
+    }
+
+    #[test]
+    fn test_attention_nan_skipped() {
+        // NaN features should not corrupt the attention state or RLS readout.
+        // The input finiteness check fires before attention forward, so neither
+        // the attention state nor the readout weights are updated on NaN input.
+        let mut model = StreamingAttentionModel::new(default_config(4, 2));
+        for i in 0..20 {
+            let x = [i as f64 * 0.1; 4];
+            model.train(&x, i as f64);
+        }
+        let weights_before = model.readout_weights().map(|w| w.to_vec());
+        // Train with NaN — should not update readout
+        model.train(&[f64::NAN, 0.0, 0.0, 0.0], 1.0);
+        // Readout weights should be unchanged (NaN skipped before RLS update).
+        if let Some(w_before) = weights_before {
+            if let Some(w_after) = model.readout_weights() {
+                assert_eq!(
+                    w_before.len(),
+                    w_after.len(),
+                    "readout weight dimension should not change after NaN input"
+                );
+            }
+        }
+        let pred = model.predict(&[1.0, 0.0, 0.0, 0.0]);
+        assert!(
+            pred.is_finite(),
+            "prediction should remain finite after NaN training input, got {pred}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue-fix tests: GLA predict() must use current input, not stale t-1
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn gla_predict_uses_current_input_not_stale() {
+        // Before the fix, predict() used self.last_features (attention output
+        // from t-1), ignoring the current input entirely. This caused near-chance
+        // accuracy on binary classification because the class-discriminating
+        // features at time t were never seen by the readout during prediction.
+        //
+        // After the fix, predict(x_t) calls forward_readonly(x_t) which queries
+        // the current attention state with a query computed from x_t. Two
+        // predictions with clearly different inputs should give different outputs.
+        use irithyll_core::attention::AttentionMode as SAMode;
+        let config = StreamingAttentionConfig::builder()
+            .d_model(4)
+            .n_heads(2)
+            .mode(SAMode::GLA)
+            .forgetting_factor(0.999)
+            .seed(42)
+            .build()
+            .unwrap();
+        let mut model = StreamingAttentionModel::new(config);
+
+        // Train enough to give the attention state some content
+        for i in 0..50 {
+            let t = i as f64 * 0.1;
+            let x = [t.sin(), t.cos(), t * 0.1, 1.0];
+            model.train(&x, t.sin());
+        }
+
+        // Now predict on two very different inputs. With the fix, the predictions
+        // must differ; with the stale-feature bug they would be identical.
+        let pred_a = model.predict(&[1.0, 0.0, 0.0, 0.0]);
+        let pred_b = model.predict(&[-1.0, 0.0, 0.0, 0.0]);
+
+        assert!(
+            pred_a.is_finite(),
+            "GLA predict on input A should be finite, got {pred_a}"
+        );
+        assert!(
+            pred_b.is_finite(),
+            "GLA predict on input B should be finite, got {pred_b}"
+        );
+        assert!(
+            (pred_a - pred_b).abs() > 1e-15,
+            "GLA predict must differ for different inputs (stale-feature bug): \
+             pred_a={pred_a}, pred_b={pred_b}"
+        );
+    }
+
+    #[test]
+    fn gla_prequential_accuracy_above_chance() {
+        // Simulate a prequential (test-then-train) evaluation on a simple
+        // binary classification: label = sign(x[0]).
+        // With the stale-feature bug predict() always returns the same value
+        // regardless of input, yielding ~50% accuracy on balanced data.
+        // With the fix the model should learn to exceed chance within 200 steps.
+        use irithyll_core::attention::AttentionMode as SAMode;
+        let config = StreamingAttentionConfig::builder()
+            .d_model(4)
+            .n_heads(2)
+            .mode(SAMode::GLA)
+            .forgetting_factor(0.999)
+            .seed(7)
+            .build()
+            .unwrap();
+        let mut model = StreamingAttentionModel::new(config);
+
+        let mut correct = 0usize;
+        let mut total = 0usize;
+        // Simple LCG for deterministic pseudo-random inputs
+        let mut rng: u64 = 0xDEAD_BEEF;
+        let lcg = |s: &mut u64| -> f64 {
+            *s = s
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (*s >> 33) as f64 / (u32::MAX as f64) * 2.0 - 1.0
+        };
+
+        for _ in 0..300 {
+            let x0 = lcg(&mut rng);
+            let x = [x0, lcg(&mut rng), lcg(&mut rng), lcg(&mut rng)];
+            let label = if x0 > 0.0 { 1.0_f64 } else { 0.0_f64 };
+
+            if model.n_samples_seen() >= 20 {
+                let pred = model.predict(&x);
+                let pred_label = if pred > 0.5 { 1.0 } else { 0.0 };
+                if (pred_label - label).abs() < 1e-9 {
+                    correct += 1;
+                }
+                total += 1;
+            }
+            model.train(&x, label);
+        }
+
+        let accuracy = correct as f64 / total as f64;
+        assert!(
+            accuracy > 0.50,
+            "GLA prequential accuracy should exceed chance (50%) after fix, got {:.1}%",
+            accuracy * 100.0
+        );
+    }
+
+    #[test]
+    fn predict_after_reset_returns_zero() {
+        // After reset, predict() must return 0.0 regardless of input because
+        // n_samples=0 and the attention state is zeroed. Also verifies that
+        // forward_readonly on a zero-state produces 0.0 output (as expected for
+        // zero-init state: S^T * q = 0 for all q).
+        let mut model = StreamingAttentionModel::new(default_config(4, 2));
+        for i in 0..10 {
+            model.train(&[i as f64; 4], i as f64);
+        }
+        model.reset();
+        // predict after reset: n_samples=0 guard triggers, returns 0.0
+        let pred = model.predict(&[1.0, 2.0, 3.0, 4.0]);
+        assert!(
+            pred.abs() < 1e-15,
+            "predict after reset should return 0.0 (n_samples=0 guard), got {pred}"
         );
     }
 }

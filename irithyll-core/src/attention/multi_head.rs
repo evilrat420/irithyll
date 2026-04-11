@@ -231,6 +231,68 @@ impl MultiHeadAttention {
         }
     }
 
+    /// Compute attention output for `input` using the current state, without
+    /// advancing the state.
+    ///
+    /// This is the read-only counterpart to [`AttentionLayer::forward`]: it
+    /// projects `input` to queries, reads out from the current K/V state
+    /// (`S^T * q` for matrix modes, vector state for Hawk), applies the output
+    /// projection, and returns the result — all without mutating any head state
+    /// or the state cache.
+    ///
+    /// Used by [`crate::attention::MultiHeadAttention`]-based streaming models
+    /// to implement a side-effect-free `predict()` that incorporates the current
+    /// input's query while keeping the state at its post-`train_one` position.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` -- feature vector of length `d_model`
+    ///
+    /// # Returns
+    ///
+    /// Attention output of length `d_model`.
+    pub fn forward_readonly(&self, input: &[f64]) -> Vec<f64> {
+        let d_model = self.config.d_model;
+        let d_key = self.config.d_key;
+        let d_value = self.config.d_value;
+        let n_heads = self.config.n_heads;
+        let concat_dim = n_heads * d_value;
+
+        let mut concat_output = vec![0.0; concat_dim];
+
+        for (h, head) in self.heads.iter().enumerate() {
+            // Compute query projection from current input
+            let mut q = vec![0.0; d_key];
+            mat_vec(&head.w_query, input, d_key, d_model, &mut q);
+
+            // Read out from current state without updating it
+            let head_output = match &self.config.mode {
+                AttentionMode::Hawk => {
+                    // Hawk state is the vector itself; return a clone as output
+                    head.state.as_slice().to_vec()
+                }
+                _ => {
+                    // Matrix state: S^T * q  (pure read, no state mutation)
+                    head.state.query(&q)
+                }
+            };
+
+            let offset = h * d_value;
+            concat_output[offset..offset + d_value].copy_from_slice(&head_output);
+        }
+
+        // Apply output projection: w_out * concat_output
+        let mut output = vec![0.0; d_model];
+        mat_vec(
+            &self.w_out,
+            &concat_output,
+            d_model,
+            concat_dim,
+            &mut output,
+        );
+        output
+    }
+
     /// Update the flat state cache from all head states.
     fn update_state_cache(&mut self) {
         let mut offset = 0;

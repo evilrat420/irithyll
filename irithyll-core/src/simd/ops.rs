@@ -29,8 +29,8 @@
 //!                       └──►  silu_scalar          (fallback)
 //! ```
 
-// Runtime detection macro — only available with std.
-#[cfg(all(target_arch = "x86_64", feature = "std"))]
+// Runtime detection macro — only available with simd-avx2 feature (implies std on x86_64).
+#[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
 use std::is_x86_feature_detected;
 
 // ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ fn silu_scalar(input: &[f64], output: &mut [f64]) {
 // AVX2 implementations (x86_64 + std only)
 // ---------------------------------------------------------------------------
 
-#[cfg(all(target_arch = "x86_64", feature = "std"))]
+#[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
 mod avx2 {
     /// AVX2-accelerated dot product: processes 4 f64 values per iteration.
     ///
@@ -428,7 +428,7 @@ mod avx2 {
 /// assert!((simd_dot(&a, &b) - 32.0).abs() < 1e-12);
 /// ```
 pub fn simd_dot(a: &[f64], b: &[f64]) -> f64 {
-    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
     {
         if is_x86_feature_detected!("avx2") {
             // SAFETY: we just checked for AVX2 support.
@@ -481,7 +481,7 @@ pub fn simd_mat_vec(w: &[f64], x: &[f64], rows: usize, cols: usize, out: &mut [f
         cols
     );
 
-    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
     {
         if is_x86_feature_detected!("avx2") {
             // SAFETY: bounds checked above, AVX2 detected.
@@ -521,7 +521,7 @@ pub fn simd_tanh(input: &[f64], output: &mut [f64]) {
         output.len(),
         input.len()
     );
-    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
     {
         if is_x86_feature_detected!("avx2") {
             // SAFETY: bounds checked above, AVX2 detected.
@@ -561,7 +561,7 @@ pub fn simd_exp(input: &[f64], output: &mut [f64]) {
         output.len(),
         input.len()
     );
-    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
     {
         if is_x86_feature_detected!("avx2") {
             // SAFETY: bounds checked above, AVX2 detected.
@@ -600,7 +600,7 @@ pub fn simd_sigmoid(input: &[f64], output: &mut [f64]) {
         output.len(),
         input.len()
     );
-    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
     {
         if is_x86_feature_detected!("avx2") {
             // SAFETY: bounds checked above, AVX2 detected.
@@ -641,7 +641,7 @@ pub fn simd_silu(input: &[f64], output: &mut [f64]) {
         output.len(),
         input.len()
     );
-    #[cfg(all(target_arch = "x86_64", feature = "std"))]
+    #[cfg(all(target_arch = "x86_64", feature = "simd-avx2"))]
     {
         if is_x86_feature_detected!("avx2") {
             // SAFETY: bounds checked above, AVX2 detected.
@@ -947,10 +947,7 @@ mod tests {
             result
         );
 
-        // Also verify AVX2 is actually detected (informational).
-        if is_x86_feature_detected!("avx2") {
-            // AVX2 path was used — good.
-        }
+        // AVX2 detection is platform-specific; skip in no_std test context.
     }
 
     // -------------------------------------------------------------------

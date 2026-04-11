@@ -90,16 +90,27 @@ pub use crate::loss::LossType;
 #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeSnapshot {
+    /// Feature index chosen at each internal node (parallel to node arena).
     pub feature_idx: Vec<u32>,
+    /// Split threshold at each internal node.
     pub threshold: Vec<f64>,
+    /// Left child node index for each node (`u32::MAX` for leaves).
     pub left: Vec<u32>,
+    /// Right child node index for each node (`u32::MAX` for leaves).
     pub right: Vec<u32>,
+    /// Leaf prediction value for each node (only meaningful at leaves).
     pub leaf_value: Vec<f64>,
+    /// Whether each node is a leaf.
     pub is_leaf: Vec<bool>,
+    /// Depth of each node in the tree (root = 0).
     pub depth: Vec<u16>,
+    /// Number of training samples that reached each node.
     pub sample_count: Vec<u64>,
+    /// Total number of input features (`None` until first training sample).
     pub n_features: Option<usize>,
+    /// Total samples seen by this tree since construction.
     pub samples_seen: u64,
+    /// RNG state at the time of snapshot (for deterministic replay).
     pub rng_state: u64,
     /// Categorical split bitmasks. `None` entries are continuous splits.
     #[serde(default)]

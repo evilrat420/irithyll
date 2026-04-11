@@ -48,7 +48,7 @@ use irithyll_core::continual::{ContinualStrategy, NeuronRegeneration};
 /// let config = TTTConfig::builder()
 ///     .d_model(32)
 ///     .n_heads(1)
-///     .eta(0.1)
+///     .learning_rate(0.1)
 ///     .build()
 ///     .unwrap();
 /// ```
@@ -59,7 +59,7 @@ pub struct TTTConfig {
     /// Number of attention heads (default: 1).
     pub n_heads: usize,
     /// Inner learning rate for fast weight updates (default: 0.1).
-    pub eta: f64,
+    pub learning_rate: f64,
     /// Weight decay / forgetting factor, Titans-style (default: 0.001).
     ///
     /// At 0.001, fast weights lose 50% of old information in ~693 steps —
@@ -113,7 +113,7 @@ impl Default for TTTConfig {
         Self {
             d_model: 32,
             n_heads: 1,
-            eta: 0.1,
+            learning_rate: 0.1,
             alpha: 0.001,
             momentum: 0.0,
             forgetting_factor: 0.998,
@@ -133,10 +133,10 @@ impl std::fmt::Display for TTTConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "TTTConfig(d_model={}, n_heads={}, eta={}, alpha={}, momentum={}, ff={}, batch_size={}, warmup={}, nesterov={}, alpha_warmup={}, surprise_gated={}, seed={})",
+            "TTTConfig(d_model={}, n_heads={}, learning_rate={}, alpha={}, momentum={}, ff={}, batch_size={}, warmup={}, nesterov={}, alpha_warmup={}, surprise_gated={}, seed={})",
             self.d_model,
             self.n_heads,
-            self.eta,
+            self.learning_rate,
             self.alpha,
             self.momentum,
             self.forgetting_factor,
@@ -164,7 +164,7 @@ impl std::fmt::Display for TTTConfig {
 /// let config = TTTConfig::builder()
 ///     .d_model(64)
 ///     .n_heads(4)
-///     .eta(0.005)
+///     .learning_rate(0.005)
 ///     .build()
 ///     .unwrap();
 ///
@@ -198,8 +198,15 @@ impl TTTConfigBuilder {
     }
 
     /// Set the inner learning rate for fast weight updates (default: 0.1).
+    pub fn learning_rate(mut self, e: f64) -> Self {
+        self.config.learning_rate = e;
+        self
+    }
+
+    /// Set the inner learning rate (deprecated alias for [`learning_rate`](Self::learning_rate)).
+    #[deprecated(since = "0.0.0", note = "use `learning_rate()` instead")]
     pub fn eta(mut self, e: f64) -> Self {
-        self.config.eta = e;
+        self.config.learning_rate = e;
         self
     }
 
@@ -344,7 +351,7 @@ impl TTTConfigBuilder {
 /// use irithyll::ttt::{StreamingTTT, TTTConfig};
 /// use irithyll::StreamingLearner;
 ///
-/// let config = TTTConfig::builder().d_model(16).eta(0.1).build().unwrap();
+/// let config = TTTConfig::builder().d_model(16).learning_rate(0.1).build().unwrap();
 /// let mut model = StreamingTTT::new(config);
 /// model.train(&[1.0, 2.0, 3.0], 4.0);
 /// let pred = model.predict(&[1.0, 2.0, 3.0]);
@@ -408,7 +415,7 @@ impl StreamingTTT {
     pub fn new(config: TTTConfig) -> Self {
         let mut layer = TTTLayer::new(
             config.d_model,
-            config.eta,
+            config.learning_rate,
             config.alpha,
             config.momentum > 0.0,
             config.momentum,
@@ -423,7 +430,7 @@ impl StreamingTTT {
         }
         let readout = RecursiveLeastSquares::with_delta(config.forgetting_factor, config.delta_rls);
         let last_features = vec![0.0; config.d_model];
-        let base_proj_lr = config.eta * 0.1;
+        let base_proj_lr = config.learning_rate * 0.1;
 
         // Create plasticity guard if enabled.
         let plasticity_guard = if config.plasticity {
@@ -672,14 +679,18 @@ impl StreamingLearner for StreamingTTT {
         // eta (adapt faster), low uncertainty → decrease eta (conserve).
         let current_uncertainty = self.readout.noise_variance().sqrt();
         const UNCERTAINTY_ALPHA: f64 = 0.001;
-        self.rolling_uncertainty = (1.0 - UNCERTAINTY_ALPHA) * self.rolling_uncertainty
-            + UNCERTAINTY_ALPHA * current_uncertainty;
+        if self.total_seen == 0 {
+            self.rolling_uncertainty = current_uncertainty;
+        } else {
+            self.rolling_uncertainty = (1.0 - UNCERTAINTY_ALPHA) * self.rolling_uncertainty
+                + UNCERTAINTY_ALPHA * current_uncertainty;
+        }
 
         let mut effective_eta = if self.rolling_uncertainty > 1e-10 {
             let ratio = (current_uncertainty / self.rolling_uncertainty).clamp(0.5, 2.0);
-            self.config.eta * ratio
+            self.config.learning_rate * ratio
         } else {
-            self.config.eta
+            self.config.learning_rate
         };
 
         // Also modulate RLS forgetting factor by the same uncertainty ratio.
@@ -711,8 +722,12 @@ impl StreamingLearner for StreamingTTT {
             }
             // Update running |error| EWMA for surprise computation.
             const SURPRISE_ALPHA: f64 = 0.01;
-            self.running_abs_error =
-                (1.0 - SURPRISE_ALPHA) * self.running_abs_error + SURPRISE_ALPHA * pred_error.abs();
+            if self.samples_trained == 0 {
+                self.running_abs_error = pred_error.abs();
+            } else {
+                self.running_abs_error = (1.0 - SURPRISE_ALPHA) * self.running_abs_error
+                    + SURPRISE_ALPHA * pred_error.abs();
+            }
 
             // Drift detection: compare short-term vs long-term error.
             // Short-term EWMA (alpha=0.1) reacts fast to phase changes.
@@ -726,8 +741,12 @@ impl StreamingLearner for StreamingTTT {
             // weights establish structure first makes drift detection meaningful.
             let sq_err = pred_error * pred_error;
             let short_alpha = 0.1;
-            self.short_term_error =
-                (1.0 - short_alpha) * self.short_term_error + short_alpha * sq_err;
+            if self.samples_trained == 0 {
+                self.short_term_error = sq_err;
+            } else {
+                self.short_term_error =
+                    (1.0 - short_alpha) * self.short_term_error + short_alpha * sq_err;
+            }
             let short_rmse = self.short_term_error.sqrt();
             let drift_warmup_done = self.samples_trained >= 100;
             if drift_warmup_done
@@ -752,8 +771,12 @@ impl StreamingLearner for StreamingTTT {
                     0.0
                 };
                 const ALIGN_ALPHA: f64 = 0.05;
-                self.alignment_ewma =
-                    (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+                if self.samples_trained == 1 {
+                    self.alignment_ewma = agreement;
+                } else {
+                    self.alignment_ewma =
+                        (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+                }
             }
             self.prev_prev_change = self.prev_change;
             self.prev_change = current_change;
@@ -934,8 +957,8 @@ impl StreamingLearner for StreamingTTT {
 
     fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
         // Scale the inner learning rate (eta) for fast weight updates.
-        self.config.eta *= lr_multiplier;
-        self.layer.set_eta(self.config.eta);
+        self.config.learning_rate *= lr_multiplier;
+        self.layer.set_eta(self.config.learning_rate);
     }
 
     fn readout_weights(&self) -> Option<&[f64]> {
@@ -948,7 +971,7 @@ impl std::fmt::Debug for StreamingTTT {
         f.debug_struct("StreamingTTT")
             .field("d_model", &self.config.d_model)
             .field("n_heads", &self.config.n_heads)
-            .field("eta", &self.config.eta)
+            .field("eta", &self.config.learning_rate)
             .field("batch_size", &self.batch_size)
             .field("warmup", &self.config.warmup)
             .field("total_seen", &self.total_seen)
@@ -1030,7 +1053,7 @@ mod tests {
         let config = TTTConfig::builder()
             .d_model(64)
             .n_heads(4)
-            .eta(0.005)
+            .learning_rate(0.005)
             .alpha(0.001)
             .momentum(0.9)
             .warmup(20)
@@ -1156,7 +1179,7 @@ mod tests {
     fn titans_extensions_work() {
         let config = TTTConfig::builder()
             .d_model(16)
-            .eta(0.01)
+            .learning_rate(0.01)
             .alpha(0.001) // weight decay
             .momentum(0.9) // momentum
             .warmup(5)
@@ -1214,7 +1237,7 @@ mod tests {
     fn ttt_uncertainty_modulated_eta() {
         let config = TTTConfig::builder()
             .d_model(16)
-            .eta(0.01)
+            .learning_rate(0.01)
             .warmup(5)
             .build()
             .unwrap();
@@ -1255,7 +1278,7 @@ mod tests {
         // produces finite predictions through stable and drift regimes.
         let config = TTTConfig::builder()
             .d_model(16)
-            .eta(0.01)
+            .learning_rate(0.01)
             .forgetting_factor(0.998)
             .warmup(5)
             .build()
@@ -1353,7 +1376,7 @@ mod tests {
         // Pretrained model
         let config = TTTConfig::builder()
             .d_model(16)
-            .eta(0.01)
+            .learning_rate(0.01)
             .warmup(5)
             .seed(42)
             .build()
@@ -1364,7 +1387,7 @@ mod tests {
         // Random model (same config, no pretraining)
         let config2 = TTTConfig::builder()
             .d_model(16)
-            .eta(0.01)
+            .learning_rate(0.01)
             .warmup(5)
             .seed(42)
             .build()
@@ -1423,7 +1446,7 @@ mod tests {
         // Verify the two-timescale schedule: proj_lr decays as 1/(1+t/tau).
         let config = TTTConfig::builder()
             .d_model(16)
-            .eta(0.01)
+            .learning_rate(0.01)
             .warmup(5)
             .build()
             .unwrap();
@@ -1473,7 +1496,7 @@ mod tests {
         // tau = d_state * d_input. Higher dims → slower decay → more learning.
         let config = TTTConfig::builder()
             .d_model(64)
-            .eta(0.01)
+            .learning_rate(0.01)
             .warmup(5)
             .build()
             .unwrap();
@@ -1494,7 +1517,7 @@ mod tests {
     fn auto_pretrain_reset_restores_schedule() {
         let config = TTTConfig::builder()
             .d_model(16)
-            .eta(0.01)
+            .learning_rate(0.01)
             .warmup(2)
             .build()
             .unwrap();
@@ -1546,7 +1569,7 @@ mod tests {
     fn mini_batch_convergence() {
         let config = TTTConfig::builder()
             .d_model(16)
-            .eta(0.01)
+            .learning_rate(0.01)
             .batch_size(16)
             .warmup(5)
             .build()
@@ -1618,7 +1641,7 @@ mod tests {
         // batch_size=1 should behave as pure online (no accumulation).
         let config = TTTConfig::builder()
             .d_model(8)
-            .eta(0.01)
+            .learning_rate(0.01)
             .batch_size(1)
             .warmup(5)
             .build()
@@ -1765,7 +1788,7 @@ mod tests {
             .d_model(16)
             .nesterov(true)
             .momentum(0.9)
-            .eta(0.05)
+            .learning_rate(0.05)
             .build()
             .unwrap();
         let mut model = StreamingTTT::new(config);
@@ -1782,7 +1805,7 @@ mod tests {
             .d_model(16)
             .alpha(0.01)
             .alpha_warmup(50)
-            .eta(0.05)
+            .learning_rate(0.05)
             .build()
             .unwrap();
         let mut model = StreamingTTT::new(config);
@@ -1801,7 +1824,7 @@ mod tests {
         let config = TTTConfig::builder()
             .d_model(16)
             .surprise_gated(true)
-            .eta(0.05)
+            .learning_rate(0.05)
             .build()
             .unwrap();
         let mut model = StreamingTTT::new(config);
@@ -1832,7 +1855,7 @@ mod tests {
             .alpha(0.005)
             .alpha_warmup(30)
             .surprise_gated(true)
-            .eta(0.05)
+            .learning_rate(0.05)
             .build()
             .unwrap();
         let mut model = StreamingTTT::new(config);

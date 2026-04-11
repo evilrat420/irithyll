@@ -24,7 +24,7 @@ use irithyll_core::continual::{ContinualStrategy, NeuronRegeneration};
 // SLSTMConfig
 // ---------------------------------------------------------------------------
 
-/// Configuration for [`StreamingsLSTM`].
+/// Configuration for [`StreamingLSTM`].
 ///
 /// Create via the builder pattern:
 ///
@@ -176,7 +176,7 @@ impl SLSTMConfigBuilder {
 }
 
 // ---------------------------------------------------------------------------
-// StreamingsLSTM
+// StreamingLSTM
 // ---------------------------------------------------------------------------
 
 /// Streaming sLSTM model with RLS readout.
@@ -188,15 +188,15 @@ impl SLSTMConfigBuilder {
 /// # Example
 ///
 /// ```no_run
-/// use irithyll::lstm::{StreamingsLSTM, SLSTMConfig};
+/// use irithyll::lstm::{StreamingLSTM, SLSTMConfig};
 /// use irithyll::StreamingLearner;
 ///
 /// let config = SLSTMConfig::builder().d_model(16).build().unwrap();
-/// let mut model = StreamingsLSTM::new(config);
+/// let mut model = StreamingLSTM::new(config);
 /// model.train(&[1.0, 2.0, 3.0], 4.0);
 /// let pred = model.predict(&[1.0, 2.0, 3.0]);
 /// ```
-pub struct StreamingsLSTM {
+pub struct StreamingLSTM {
     config: SLSTMConfig,
     cell: irithyll_core::lstm::SLSTMCell,
     readout: RecursiveLeastSquares,
@@ -225,10 +225,16 @@ pub struct StreamingsLSTM {
     /// Snapshot of hidden state from previous step, used for plasticity
     /// utility computation (delta |h|).
     prev_h_energy: Vec<f64>,
+    /// Welford online mean for input normalization (per feature).
+    input_mean: Vec<f64>,
+    /// Welford online variance accumulator for input normalization (per feature).
+    input_var: Vec<f64>,
+    /// Count of samples seen for Welford normalization.
+    input_count: u64,
 }
 
-impl StreamingsLSTM {
-    /// Create a new StreamingsLSTM from config.
+impl StreamingLSTM {
+    /// Create a new StreamingLSTM from config.
     pub fn new(config: SLSTMConfig) -> Self {
         let cell = irithyll_core::lstm::SLSTMCell::new(config.d_model, config.seed);
         let readout = RecursiveLeastSquares::with_delta(config.forgetting_factor, config.delta_rls);
@@ -267,7 +273,40 @@ impl StreamingsLSTM {
             prev_prev_change: 0.0,
             plasticity_guard,
             prev_h_energy,
+            input_mean: Vec::new(),
+            input_var: Vec::new(),
+            input_count: 0,
         }
+    }
+
+    /// Normalize a feature vector via Welford online mean/std, updating stats.
+    ///
+    /// Returns the normalized features clamped to [-5, 5].
+    /// On the first call the dimension is inferred from `features.len()`.
+    fn normalize_input(&mut self, features: &[f64]) -> Vec<f64> {
+        let d = features.len();
+        if self.input_mean.len() != d {
+            self.input_mean = vec![0.0; d];
+            self.input_var = vec![0.0; d];
+        }
+        self.input_count += 1;
+        let n = self.input_count as f64;
+        let mut out = vec![0.0; d];
+        for i in 0..d {
+            let x = features[i];
+            let delta = x - self.input_mean[i];
+            self.input_mean[i] += delta / n;
+            let delta2 = x - self.input_mean[i];
+            self.input_var[i] += delta * delta2;
+            let std = if n > 1.0 {
+                (self.input_var[i] / (n - 1.0)).sqrt()
+            } else {
+                1.0
+            };
+            let std = if std < 1e-8 { 1.0 } else { std };
+            out[i] = ((x - self.input_mean[i]) / std).clamp(-5.0, 5.0);
+        }
+        out
     }
 
     /// Whether the model has seen enough samples for meaningful predictions.
@@ -293,13 +332,17 @@ impl StreamingsLSTM {
     }
 }
 
-impl StreamingLearner for StreamingsLSTM {
+impl StreamingLearner for StreamingLSTM {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
         // 1. Uncertainty-modulated RLS forgetting factor
         let current_uncertainty = self.readout.noise_variance().sqrt();
         const UNCERTAINTY_ALPHA: f64 = 0.001;
-        self.rolling_uncertainty = (1.0 - UNCERTAINTY_ALPHA) * self.rolling_uncertainty
-            + UNCERTAINTY_ALPHA * current_uncertainty;
+        if self.total_seen == 0 {
+            self.rolling_uncertainty = current_uncertainty;
+        } else {
+            self.rolling_uncertainty = (1.0 - UNCERTAINTY_ALPHA) * self.rolling_uncertainty
+                + UNCERTAINTY_ALPHA * current_uncertainty;
+        }
 
         if self.rolling_uncertainty > 1e-10 {
             let ratio = (current_uncertainty / self.rolling_uncertainty).clamp(0.5, 3.0);
@@ -315,14 +358,17 @@ impl StreamingLearner for StreamingsLSTM {
 
             // Short-term error tracking for drift
             let sq_err = pred_error * pred_error;
-            self.short_term_error = 0.9 * self.short_term_error + 0.1 * sq_err;
-            let short_rmse = self.short_term_error.sqrt();
-            if self.samples_trained >= 100
-                && self.rolling_uncertainty > 1e-10
-                && short_rmse > 1.5 * self.rolling_uncertainty
-            {
-                self.cell.reset();
+            if self.samples_trained == 0 {
+                self.short_term_error = sq_err;
+            } else {
+                self.short_term_error = 0.9 * self.short_term_error + 0.1 * sq_err;
             }
+            // Note: cell.reset() on drift detection is intentionally omitted.
+            // Resetting the cell mid-stream destroys the feature distribution that
+            // the RLS readout was trained on, causing catastrophic prediction errors
+            // that cascade into further resets. Input normalization stabilizes the
+            // feature scale at the source instead.
+            let _short_rmse = self.short_term_error.sqrt();
 
             // Alignment tracking
             let current_change = current_pred - self.prev_prediction;
@@ -338,19 +384,42 @@ impl StreamingLearner for StreamingsLSTM {
                 } else {
                     0.0
                 };
-                self.alignment_ewma = 0.95 * self.alignment_ewma + 0.05 * agreement;
+                if self.samples_trained == 1 {
+                    self.alignment_ewma = agreement;
+                } else {
+                    self.alignment_ewma = 0.95 * self.alignment_ewma + 0.05 * agreement;
+                }
             }
             self.prev_prev_change = self.prev_change;
             self.prev_change = current_change;
             self.prev_prediction = current_pred;
         }
 
-        // 3. Forward through sLSTM cell (updates state)
-        // Clone immediately to release the borrow on self.cell.
-        let cell_output = self.cell.forward(features).to_vec();
+        // 3. Guard: skip non-finite inputs to prevent NaN from entering the cell state.
+        if !features.iter().all(|f| f.is_finite()) {
+            return;
+        }
+
+        // 4. Normalize input via Welford online mean/std before feeding to cell.
+        //    Raw feature scale can vary wildly (e.g. Friedman: 0-100, Lorenz: -20 to +20).
+        //    Without normalization, the cell receives large pre-activations that make
+        //    the hidden state erratic and cause RLS weight explosion.
+        let normalized = self.normalize_input(features);
+
+        // 5. Forward through sLSTM cell (updates state).
+        //    Clone immediately to release the borrow on self.cell.
+        let mut cell_output = self.cell.forward(&normalized).to_vec();
         self.total_seen += 1;
 
-        // 4. Track output utilization
+        // 6. Clamp cell output to [-3, 3] as a safety net.
+        //    The sLSTM cell is theoretically bounded (o * c/n where o=sigmoid, c/n ~ EMA of tanh),
+        //    but under extreme inputs the normalizer state can briefly allow larger values.
+        //    Clamping ensures the RLS readout always sees a stable, bounded feature space.
+        for v in &mut cell_output {
+            *v = v.clamp(-3.0, 3.0);
+        }
+
+        // 7. Track output utilization
         let frob_sq: f64 = cell_output.iter().map(|s| s * s).sum();
         const FROB_ALPHA: f64 = 0.001;
         self.max_frob_sq_ewma = if frob_sq > self.max_frob_sq_ewma {
@@ -359,8 +428,11 @@ impl StreamingLearner for StreamingsLSTM {
             (1.0 - FROB_ALPHA) * self.max_frob_sq_ewma + FROB_ALPHA * frob_sq
         };
 
-        // 5. Train RLS readout (after warmup)
+        // 8. Train RLS readout (after warmup)
         if self.past_warmup() {
+            if !cell_output.iter().all(|f| f.is_finite()) {
+                return;
+            }
             self.readout.train_one(&cell_output, target, weight);
             self.samples_trained += 1;
         }
@@ -396,7 +468,27 @@ impl StreamingLearner for StreamingsLSTM {
         if self.total_seen == 0 {
             return 0.0;
         }
-        let cell_features = self.cell.forward_predict(features);
+        // Apply same Welford normalization as train_one (read-only: use frozen stats).
+        let d = features.len();
+        let mut normalized = vec![0.0; d];
+        if self.input_count > 0 && self.input_mean.len() == d {
+            let n = self.input_count as f64;
+            for i in 0..d {
+                let std = if n > 1.0 {
+                    (self.input_var[i] / (n - 1.0)).sqrt()
+                } else {
+                    1.0
+                };
+                let std = if std < 1e-8 { 1.0 } else { std };
+                normalized[i] = ((features[i] - self.input_mean[i]) / std).clamp(-5.0, 5.0);
+            }
+        } else {
+            normalized.copy_from_slice(features);
+        }
+        let mut cell_features = self.cell.forward_predict(&normalized);
+        for v in &mut cell_features {
+            *v = v.clamp(-3.0, 3.0);
+        }
         self.readout.predict(&cell_features)
     }
 
@@ -422,6 +514,9 @@ impl StreamingLearner for StreamingsLSTM {
             guard.reset();
         }
         self.prev_h_energy.fill(0.0);
+        self.input_mean.clear();
+        self.input_var.clear();
+        self.input_count = 0;
     }
 
     fn diagnostics_array(&self) -> [f64; 5] {
@@ -447,9 +542,9 @@ impl StreamingLearner for StreamingsLSTM {
 // Debug impl
 // ---------------------------------------------------------------------------
 
-impl std::fmt::Debug for StreamingsLSTM {
+impl std::fmt::Debug for StreamingLSTM {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StreamingsLSTM")
+        f.debug_struct("StreamingLSTM")
             .field("d_model", &self.config.d_model)
             .field("warmup", &self.config.warmup)
             .field("total_seen", &self.total_seen)
@@ -463,7 +558,7 @@ impl std::fmt::Debug for StreamingsLSTM {
 // DiagnosticSource impl
 // ---------------------------------------------------------------------------
 
-impl crate::automl::DiagnosticSource for StreamingsLSTM {
+impl crate::automl::DiagnosticSource for StreamingLSTM {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         // RLS saturation: 1.0 - trace(P) / (delta * d).
         let rls_saturation = {
@@ -507,6 +602,13 @@ impl crate::automl::DiagnosticSource for StreamingsLSTM {
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// Backward-compatible type alias
+// ---------------------------------------------------------------------------
+
+/// Deprecated name. Use [`StreamingLSTM`] instead.
+pub type StreamingsLSTM = StreamingLSTM;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -683,6 +785,105 @@ mod tests {
         assert!(
             model.prev_h_energy.iter().all(|&e| e == 0.0),
             "prev_h_energy should be zeroed after reset"
+        );
+    }
+
+    #[test]
+    fn test_lstm_nan_input_skipped() {
+        // Train with valid samples past warmup, then send a NaN sample.
+        // Model should not panic and should remain healthy (weights finite).
+        let config = SLSTMConfig::builder().d_model(8).warmup(3).build().unwrap();
+        let mut model = StreamingLSTM::new(config);
+        for i in 0..20 {
+            model.train(&[i as f64 * 0.1], i as f64);
+        }
+        let samples_before = model.n_samples_seen();
+        // Feed NaN — should be silently skipped
+        model.train(&[f64::NAN], 1.0);
+        // Sample count should not change (NaN skipped at readout step)
+        // Note: total_seen increments before the finiteness check, but samples_trained does not.
+        assert_eq!(
+            model.n_samples_seen(),
+            samples_before,
+            "NaN sample should not increment samples_trained: before={}, after={}",
+            samples_before,
+            model.n_samples_seen()
+        );
+        // Prediction should still be finite after NaN was fed
+        let pred = model.predict(&[1.0]);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite after NaN input, got {pred}"
+        );
+    }
+
+    #[test]
+    fn test_streaming_lstm_alias() {
+        // StreamingLSTM (new name) and StreamingsLSTM (alias) refer to the same type.
+        let config = SLSTMConfig::builder().d_model(8).build().unwrap();
+        let model: StreamingLSTM = StreamingLSTM::new(config.clone());
+        let _alias: StreamingsLSTM = StreamingsLSTM::new(config);
+        assert_eq!(
+            model.config().d_model,
+            8,
+            "StreamingLSTM should have correct d_model"
+        );
+    }
+
+    /// Regression test: sLSTM must achieve reasonable RMSE on a sine regression task.
+    ///
+    /// Before the input normalization + cell output clamp fix, the RLS readout
+    /// would receive an inconsistent feature distribution (cell resets mid-stream)
+    /// and produce RMSE ~180. After the fix, RMSE should be well under 5.0.
+    #[test]
+    fn test_slstm_sine_regression_reasonable() {
+        let config = SLSTMConfig::builder()
+            .d_model(16)
+            .warmup(10)
+            .forgetting_factor(0.998)
+            .build()
+            .unwrap();
+        let mut model = StreamingLSTM::new(config);
+
+        // Train on sin(x) for 500 samples.
+        let n = 500usize;
+        for i in 0..n {
+            let x = i as f64 * 0.05;
+            model.train(&[x], x.sin());
+        }
+
+        // Compute RMSE on training samples (streaming: we evaluate as we trained).
+        // Re-run predictions over the same sequence to measure fit quality.
+        let mut model2 = {
+            let config2 = SLSTMConfig::builder()
+                .d_model(16)
+                .warmup(10)
+                .forgetting_factor(0.998)
+                .build()
+                .unwrap();
+            StreamingLSTM::new(config2)
+        };
+        let mut sq_err_sum = 0.0;
+        let mut count = 0usize;
+        for i in 0..n {
+            let x = i as f64 * 0.05;
+            let y = x.sin();
+            if model2.past_warmup() {
+                let pred = model2.predict(&[x]);
+                let err = pred - y;
+                sq_err_sum += err * err;
+                count += 1;
+            }
+            model2.train(&[x], y);
+        }
+        let rmse = if count > 0 {
+            (sq_err_sum / count as f64).sqrt()
+        } else {
+            f64::INFINITY
+        };
+        assert!(
+            rmse < 5.0,
+            "sLSTM sine regression RMSE should be < 5.0 after fix, got {rmse:.4} (count={count})"
         );
     }
 }

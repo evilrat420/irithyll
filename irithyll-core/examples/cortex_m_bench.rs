@@ -16,6 +16,44 @@
 //!     -semihosting-config enable=on,target=native \
 //!     -kernel target/thumbv6m-none-eabi/release/examples/cortex_m_bench
 //! ```
+//!
+//! # TODO: Extended embedded benchmarks
+//!
+//! The following benchmarks are planned but require cross-compilation setup
+//! (thumbv6m-none-eabi / thumbv7em-none-eabihf toolchain + QEMU ARM).
+//!
+//! ## Model size sweep (tree ensembles)
+//!
+//! Benchmark packed inference latency at three ensemble sizes:
+//! - Small: 10 trees, depth 3 (bench_model_10t.bin)
+//! - Medium: 50 trees, depth 4 (bench_model_50t.bin, current)
+//! - Large: 100 trees, depth 5 (bench_model_100t.bin)
+//!
+//! Expected: latency scales ~linearly with n_trees * avg_depth.
+//! Pack new test_data binaries with `export_packed` + `export_packed_i16`.
+//!
+//! ## Step-count throughput (10, 50, 100 prediction steps)
+//!
+//! Loop the prediction call N times and report total cycles / N:
+//! - 10 steps: single-sample latency baseline
+//! - 50 steps: representative online inference burst
+//! - 100 steps: sustained throughput with instruction cache warmed up
+//!
+//! Use `cortex_m::asm::nop()` fences between loops to prevent DCE.
+//!
+//! ## Cortex-M4 FPU comparison (thumbv7em-none-eabihf)
+//!
+//! Re-run f32 packed inference on M4 with hardware FPU enabled.
+//! Expected: ~2-4x speedup on tree walks (FPU fmul, fmadd pipelining).
+//! Use qemu-system-arm with `-cpu cortex-m4` and the lm3s6965evb machine.
+//!
+//! ## TurboQuant weight inference on M0+
+//!
+//! Benchmark `TurboQuantizedView::predict_with_scratch` on ARM:
+//! - 64-weight vector (d_model=64 RLS readout), 3.5-bit mode
+//! - Measure cycles for FWHT rotation + base-11 unpack + dot product
+//! - Compare against raw f32 dot product of same vector
+//! Requires: static `PACKED_WEIGHTS: &[u8]` embedded via `include_bytes!`.
 
 #![no_std]
 #![no_main]

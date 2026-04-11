@@ -5,7 +5,10 @@
 //!
 //! - Lazy initialization (input dimension discovered from first sample)
 //! - Adaptive input scaling (EWMA max tracker to map features into Q1.14 range)
-//! - Target quantization and output dequantization
+//! - Target quantization and e-prop learning
+//! - An online RLS readout layer trained on cached hidden spike state + input
+//!   features, enabling side-effect-free `predict()` that actually uses the
+//!   current input features (unlike the raw SNN readout membrane).
 //! - Sample weight support via learning rate modulation
 //!
 //! # Scaling Strategy
@@ -14,8 +17,20 @@
 //! per feature. After warmup, `input_scale[i] = Q14_HALF / max_abs[i]`,
 //! ensuring features map to roughly `[-0.5, +0.5]` in Q1.14. An EWMA
 //! with decay 0.99 allows the scale to adapt to non-stationary distributions.
+//!
+//! # Prediction
+//!
+//! The SNN's internal e-prop readout membrane is stateful and updates only
+//! during `train_one`. Calling `predict(features)` on the raw membrane would
+//! ignore the new features entirely, producing stale predictions that are
+//! disconnected from the input. Instead, SpikeNet trains a small RLS readout
+//! on `[hidden_spike_bits; input_features]` after each training step and uses
+//! it for inference. This follows the ESN/Mamba pattern: the recurrent core
+//! (SNN) provides temporal state; the linear readout (RLS) maps that state
+//! plus the current input to the target prediction in a side-effect-free way.
 
 use crate::learner::StreamingLearner;
+use crate::learners::RecursiveLeastSquares;
 use irithyll_core::snn::lif::{f64_to_q14, Q14_HALF, Q14_ONE};
 use irithyll_core::snn::network_fixed::{SpikeNetFixed, SpikeNetFixedConfig};
 
@@ -62,12 +77,18 @@ pub struct SpikeNet {
     // f64 <-> i16 scaling
     input_scale: Vec<f64>,
     input_max_abs: Vec<f64>,
-    output_scale: f64,
     target_scale: f64,
 
-    // Reusable quantization buffer
+    // Reusable quantization buffer (used during train_one only)
     quantized_input: Vec<i16>,
     quantized_target: Vec<i16>,
+
+    // RLS readout: trained on [hidden_spikes_f64; input_features] -> target.
+    // This enables side-effect-free predict() that uses the current input,
+    // matching the ESN/Mamba pattern and avoiding the stale-membrane problem.
+    readout_rls: RecursiveLeastSquares,
+    /// Cached hidden spike vector from the last training step (f64 0.0/1.0).
+    last_spike_state: Vec<f64>,
 
     n_samples: u64,
     n_input: usize,
@@ -84,10 +105,8 @@ pub struct SpikeNet {
     spike_rate_ewma: f64,
 }
 
-// SpikeNet is Send + Sync because SpikeNetFixed is Send + Sync and all
-// other fields are plain Vec/f64.
-unsafe impl Send for SpikeNet {}
-unsafe impl Sync for SpikeNet {}
+// SpikeNet is Send + Sync by composition — all fields are Send+Sync types.
+// (No unsafe impl needed; Rust auto-derives these.)
 
 impl SpikeNet {
     /// Create a new SpikeNet with the given configuration.
@@ -95,15 +114,18 @@ impl SpikeNet {
     /// The underlying network is not allocated until the first sample arrives
     /// (lazy initialization), because the input dimension is unknown.
     pub fn new(config: SpikeNetConfig) -> Self {
+        // Forgetting factor 0.995: mild non-stationarity adaptation.
+        let readout_rls = RecursiveLeastSquares::new(0.995);
         Self {
             config,
             inner: None,
             input_scale: Vec::new(),
             input_max_abs: Vec::new(),
-            output_scale: 1.0 / Q14_ONE as f64,
-            target_scale: Q14_HALF as f64, // map target 1.0 -> Q14_HALF
+            target_scale: Q14_ONE as f64, // map target 1.0 -> Q14_ONE (full range)
             quantized_input: Vec::new(),
             quantized_target: Vec::new(),
+            readout_rls,
+            last_spike_state: Vec::new(),
             n_samples: 0,
             n_input: 0,
             prev_prediction: 0.0,
@@ -134,7 +156,7 @@ impl SpikeNet {
             alpha: f64_to_q14(self.config.alpha),
             kappa: f64_to_q14(self.config.kappa),
             kappa_out: f64_to_q14(self.config.kappa_out),
-            eta: f64_to_q14(self.config.eta),
+            eta: f64_to_q14(self.config.learning_rate),
             v_thr: f64_to_q14(self.config.v_thr),
             gamma: f64_to_q14(self.config.gamma),
             spike_threshold: f64_to_q14(self.config.spike_threshold),
@@ -152,6 +174,9 @@ impl SpikeNet {
 
         self.quantized_input = vec![0i16; n_input];
         self.quantized_target = vec![0i16; self.config.n_outputs];
+
+        // Initialize the cached spike state to all-zeros (network not yet run).
+        self.last_spike_state = vec![0.0f64; self.config.n_hidden];
     }
 
     /// Update the running max absolute value per feature and recompute scales.
@@ -226,24 +251,64 @@ impl StreamingLearner for SpikeNet {
             self.initialize(features.len());
         }
 
-        assert_eq!(
-            features.len(),
-            self.n_input,
-            "feature dimension mismatch: expected {}, got {}",
-            self.n_input,
-            features.len()
-        );
+        if features.len() != self.n_input {
+            return;
+        }
 
         // Update input scaling
         self.update_input_scaling(features);
 
-        // Quantize inputs
+        // Quantize inputs and target
         self.quantize_input(features);
-
-        // Quantize target
         self.quantize_target(target);
 
-        // Update residual alignment tracking (acceleration-based).
+        // Apply sample weight: for SNNs with fixed-point internals, weight
+        // modulation is approximated. Weight ~0 skips the update, weight >0
+        // trains once with the base learning rate. The fixed-point config
+        // does not support per-sample eta changes without mutable config access.
+        if let Some(ref mut net) = self.inner {
+            if weight > 1e-10 {
+                net.train_step(&self.quantized_input, &self.quantized_target);
+            } else {
+                // Even if we skip weight update, run forward to keep state current.
+                net.forward(&self.quantized_input);
+            }
+
+            // Cache hidden spike state as f64 for the RLS readout.
+            let spikes = net.hidden_spikes();
+            let n_total = spikes.len();
+            for (dst, &s) in self.last_spike_state.iter_mut().zip(spikes.iter()) {
+                *dst = s as f64;
+            }
+
+            // Track spike rate EWMA.
+            if n_total > 0 {
+                let n_spiking = spikes.iter().filter(|&&s| s > 0).count();
+                let rate = n_spiking as f64 / n_total as f64;
+                const SPIKE_ALPHA: f64 = 0.01;
+                if self.n_samples == 0 {
+                    self.spike_rate_ewma = rate;
+                } else {
+                    self.spike_rate_ewma =
+                        (1.0 - SPIKE_ALPHA) * self.spike_rate_ewma + SPIKE_ALPHA * rate;
+                }
+            }
+        }
+
+        // Train the RLS readout on [hidden_spikes; input_features] -> target.
+        // This is the prediction surface used by predict(), ensuring that
+        // predict(features) actually uses the current input rather than
+        // just echoing the stale SNN membrane.
+        if weight > 1e-10 {
+            let mut readout_features = Vec::with_capacity(self.config.n_hidden + self.n_input);
+            readout_features.extend_from_slice(&self.last_spike_state);
+            readout_features.extend_from_slice(features);
+            self.readout_rls
+                .train_one(&readout_features, target, weight);
+        }
+
+        // Update residual alignment tracking (acceleration-based) using
+        // the RLS prediction (which uses the current features, not stale membrane).
         let current_pred = self.predict(features);
         let current_change = current_pred - self.prev_prediction;
         if self.n_samples > 0 {
@@ -259,51 +324,42 @@ impl StreamingLearner for SpikeNet {
                 0.0
             };
             const ALIGN_ALPHA: f64 = 0.05;
-            self.alignment_ewma =
-                (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+            if self.n_samples == 1 {
+                self.alignment_ewma = agreement;
+            } else {
+                self.alignment_ewma =
+                    (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+            }
         }
         self.prev_prev_change = self.prev_change;
         self.prev_change = current_change;
         self.prev_prediction = current_pred;
 
-        // Apply sample weight: for SNNs with fixed-point internals, weight
-        // modulation is approximated. Weight ~0 skips the update, weight >0
-        // trains once with the base learning rate. The fixed-point config
-        // does not support per-sample eta changes without mutable config access.
-        if let Some(ref mut net) = self.inner {
-            if weight > 1e-10 {
-                net.train_step(&self.quantized_input, &self.quantized_target);
-            }
-            // weight ~0 means skip training for this sample
-
-            // Track spike rate EWMA after the step.
-            let spikes = net.hidden_spikes();
-            let n_total = spikes.len();
-            if n_total > 0 {
-                let n_spiking = spikes.iter().filter(|&&s| s > 0).count();
-                let rate = n_spiking as f64 / n_total as f64;
-                const SPIKE_ALPHA: f64 = 0.01;
-                self.spike_rate_ewma =
-                    (1.0 - SPIKE_ALPHA) * self.spike_rate_ewma + SPIKE_ALPHA * rate;
-            }
-        }
-
         self.n_samples += 1;
     }
 
     fn predict(&self, features: &[f64]) -> f64 {
-        let inner = match &self.inner {
-            Some(net) => net,
-            None => return 0.0,
-        };
+        if self.inner.is_none() {
+            return 0.0;
+        }
 
         if features.len() != self.n_input {
             return 0.0;
         }
 
-        // Use current readout state without advancing the network.
-        // This is side-effect-free: we just read the current readout membrane.
-        inner.predict_f64(self.output_scale)
+        // Use the RLS readout: [cached_hidden_spikes; input_features] -> target.
+        //
+        // Design rationale (matches ESN/Mamba pattern):
+        // - The SNN's e-prop readout membrane reflects state from the last
+        //   training step and ignores the current `features` argument entirely.
+        // - The RLS readout is trained on [spikes_from_step_t-1; features_t]
+        //   → target_t during train_one, then used here for side-effect-free
+        //   inference that actually depends on the current input.
+        // - Before any training, the RLS returns 0.0 (uninitialised weights).
+        let mut readout_features = Vec::with_capacity(self.config.n_hidden + self.n_input);
+        readout_features.extend_from_slice(&self.last_spike_state);
+        readout_features.extend_from_slice(features);
+        self.readout_rls.predict(&readout_features)
     }
 
     fn n_samples_seen(&self) -> u64 {
@@ -320,6 +376,11 @@ impl StreamingLearner for SpikeNet {
         }
         for v in self.input_scale.iter_mut() {
             *v = Q14_HALF as f64;
+        }
+        // Reset RLS readout and cached spike state.
+        self.readout_rls.reset();
+        for v in self.last_spike_state.iter_mut() {
+            *v = 0.0;
         }
         self.n_samples = 0;
         self.prev_prediction = 0.0;
@@ -373,7 +434,7 @@ impl crate::automl::DiagnosticSource for SpikeNet {
 
         Some(crate::automl::ConfigDiagnostics {
             residual_alignment: self.alignment_ewma,
-            regularization_sensitivity: self.config.eta,
+            regularization_sensitivity: self.config.learning_rate,
             depth_sufficiency,
             effective_dof: self.config.n_hidden as f64,
             uncertainty,
@@ -552,5 +613,86 @@ mod tests {
         let p1 = model.predict(&[1.0, 2.0]);
         let p2 = model.predict(&[1.0, 2.0]);
         assert_eq!(p1, p2, "predict should be deterministic: {} vs {}", p1, p2);
+    }
+
+    #[test]
+    fn test_spikenet_dimension_mismatch_no_panic() {
+        // After initialization with 2 features, train with wrong dimension — should silently return.
+        let config = test_config();
+        let mut model = SpikeNet::new(config);
+        model.train(&[0.5, -0.3], 1.0); // initializes with n_input=2
+        assert_eq!(model.n_input(), 2);
+        // This used to assert_eq! (panic). Now should be a graceful no-op.
+        model.train(&[1.0, 2.0, 3.0], 0.5); // 3 features, expected 2
+                                            // Samples seen only incremented on successful train
+        assert_eq!(
+            model.n_samples_seen(),
+            1,
+            "mismatched-dimension sample should not be counted"
+        );
+    }
+
+    /// SpikeNet must never perform worse than random on a simple linearly separable
+    /// binary classification task. Pre-fix, the stale SNN readout membrane caused
+    /// anti-correlated predictions (33% on Agrawal) because predict() ignored the
+    /// input features entirely. With the RLS readout, predict(features) uses the
+    /// current input and must exceed 50% chance baseline.
+    #[test]
+    fn test_spikenet_binary_classification_above_chance() {
+        // Simple 2-class problem: class 1 = feature > 0, class 0 = feature < 0.
+        // This is trivially linearly separable, so any correct learner should
+        // reach well above 50% after a few hundred samples.
+        let config = SpikeNetConfig::builder()
+            .n_hidden(32)
+            .learning_rate(0.02)
+            .alpha(0.9)
+            .v_thr(0.3)
+            .gamma(0.5)
+            .spike_threshold(0.01)
+            .seed(99)
+            .weight_init_range(0.2)
+            .build()
+            .unwrap();
+
+        let mut model = SpikeNet::new(config);
+
+        // Deterministic alternating samples: class 1 at x=+1, class 0 at x=-1.
+        // Use prequential (test-then-train) protocol matching the benchmark.
+        let n_samples = 500;
+        let mut correct = 0usize;
+        let mut total = 0usize;
+
+        // Warmup phase: train only, don't count.
+        for i in 0..50usize {
+            let x = if i % 2 == 0 { 1.0_f64 } else { -1.0_f64 };
+            let y = if i % 2 == 0 { 1.0_f64 } else { 0.0_f64 };
+            model.train(&[x, x * 0.5], y);
+        }
+
+        // Evaluation phase: prequential (predict then train).
+        for i in 0..n_samples {
+            let x = if i % 2 == 0 { 1.0_f64 } else { -1.0_f64 };
+            let y = if i % 2 == 0 { 1.0_f64 } else { 0.0_f64 };
+
+            let pred = model.predict(&[x, x * 0.5]);
+            let pred_class = if pred >= 0.5 { 1.0_f64 } else { 0.0_f64 };
+            if (pred_class - y).abs() < 0.1 {
+                correct += 1;
+            }
+            total += 1;
+
+            model.train(&[x, x * 0.5], y);
+        }
+
+        let accuracy = correct as f64 / total as f64;
+        assert!(
+            accuracy > 0.5,
+            "SpikeNet must exceed 50% chance baseline on a simple binary task, \
+             got accuracy = {:.3} ({}/{} correct). \
+             This indicates predict() is ignoring input features (stale membrane bug).",
+            accuracy,
+            correct,
+            total
+        );
     }
 }

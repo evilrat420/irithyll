@@ -280,6 +280,11 @@ impl StreamingLearner for EchoStateNetwork {
         // Initialize reservoir on first call.
         self.ensure_reservoir(features.len());
 
+        // Guard: skip non-finite inputs to prevent NaN from corrupting reservoir state.
+        if !features.iter().all(|f| f.is_finite()) {
+            return;
+        }
+
         // Drive the reservoir forward one step with raw input.
         // ESN uses input_scaling to control the drive strength — the reservoir's
         // tanh nonlinearity inherently handles magnitude. Z-score normalization
@@ -297,6 +302,11 @@ impl StreamingLearner for EchoStateNetwork {
         // After warmup, train the RLS readout.
         if self.past_warmup() {
             let readout_features = self.build_readout_features(features);
+
+            if !readout_features.iter().all(|f| f.is_finite()) {
+                return;
+            }
+
             let current_pred = self.rls.predict(&readout_features);
 
             // Update residual alignment tracking (acceleration-based).
@@ -314,8 +324,12 @@ impl StreamingLearner for EchoStateNetwork {
                     0.0
                 };
                 const ALIGN_ALPHA: f64 = 0.05;
-                self.alignment_ewma =
-                    (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+                if self.samples_trained == 1 {
+                    self.alignment_ewma = agreement;
+                } else {
+                    self.alignment_ewma =
+                        (1.0 - ALIGN_ALPHA) * self.alignment_ewma + ALIGN_ALPHA * agreement;
+                }
             }
             self.prev_prev_change = self.prev_change;
             self.prev_change = current_change;
@@ -398,7 +412,15 @@ impl StreamingLearner for EchoStateNetwork {
     fn readout_weights(&self) -> Option<&[f64]> {
         self.rls.readout_weights()
     }
+
+    fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
+        // Scale spectral radius as a proxy for memory/learning rate.
+        self.config.spectral_radius = (self.config.spectral_radius * lr_multiplier).min(1.5);
+    }
 }
+
+/// Convenience alias. [`EchoStateNetwork`] is the canonical name.
+pub type StreamingESN = EchoStateNetwork;
 
 impl fmt::Debug for EchoStateNetwork {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -951,6 +973,55 @@ mod tests {
         assert!(
             pred.is_finite(),
             "plasticity-enabled ESN should produce finite predictions, got {pred}"
+        );
+    }
+
+    #[test]
+    fn test_esn_nan_skipped() {
+        // Train past warmup then send a NaN input; model must not panic and stay healthy.
+        let config = ESNConfig::builder()
+            .n_reservoir(30)
+            .warmup(10)
+            .build()
+            .unwrap();
+        let mut esn = EchoStateNetwork::new(config);
+        for i in 0..30 {
+            let t = i as f64 * 0.1;
+            esn.train(&[t.sin()], (t + 0.1).sin());
+        }
+        let samples_before = esn.n_samples_seen();
+        // Feed NaN — readout_features will be non-finite, should be skipped.
+        esn.train(&[f64::NAN], 1.0);
+        assert_eq!(
+            esn.n_samples_seen(),
+            samples_before,
+            "NaN input should not increment samples_trained: before={}, after={}",
+            samples_before,
+            esn.n_samples_seen()
+        );
+        let pred = esn.predict(&[0.5]);
+        assert!(
+            pred.is_finite(),
+            "prediction should be finite after NaN input, got {pred}"
+        );
+    }
+
+    #[test]
+    fn test_esn_streaming_alias() {
+        // StreamingESN alias and EchoStateNetwork refer to the same type.
+        let config = ESNConfig::builder()
+            .n_reservoir(30)
+            .warmup(5)
+            .build()
+            .unwrap();
+        let mut esn: StreamingESN = StreamingESN::new(config);
+        for i in 0..20 {
+            esn.train(&[i as f64 * 0.1], i as f64);
+        }
+        let pred = esn.predict(&[1.0]);
+        assert!(
+            pred.is_finite(),
+            "StreamingESN alias should work, got {pred}"
         );
     }
 }

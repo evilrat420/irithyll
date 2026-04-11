@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [9.9.9] - 2026-04-11
+
+### Added
+
+- Generic `check_learner()` compliance harness — validates all StreamingLearner implementations through standardized protocol
+- Metamorphic test suite — target shift equivariance, prediction consistency, reset idempotence, monotone adaptation
+- Numerical stability tests — extreme magnitudes, repeated identical samples, alternating extremes, zero features
+- Degradation/drift recovery tests — abrupt concept drift, target scale shift, cold restart scenarios
+- `StreamingLSTM`, `StreamingMGrade`, `StreamingESN`, `StreamingSpikeNet` type aliases for naming consistency
+- `Factory::projected_distributional()` and `Factory::projected_spike_net()` convenience constructors
+- `REFERENCES.md` — organized paper citations in three tiers (implemented, foundations, related work)
+- `.github/` issue templates and `CONTRIBUTING.md`
+- `adjust_config()` overrides for SpikeNet, mGRADE, ESN (learning rate modulation for AutoML)
+- `DiagnosticCache` companion struct for SGBT — cleaner separation of training vs diagnostic state
+
+### Changed
+
+- Unified learning rate parameter: `learning_rate` across all neural configs (KAN, TTT, SpikeNet). Old names (`lr`, `eta`) remain as deprecated builder aliases.
+- Model type names unified: `StreamingLSTM` (was `StreamingsLSTM`), `StreamingMGrade` (was `StreamingmGRADE`). Old names remain as type aliases.
+- README restructured with collapsible neural architecture inventory and composability section
+- SGBT proactive pruning now requires health threshold — no longer unconditionally replaces lowest-variance tree
+- Quality and proactive pruning coordinated — no double-replacement on same training step
+- Utility functions deduplicated: `sigmoid`, `dot` imported from irithyll-core instead of local copies
+- Manual `Clone` implementations replaced with `#[derive(Clone)]` where possible (RLS, MondrianForest, kernel types)
+- ConfigSpace fixes: forgetting factor uses linear scale (was incorrectly log), TTT alpha lower bound raised to 0.0001
+- `soft_routing` dead config field removed from SGBT
+
+### Fixed
+
+- **NaN/infinity input guards** in all SGBT variants (SGBT, DistributionalSGBT, BaggedSGBT, MulticlassSGBT) — one NaN sample no longer silently corrupts the entire model
+- **KAN target normalization** with constant targets no longer collapses gradients to zero
+- **KAN input normalization** with constant features no longer divides by zero
+- **KAN gate bias** resets to 0.0 (was incorrectly resetting to 1.0)
+- **SpikeNet dimension mismatch** returns gracefully instead of panicking with assert
+- **All neural models** validate readout feature finiteness before RLS update — prevents silent NaN propagation
+- `packed_refresh_interval` now validated (must be >= 10 or 0 to disable)
+- `empirical_sigma_alpha` now validated (must be in [0.0, 1.0])
+
+### Removed
+
+- Unsafe code from irithyll main crate (SIMD now behind `simd-avx2` feature flag in irithyll-core)
+- `unsafe impl Send/Sync` from AutoTuner and SpikeNet (auto-derived by composition)
+- ~20 paper references from README that lacked code counterparts (moved to REFERENCES.md)
+
 ## [9.9.0] - 2026-04-05
 
 ### Added

@@ -99,17 +99,17 @@ pub fn export_packed<L: Loss>(model: &SGBT<L>, n_features: usize) -> Vec<u8> {
     let mut buf: Vec<u8> = Vec::with_capacity(total_size);
 
     // Write header
-    buf.extend_from_slice(as_bytes(&header));
+    header.push_le_bytes(&mut buf);
 
     // Write tree table
     for entry in &tree_table {
-        buf.extend_from_slice(as_bytes(entry));
+        entry.push_le_bytes(&mut buf);
     }
 
     // Write nodes
     for tree_nodes in &all_tree_nodes {
         for node in tree_nodes {
-            buf.extend_from_slice(as_bytes(node));
+            node.push_le_bytes(&mut buf);
         }
     }
 
@@ -337,25 +337,25 @@ pub fn export_packed_i16<L: Loss>(model: &SGBT<L>, n_features: usize) -> Vec<u8>
     let mut buf: Vec<u8> = Vec::with_capacity(total_size);
 
     // Write header (16 bytes)
-    buf.extend_from_slice(as_bytes(&header));
+    header.push_le_bytes(&mut buf);
 
     // Write leaf_scale (4 bytes)
-    buf.extend_from_slice(as_bytes(&leaf_scale));
+    leaf_scale.push_le_bytes(&mut buf);
 
     // Write feature_scales (n_features * 4 bytes)
     for scale in &feature_scales {
-        buf.extend_from_slice(as_bytes(scale));
+        scale.push_le_bytes(&mut buf);
     }
 
     // Write tree table
     for entry in &tree_table {
-        buf.extend_from_slice(as_bytes(entry));
+        entry.push_le_bytes(&mut buf);
     }
 
     // Write nodes
     for tree_nodes in &all_tree_nodes {
         for node in tree_nodes {
-            buf.extend_from_slice(as_bytes(node));
+            node.push_le_bytes(&mut buf);
         }
     }
 
@@ -543,15 +543,15 @@ pub fn export_distributional_packed(
 
     let mut buf: Vec<u8> = Vec::with_capacity(total_size);
 
-    buf.extend_from_slice(as_bytes(&header));
+    header.push_le_bytes(&mut buf);
 
     for entry in &tree_table {
-        buf.extend_from_slice(as_bytes(entry));
+        entry.push_le_bytes(&mut buf);
     }
 
     for tree_nodes in &all_tree_nodes {
         for node in tree_nodes {
-            buf.extend_from_slice(as_bytes(node));
+            node.push_le_bytes(&mut buf);
         }
     }
 
@@ -559,9 +559,65 @@ pub fn export_distributional_packed(
     (buf, model.location_base())
 }
 
-/// Cast a `repr(C)` struct to its byte representation.
-fn as_bytes<T: Sized>(val: &T) -> &[u8] {
-    unsafe { core::slice::from_raw_parts(val as *const T as *const u8, core::mem::size_of::<T>()) }
+/// Safe byte-serialization helpers for repr(C) packed structs.
+///
+/// Each helper pushes the fields of its target type in little-endian order,
+/// matching the binary layout of the corresponding `repr(C)` struct. This
+/// replaces the previous generic `as_bytes` that required unsafe pointer casts.
+trait PushBytes {
+    fn push_le_bytes(&self, buf: &mut Vec<u8>);
+}
+
+impl PushBytes for EnsembleHeader {
+    fn push_le_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.magic.to_le_bytes());
+        buf.extend_from_slice(&self.version.to_le_bytes());
+        buf.extend_from_slice(&self.n_trees.to_le_bytes());
+        buf.extend_from_slice(&self.n_features.to_le_bytes());
+        buf.extend_from_slice(&self._reserved.to_le_bytes());
+        buf.extend_from_slice(&self.base_prediction.to_le_bytes());
+    }
+}
+
+impl PushBytes for TreeEntry {
+    fn push_le_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.n_nodes.to_le_bytes());
+        buf.extend_from_slice(&self.offset.to_le_bytes());
+    }
+}
+
+impl PushBytes for PackedNode {
+    fn push_le_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.value.to_le_bytes());
+        buf.extend_from_slice(&self.children.to_le_bytes());
+        buf.extend_from_slice(&self.feature_flags.to_le_bytes());
+        buf.extend_from_slice(&self._reserved.to_le_bytes());
+    }
+}
+
+impl PushBytes for QuantizedEnsembleHeader {
+    fn push_le_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.magic.to_le_bytes());
+        buf.extend_from_slice(&self.version.to_le_bytes());
+        buf.extend_from_slice(&self.n_trees.to_le_bytes());
+        buf.extend_from_slice(&self.n_features.to_le_bytes());
+        buf.extend_from_slice(&self._reserved.to_le_bytes());
+        buf.extend_from_slice(&self.base_prediction.to_le_bytes());
+    }
+}
+
+impl PushBytes for PackedNodeI16 {
+    fn push_le_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.value.to_le_bytes());
+        buf.extend_from_slice(&self.feature_flags.to_le_bytes());
+        buf.extend_from_slice(&self.children.to_le_bytes());
+    }
+}
+
+impl PushBytes for f32 {
+    fn push_le_bytes(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(&self.to_le_bytes());
+    }
 }
 
 /// Quantize a weight vector to 3.5-bit TurboQuant format.

@@ -51,11 +51,14 @@ pub struct DistributionalDiagnostics {
     pub location: EnsembleDiagnostics,
     /// Scale (sigma) ensemble diagnostics (if tree-chain mode).
     pub scale: Option<EnsembleDiagnostics>,
-    /// Current honest_sigma (tree contribution std dev).
+    /// Standard deviation of per-tree contributions to the current prediction,
+    /// used as a model-derived uncertainty estimate.
     pub honest_sigma: f64,
-    /// Rolling honest_sigma baseline.
+    /// Exponential moving average of `honest_sigma`, providing a stable
+    /// baseline for detecting sudden changes in prediction variance.
     pub rolling_honest_sigma_mean: f64,
-    /// Current effective MTS (if adaptive_mts enabled).
+    /// Effective minimum-training-samples threshold when `adaptive_mts` is
+    /// enabled; `None` if adaptive MTS is not active.
     pub effective_mts: Option<u64>,
 }
 

@@ -55,6 +55,28 @@ use crate::tree::builder::TreeConfig;
 /// `SGBT<LogisticLoss>`, `SGBT<HuberLoss>`, etc.
 pub type DynSGBT = SGBT<Box<dyn Loss>>;
 
+/// Cached diagnostic state for SGBT, separated from the core training state
+/// to improve struct clarity and cache locality in the prediction path.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DiagnosticCache {
+    /// Previous per-tree contributions for residual alignment (cosine similarity).
+    pub(crate) prev_contributions: Vec<f64>,
+    /// Contributions from two calls ago, for delta-based alignment.
+    pub(crate) prev_prev_contributions: Vec<f64>,
+    /// Cached cosine similarity of consecutive tree contribution vectors.
+    pub(crate) cached_residual_alignment: f64,
+    /// Cached mean |G|/(H+λ)² across all leaves.
+    pub(crate) cached_reg_sensitivity: f64,
+    /// Cached F-statistic (between-leaf / within-leaf variance).
+    pub(crate) cached_depth_sufficiency: f64,
+    /// Cached trace(H/(H+λ)) across all leaves.
+    pub(crate) cached_effective_dof: f64,
+    /// Per-tree EWMA of signed contribution accuracy. Positive = helps, negative = hurts.
+    pub(crate) contribution_accuracy: Vec<f64>,
+    /// EWMA alpha for contribution accuracy tracking.
+    pub(crate) prune_alpha: f64,
+}
+
 /// Streaming Gradient Boosted Trees ensemble.
 ///
 /// The primary entry point for training and prediction. Generic over `L: Loss`
@@ -125,24 +147,10 @@ pub struct SGBT<L: Loss = SquaredLoss> {
     /// Sum of replacement counts at last MTS update (replacement boundary detection).
     mts_replacement_sum: u64,
     // -----------------------------------------------------------------------
-    // Diagnostic cache (updated during train_one)
+    // Diagnostic caches — not used in predict hot path.
     // -----------------------------------------------------------------------
-    /// Previous per-tree contributions for residual alignment (cosine similarity).
-    prev_contributions: Vec<f64>,
-    /// Contributions from two calls ago, for delta-based alignment.
-    prev_prev_contributions: Vec<f64>,
-    /// Cached cosine similarity of consecutive tree contribution vectors.
-    cached_residual_alignment: f64,
-    /// Cached mean |G|/(H+λ)² across all leaves.
-    cached_reg_sensitivity: f64,
-    /// Cached F-statistic (between-leaf / within-leaf variance).
-    cached_depth_sufficiency: f64,
-    /// Cached trace(H/(H+λ)) across all leaves.
-    cached_effective_dof: f64,
-    /// Per-tree EWMA of signed contribution accuracy. Positive = helps, negative = hurts.
-    contribution_accuracy: Vec<f64>,
-    /// EWMA alpha for contribution accuracy tracking.
-    prune_alpha: f64,
+    /// Diagnostic caches — not used in predict hot path.
+    diag: DiagnosticCache,
 }
 
 impl<L: Loss + Clone> Clone for SGBT<L> {
@@ -165,14 +173,7 @@ impl<L: Loss + Clone> Clone for SGBT<L> {
             rolling_contribution_sigma: self.rolling_contribution_sigma,
             sigma_ring: self.sigma_ring.clone(),
             mts_replacement_sum: self.mts_replacement_sum,
-            prev_contributions: self.prev_contributions.clone(),
-            prev_prev_contributions: self.prev_prev_contributions.clone(),
-            cached_residual_alignment: self.cached_residual_alignment,
-            cached_reg_sensitivity: self.cached_reg_sensitivity,
-            cached_depth_sufficiency: self.cached_depth_sufficiency,
-            cached_effective_dof: self.cached_effective_dof,
-            contribution_accuracy: self.contribution_accuracy.clone(),
-            prune_alpha: self.prune_alpha,
+            diag: self.diag.clone(),
         }
     }
 }
@@ -303,14 +304,11 @@ impl<L: Loss> SGBT<L> {
             rolling_contribution_sigma: 0.0,
             sigma_ring: VecDeque::new(),
             mts_replacement_sum: 0,
-            prev_contributions: Vec::new(),
-            prev_prev_contributions: Vec::new(),
-            cached_residual_alignment: 0.0,
-            cached_reg_sensitivity: 0.0,
-            cached_depth_sufficiency: 0.0,
-            cached_effective_dof: 0.0,
-            contribution_accuracy: vec![0.0; n],
-            prune_alpha,
+            diag: DiagnosticCache {
+                contribution_accuracy: vec![0.0; n],
+                prune_alpha,
+                ..Default::default()
+            },
         }
     }
 
@@ -446,8 +444,8 @@ impl<L: Loss> SGBT<L> {
                 for (i, step) in self.steps.iter().enumerate() {
                     let contribution = self.config.learning_rate * step.predict(features);
                     let alignment = contribution * sign;
-                    self.contribution_accuracy[i] = self.prune_alpha * alignment
-                        + (1.0 - self.prune_alpha) * self.contribution_accuracy[i];
+                    self.diag.contribution_accuracy[i] = self.diag.prune_alpha * alignment
+                        + (1.0 - self.diag.prune_alpha) * self.diag.contribution_accuracy[i];
                 }
             }
 
@@ -502,37 +500,38 @@ impl<L: Loss> SGBT<L> {
             contributions.push(lr * step.predict(features));
         }
 
-        if !self.prev_contributions.is_empty()
-            && self.prev_contributions.len() == contributions.len()
-            && !self.prev_prev_contributions.is_empty()
-            && self.prev_prev_contributions.len() == contributions.len()
+        if !self.diag.prev_contributions.is_empty()
+            && self.diag.prev_contributions.len() == contributions.len()
+            && !self.diag.prev_prev_contributions.is_empty()
+            && self.diag.prev_prev_contributions.len() == contributions.len()
         {
             // Delta-based alignment: cosine similarity of consecutive *changes*
             // in the contribution vector, not the raw vectors themselves.
             // This prevents saturation when contributions change slowly.
             let delta_curr: Vec<f64> = contributions
                 .iter()
-                .zip(&self.prev_contributions)
+                .zip(&self.diag.prev_contributions)
                 .map(|(a, b)| a - b)
                 .collect();
             let delta_prev: Vec<f64> = self
+                .diag
                 .prev_contributions
                 .iter()
-                .zip(&self.prev_prev_contributions)
+                .zip(&self.diag.prev_prev_contributions)
                 .map(|(a, b)| a - b)
                 .collect();
 
             let dot: f64 = delta_curr.iter().zip(&delta_prev).map(|(a, b)| a * b).sum();
             let norm_curr: f64 = delta_curr.iter().map(|x| x * x).sum::<f64>().sqrt();
             let norm_prev: f64 = delta_prev.iter().map(|x| x * x).sum::<f64>().sqrt();
-            self.cached_residual_alignment = if norm_curr > 1e-15 && norm_prev > 1e-15 {
+            self.diag.cached_residual_alignment = if norm_curr > 1e-15 && norm_prev > 1e-15 {
                 dot / (norm_curr * norm_prev)
             } else {
                 0.0
             };
         }
-        self.prev_prev_contributions =
-            core::mem::replace(&mut self.prev_contributions, contributions);
+        self.diag.prev_prev_contributions =
+            core::mem::replace(&mut self.diag.prev_contributions, contributions);
 
         // 2-4. Leaf traversal for reg_sensitivity, depth_sufficiency, effective_dof
         let mut total_sensitivity = 0.0;
@@ -568,8 +567,8 @@ impl<L: Loss> SGBT<L> {
 
         if n_leaves_total > 0 {
             let n = n_leaves_total as f64;
-            self.cached_reg_sensitivity = total_sensitivity / n;
-            self.cached_effective_dof = total_dof;
+            self.diag.cached_reg_sensitivity = total_sensitivity / n;
+            self.diag.cached_effective_dof = total_dof;
 
             // Depth sufficiency: F = between_var / within_var
             let mean_weight = leaf_weights.iter().sum::<f64>() / n;
@@ -579,7 +578,7 @@ impl<L: Loss> SGBT<L> {
                 .sum::<f64>()
                 / (n - 1.0).max(1.0);
             let within_var = leaf_within_vars.iter().sum::<f64>() / n;
-            self.cached_depth_sufficiency = between_var / within_var.max(1e-15);
+            self.diag.cached_depth_sufficiency = between_var / within_var.max(1e-15);
         }
     }
 
@@ -1007,7 +1006,7 @@ impl<L: Loss> SGBT<L> {
         } else if n < current {
             self.steps.truncate(n);
         }
-        self.contribution_accuracy.resize(n, 0.0);
+        self.diag.contribution_accuracy.resize(n, 0.0);
         self.config.n_steps = n;
     }
 
@@ -1035,7 +1034,7 @@ impl<L: Loss> SGBT<L> {
                 .steps
                 .iter()
                 .enumerate()
-                .zip(self.contribution_accuracy.iter())
+                .zip(self.diag.contribution_accuracy.iter())
                 .filter(|((_, step), _)| step.slot().n_samples_seen() >= grace_period)
                 .min_by(|((_, _), a), ((_, _), b)| {
                     a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
@@ -1043,7 +1042,7 @@ impl<L: Loss> SGBT<L> {
             if let Some(((worst_idx, _), &worst_acc)) = worst {
                 if worst_acc < 0.0 {
                     self.steps[worst_idx].slot_mut().replace_active();
-                    self.contribution_accuracy[worst_idx] = 0.0;
+                    self.diag.contribution_accuracy[worst_idx] = 0.0;
                     return true;
                 }
             }
@@ -1072,7 +1071,7 @@ impl<L: Loss> SGBT<L> {
     /// Recomputes `prune_alpha` from the given half-life so each correction
     /// batch contributes equally regardless of size.
     pub fn set_prune_half_life(&mut self, hl: usize) {
-        self.prune_alpha = 1.0 - (-2.0 / hl.max(1) as f64).exp();
+        self.diag.prune_alpha = 1.0 - (-2.0 / hl.max(1) as f64).exp();
     }
 
     /// Immutable access to the boosting steps.
@@ -1323,16 +1322,16 @@ impl<L: Loss> SGBT<L> {
         self.rng_state = self.config.seed;
         self.auto_bandwidths.clear();
         self.last_replacement_sum = 0;
-        self.prev_contributions.clear();
-        self.prev_prev_contributions.clear();
         self.rolling_contribution_sigma = 0.0;
         self.sigma_ring.clear();
         self.mts_replacement_sum = 0;
-        self.cached_residual_alignment = 0.0;
-        self.cached_reg_sensitivity = 0.0;
-        self.cached_depth_sufficiency = 0.0;
-        self.cached_effective_dof = 0.0;
-        self.contribution_accuracy = vec![0.0; self.steps.len()];
+        self.diag.prev_contributions.clear();
+        self.diag.prev_prev_contributions.clear();
+        self.diag.cached_residual_alignment = 0.0;
+        self.diag.cached_reg_sensitivity = 0.0;
+        self.diag.cached_depth_sufficiency = 0.0;
+        self.diag.cached_effective_dof = 0.0;
+        self.diag.contribution_accuracy = vec![0.0; self.steps.len()];
     }
 
     // -------------------------------------------------------------------
@@ -1566,14 +1565,11 @@ impl SGBT<Box<dyn Loss>> {
             rolling_contribution_sigma: state.rolling_contribution_sigma,
             sigma_ring: VecDeque::new(),
             mts_replacement_sum: 0,
-            prev_contributions: Vec::new(),
-            prev_prev_contributions: Vec::new(),
-            cached_residual_alignment: 0.0,
-            cached_reg_sensitivity: 0.0,
-            cached_depth_sufficiency: 0.0,
-            cached_effective_dof: 0.0,
-            contribution_accuracy: vec![0.0; n],
-            prune_alpha,
+            diag: DiagnosticCache {
+                contribution_accuracy: vec![0.0; n],
+                prune_alpha,
+                ..Default::default()
+            },
         }
     }
 }
@@ -1699,14 +1695,11 @@ impl<L: Loss> SGBT<L> {
             rolling_contribution_sigma: state.rolling_contribution_sigma,
             sigma_ring: VecDeque::new(),
             mts_replacement_sum: 0,
-            prev_contributions: Vec::new(),
-            prev_prev_contributions: Vec::new(),
-            cached_residual_alignment: 0.0,
-            cached_reg_sensitivity: 0.0,
-            cached_depth_sufficiency: 0.0,
-            cached_effective_dof: 0.0,
-            contribution_accuracy: vec![0.0; n],
-            prune_alpha,
+            diag: DiagnosticCache {
+                contribution_accuracy: vec![0.0; n],
+                prune_alpha,
+                ..Default::default()
+            },
         }
     }
 }
@@ -1780,10 +1773,10 @@ pub(crate) fn rebuild_tree(
 impl<L: Loss> crate::automl::DiagnosticSource for SGBT<L> {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         Some(crate::automl::ConfigDiagnostics {
-            residual_alignment: self.cached_residual_alignment,
-            regularization_sensitivity: self.cached_reg_sensitivity,
-            depth_sufficiency: self.cached_depth_sufficiency,
-            effective_dof: self.cached_effective_dof,
+            residual_alignment: self.diag.cached_residual_alignment,
+            regularization_sensitivity: self.diag.cached_reg_sensitivity,
+            depth_sufficiency: self.diag.cached_depth_sufficiency,
+            effective_dof: self.diag.cached_effective_dof,
             uncertainty: self.rolling_contribution_sigma,
         })
     }

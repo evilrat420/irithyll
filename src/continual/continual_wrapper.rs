@@ -359,9 +359,7 @@ mod tests {
         }
     }
 
-    // MeanLearner is trivially thread-safe.
-    unsafe impl Send for MeanLearner {}
-    unsafe impl Sync for MeanLearner {}
+    // MeanLearner is Send+Sync by composition (f64, u64 fields only).
 
     #[test]
     fn wraps_learner_transparently() {

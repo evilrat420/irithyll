@@ -126,11 +126,14 @@ impl MinGRUCell {
             *zi = math::sigmoid(*zi + bi);
         }
 
-        // 3. Compute candidate: h_tilde = W_h * x + b_h (NO recurrence)
+        // 3. Compute candidate: h_tilde = tanh(W_h * x + b_h) (NO recurrence)
+        // tanh bounds the candidate to [-1, 1], preventing hidden-state explosion
+        // on large inputs (e.g. Lorenz, Power Plant datasets). This matches the
+        // minGRU paper (Feng et al., 2024) and standard GRU candidate practice.
         let mut h_tilde = vec![0.0; d_h];
         crate::simd::simd_mat_vec(&self.w_h, x, d_h, d_in, &mut h_tilde);
         for (hi, bi) in h_tilde.iter_mut().zip(self.b_h.iter()) {
-            *hi += bi;
+            *hi = math::tanh(*hi + bi);
         }
 
         // 4. Interpolate: h_t = (1 - z) * h_{t-1} + z * h_tilde
@@ -169,11 +172,11 @@ impl MinGRUCell {
             *zi = math::sigmoid(*zi + bi);
         }
 
-        // 3. Candidate
+        // 3. Candidate: tanh-bounded (mirrors forward())
         let mut h_tilde = vec![0.0; d_h];
         crate::simd::simd_mat_vec(&self.w_h, x, d_h, d_in, &mut h_tilde);
         for (hi, bi) in h_tilde.iter_mut().zip(self.b_h.iter()) {
-            *hi += bi;
+            *hi = math::tanh(*hi + bi);
         }
 
         // 4. Interpolate
@@ -414,6 +417,32 @@ mod tests {
                     "h[{}] = {} should be finite even with large inputs",
                     i,
                     val
+                );
+            }
+        }
+    }
+
+    /// Verify that large inputs (+10 / -10) keep the hidden state strictly within
+    /// [-1, 1]. This guards against the regression where h_tilde was unbounded and
+    /// caused RMSE explosions on Lorenz / Power Plant datasets.
+    #[test]
+    fn min_gru_cell_large_inputs_hidden_bounded() {
+        let mut cell = MinGRUCell::new(16, 7);
+        // Alternating +10 / -10 — worst-case stress for unbounded candidate
+        let x_pos: Vec<f64> = (0..8).map(|_| 10.0_f64).collect();
+        let x_neg: Vec<f64> = (0..8).map(|_| -10.0_f64).collect();
+
+        for step in 0..200 {
+            let x = if step % 2 == 0 { &x_pos } else { &x_neg };
+            let h = cell.forward(x);
+            for (i, &val) in h.iter().enumerate() {
+                assert!(
+                    val.is_finite(),
+                    "h[{i}] = {val} is not finite at step {step}"
+                );
+                assert!(
+                    val.abs() <= 1.0 + 1e-9,
+                    "h[{i}] = {val} exceeds [-1, 1] at step {step} (tanh bound violated)"
                 );
             }
         }

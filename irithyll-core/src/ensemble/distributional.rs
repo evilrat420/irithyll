@@ -455,6 +455,11 @@ impl DistributionalSGBT {
         let target = sample.target();
         let features = sample.features();
 
+        // Guard: skip non-finite inputs to prevent NaN/Inf from corrupting model state.
+        if !target.is_finite() || !features.iter().all(|f| f.is_finite()) {
+            return;
+        }
+
         // Initialize base predictions from first few targets
         if !self.base_initialized {
             self.initial_targets.push(target);
@@ -2993,5 +2998,41 @@ mod serde_tests {
                 hard_changes
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // NaN/Inf guard tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn nan_target_does_not_corrupt_distributional_sgbt() {
+        let config = SGBTConfig::builder()
+            .n_steps(5)
+            .grace_period(10)
+            .initial_target_count(5)
+            .build()
+            .unwrap();
+        let mut model = DistributionalSGBT::new(config);
+
+        for i in 0..50 {
+            let x = i as f64 * 0.1;
+            model.train_one(&(&[x][..], x * 2.0));
+        }
+        let pred_before = model.predict(&[1.0]);
+
+        model.train_one(&(&[0.5][..], f64::NAN));
+        let pred_after = model.predict(&[1.0]);
+
+        assert!(
+            pred_before.mu.is_finite() && pred_after.mu.is_finite(),
+            "mu should remain finite after NaN target: before={}, after={}",
+            pred_before.mu,
+            pred_after.mu
+        );
+        assert!(
+            pred_after.sigma > 0.0 && pred_after.sigma.is_finite(),
+            "sigma should remain positive and finite: {}",
+            pred_after.sigma
+        );
     }
 }

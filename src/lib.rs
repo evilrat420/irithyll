@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 //! # Irithyll
 //!
 //! Streaming machine learning in Rust -- gradient boosted trees, kernel methods,
@@ -238,23 +239,25 @@ pub use bandits::{
 // Re-exports -- reservoir computing
 pub use reservoir::{
     ESNConfig, ESNConfigBuilder, ESNPreprocessor, EchoStateNetwork, NGRCConfig, NGRCConfigBuilder,
-    NextGenRC,
+    NextGenRC, StreamingESN,
 };
 
 // Re-exports -- state space models
 pub use ssm::{MambaConfig, MambaConfigBuilder, MambaPreprocessor, StreamingMamba};
 
 // Re-exports -- spiking neural networks
-pub use snn::{SpikeNet, SpikeNetConfig, SpikeNetConfigBuilder, SpikePreprocessor};
+pub use snn::{
+    SpikeNet, SpikeNetConfig, SpikeNetConfigBuilder, SpikePreprocessor, StreamingSpikeNet,
+};
 
 // Re-exports -- test-time training
 pub use ttt::{StreamingTTT, TTTConfig, TTTConfigBuilder};
 
 // Re-exports -- sLSTM (stabilized LSTM with exponential gating)
-pub use lstm::{SLSTMConfig, SLSTMConfigBuilder, StreamingsLSTM};
+pub use lstm::{SLSTMConfig, SLSTMConfigBuilder, StreamingLSTM, StreamingsLSTM};
 
 // Re-exports -- mGRADE (minimal recurrent gating with delay convolutions)
-pub use mgrade::{mGRADEConfig, mGRADEConfigBuilder, StreamingmGRADE};
+pub use mgrade::{mGRADEConfig, mGRADEConfigBuilder, StreamingMGrade, StreamingmGRADE};
 
 // Re-exports -- Kolmogorov-Arnold Networks
 pub use kan::{KANConfig, KANConfigBuilder, StreamingKAN};
@@ -716,7 +719,7 @@ pub fn streaming_ttt(d_model: usize, eta: f64) -> ttt::StreamingTTT {
     ttt::StreamingTTT::new(
         ttt::TTTConfig::builder()
             .d_model(d_model)
-            .eta(eta)
+            .learning_rate(eta)
             .build()
             .expect("streaming_ttt() factory: invalid parameters"),
     )
@@ -734,8 +737,8 @@ pub fn streaming_ttt(d_model: usize, eta: f64) -> ttt::StreamingTTT {
 /// model.train(&[1.0, 2.0], 3.0);
 /// let pred = model.predict(&[1.0, 2.0]);
 /// ```
-pub fn streaming_slstm(d_model: usize) -> lstm::StreamingsLSTM {
-    lstm::StreamingsLSTM::new(
+pub fn streaming_slstm(d_model: usize) -> lstm::StreamingLSTM {
+    lstm::StreamingLSTM::new(
         lstm::SLSTMConfig::builder()
             .d_model(d_model)
             .build()
@@ -752,8 +755,8 @@ pub fn streaming_slstm(d_model: usize) -> lstm::StreamingsLSTM {
 /// model.train(&[1.0, 2.0, 3.0], 4.0);
 /// let pred = model.predict(&[1.0, 2.0, 3.0]);
 /// ```
-pub fn mgrade(d_in: usize, d_hidden: usize) -> mgrade::StreamingmGRADE {
-    mgrade::StreamingmGRADE::new(
+pub fn mgrade(d_in: usize, d_hidden: usize) -> mgrade::StreamingMGrade {
+    mgrade::StreamingMGrade::new(
         mgrade::mGRADEConfig::builder()
             .d_in(d_in)
             .d_hidden(d_hidden)
@@ -775,7 +778,7 @@ pub fn streaming_kan(layer_sizes: &[usize], lr: f64) -> kan::StreamingKAN {
     kan::StreamingKAN::new(
         kan::KANConfig::builder()
             .layer_sizes(layer_sizes.to_vec())
-            .lr(lr)
+            .learning_rate(lr)
             .build()
             .expect("streaming_kan() factory: invalid layer sizes"),
     )

@@ -307,6 +307,42 @@ impl<L: Loss + Clone> StreamingLearner for BaggedSGBT<L> {
     fn reset(&mut self) {
         BaggedSGBT::reset(self);
     }
+
+    /// Aggregate diagnostics from the first bag as representative signal.
+    fn diagnostics_array(&self) -> [f64; 5] {
+        use crate::automl::DiagnosticSource;
+        if let Some(first) = self.bags.first() {
+            use crate::learner::SGBTLearner;
+            let learner = SGBTLearner::new(first.clone());
+            match learner.config_diagnostics() {
+                Some(d) => [
+                    d.residual_alignment,
+                    d.regularization_sensitivity,
+                    d.depth_sufficiency,
+                    d.effective_dof,
+                    d.uncertainty,
+                ],
+                None => [0.0; 5],
+            }
+        } else {
+            [0.0; 5]
+        }
+    }
+
+    /// Sum of replacement counts across all bags.
+    fn replacement_count(&self) -> u64 {
+        self.bags.iter().map(|b| b.total_replacements()).sum()
+    }
+
+    /// Forward learning rate / lambda adjustments to all bags.
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        for bag in &mut self.bags {
+            let new_lr = bag.config().learning_rate * lr_multiplier;
+            bag.set_learning_rate(new_lr);
+            let new_lambda = bag.config().lambda + lambda_delta;
+            bag.set_lambda(new_lambda);
+        }
+    }
 }
 
 #[cfg(test)]

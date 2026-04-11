@@ -3,7 +3,7 @@ members = [".", "irithyll-python", "irithyll-core", "irithyll-cli"]
 
 [package]
 name = "irithyll"
-version = "9.9.0"
+version = "9.9.9"
 edition = "2021"
 rust-version = "1.75"
 description = "Streaming ML in Rust -- gradient boosted trees, neural architectures (TTT/KAN/MoE/Mamba/SNN), AutoML, kernel methods, and composable pipelines"
@@ -48,12 +48,13 @@ serde-json = ["dep:serde_json", "irithyll-core/serde"]
 serde-bincode = ["dep:bincode", "irithyll-core/serde"]
 kmeans-binning = ["irithyll-core/kmeans-binning"]
 simd = ["irithyll-core/simd"]
+simd-avx2 = ["irithyll-core/simd-avx2"]
 parallel = ["dep:rayon", "irithyll-core/parallel"]
 arrow = ["dep:arrow"]
 parquet = ["dep:parquet", "arrow"]
 onnx = ["dep:prost"]
 neural-leaves = []
-full = ["serde-json", "serde-bincode", "kmeans-binning", "parallel", "arrow", "parquet", "onnx", "neural-leaves", "simd"]
+full = ["serde-json", "serde-bincode", "kmeans-binning", "parallel", "arrow", "parquet", "onnx", "neural-leaves", "simd", "simd-avx2"]
 
 [package.metadata.docs.rs]
 all-features = true

@@ -157,6 +157,14 @@ impl<L: Loss + Clone> BaggedSGBT<L> {
     /// creates diverse training sets across bags.
     pub fn train_one(&mut self, sample: &impl Observation) {
         self.samples_seen += 1;
+        let target = sample.target();
+        let features = sample.features();
+
+        // Guard: skip non-finite inputs to prevent NaN/Inf from corrupting model state.
+        if !target.is_finite() || !features.iter().all(|f| f.is_finite()) {
+            return;
+        }
+
         for bag in &mut self.bags {
             let k = poisson_sample(&mut self.rng_state);
             for _ in 0..k {

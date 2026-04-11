@@ -114,6 +114,7 @@ fn outer_subtract_scaled(p: &mut [f64], k: &[f64], px: &[f64], lambda: f64, n: u
 /// let pred = rls.predict(&[5.0]);
 /// assert!((pred - 15.0).abs() < 0.1);
 /// ```
+#[derive(Clone)]
 pub struct RecursiveLeastSquares {
     /// d-dimensional weight vector (learned coefficients).
     weights: Vec<f64>,
@@ -512,27 +513,6 @@ impl StreamingLearner for RecursiveLeastSquares {
 }
 
 // ---------------------------------------------------------------------------
-// Clone impl
-// ---------------------------------------------------------------------------
-
-impl Clone for RecursiveLeastSquares {
-    fn clone(&self) -> Self {
-        Self {
-            weights: self.weights.clone(),
-            p_matrix: self.p_matrix.clone(),
-            forgetting_factor: self.forgetting_factor,
-            delta: self.delta,
-            n_features: self.n_features,
-            samples_seen: self.samples_seen,
-            running_mse: self.running_mse,
-            adaptive_forgetting: self.adaptive_forgetting,
-            baseline_error: self.baseline_error,
-            effective_forgetting_factor: self.effective_forgetting_factor,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Debug impl
 // ---------------------------------------------------------------------------
 
@@ -589,6 +569,7 @@ impl fmt::Debug for RecursiveLeastSquares {
 /// let pred = poly.predict(&[2.0]);
 /// assert!((pred - 4.0).abs() < 1.0);
 /// ```
+#[derive(Clone)]
 pub struct StreamingPolynomialRegression {
     /// Inner RLS learner operating on expanded features.
     rls: RecursiveLeastSquares,
@@ -715,20 +696,6 @@ impl StreamingLearner for StreamingPolynomialRegression {
 }
 
 // ---------------------------------------------------------------------------
-// Clone impl
-// ---------------------------------------------------------------------------
-
-impl Clone for StreamingPolynomialRegression {
-    fn clone(&self) -> Self {
-        Self {
-            rls: self.rls.clone(),
-            degree: self.degree,
-            samples_seen: self.samples_seen,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Debug impl
 // ---------------------------------------------------------------------------
 
@@ -784,6 +751,7 @@ impl fmt::Debug for StreamingPolynomialRegression {
 /// let pred = lwr.predict(&[1.0]);
 /// assert!((pred - 1.0_f64.sin()).abs() < 0.2);
 /// ```
+#[derive(Clone)]
 pub struct LocallyWeightedRegression {
     /// Circular buffer of feature vectors.
     buffer_features: Vec<Vec<f64>>,
@@ -926,25 +894,6 @@ impl StreamingLearner for LocallyWeightedRegression {
 
     fn diagnostics_array(&self) -> [f64; 5] {
         [0.0; 5]
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Clone impl
-// ---------------------------------------------------------------------------
-
-impl Clone for LocallyWeightedRegression {
-    fn clone(&self) -> Self {
-        Self {
-            buffer_features: self.buffer_features.clone(),
-            buffer_targets: self.buffer_targets.clone(),
-            buffer_weights: self.buffer_weights.clone(),
-            capacity: self.capacity,
-            head: self.head,
-            len: self.len,
-            bandwidth: self.bandwidth,
-            samples_seen: self.samples_seen,
-        }
     }
 }
 

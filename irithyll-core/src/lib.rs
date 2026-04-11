@@ -27,6 +27,8 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// Note: irithyll-core contains legitimate `unsafe impl Send/Sync` for tree types
+// and optional AVX2 SIMD intrinsics. The main irithyll crate forbids unsafe code.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

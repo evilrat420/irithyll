@@ -50,9 +50,7 @@ pub struct SpikePreprocessor {
     n_samples: u64,
 }
 
-// SpikePreprocessor is Send + Sync because SpikeNetFixed is Send + Sync
-unsafe impl Send for SpikePreprocessor {}
-unsafe impl Sync for SpikePreprocessor {}
+// SpikePreprocessor is Send + Sync by composition — all fields are Send+Sync types.
 
 impl SpikePreprocessor {
     /// Create a new SpikePreprocessor with default SNN parameters.

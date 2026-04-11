@@ -168,6 +168,7 @@ impl MondrianForestConfigBuilder {
 ///
 /// Node storage uses Structure of Arrays layout for cache-friendly traversal.
 /// Index 0 is always the root. Leaf nodes have `left_child[i] == None`.
+#[derive(Clone)]
 struct MondrianTree {
     // --- Node storage (SoA) ---
     split_feature: Vec<usize>,
@@ -396,27 +397,6 @@ impl MondrianTree {
     }
 }
 
-// --- Clone impl for MondrianTree ---
-
-impl Clone for MondrianTree {
-    fn clone(&self) -> Self {
-        Self {
-            split_feature: self.split_feature.clone(),
-            split_threshold: self.split_threshold.clone(),
-            left_child: self.left_child.clone(),
-            right_child: self.right_child.clone(),
-            depth: self.depth.clone(),
-            lower: self.lower.clone(),
-            upper: self.upper.clone(),
-            sum_targets: self.sum_targets.clone(),
-            sum_weights: self.sum_weights.clone(),
-            count: self.count.clone(),
-            split_time: self.split_time.clone(),
-            rng_state: self.rng_state,
-        }
-    }
-}
-
 // --- Debug impl for MondrianTree ---
 
 impl fmt::Debug for MondrianTree {
@@ -458,6 +438,7 @@ impl fmt::Debug for MondrianTree {
 /// let pred = forest.predict(&[1.0, 2.0]);
 /// assert!(pred.is_finite());
 /// ```
+#[derive(Clone)]
 pub struct MondrianForest {
     config: MondrianForestConfig,
     trees: Vec<MondrianTree>,
@@ -587,21 +568,6 @@ impl StreamingLearner for MondrianForest {
     fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
         // Scale the lifetime (lambda) parameter. Clamp to a reasonable floor.
         self.config.lifetime = (self.config.lifetime * lr_multiplier).max(1e-6);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Clone impl -- manual to match irithyll patterns
-// ---------------------------------------------------------------------------
-
-impl Clone for MondrianForest {
-    fn clone(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            trees: self.trees.clone(),
-            samples_seen: self.samples_seen,
-            n_features: self.n_features,
-        }
     }
 }
 

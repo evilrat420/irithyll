@@ -328,7 +328,7 @@ impl KRLS {
     /// Dot product of two slices.
     #[inline]
     fn dot(a: &[f64], b: &[f64]) -> f64 {
-        a.iter().zip(b.iter()).map(|(ai, bi)| ai * bi).sum()
+        irithyll_core::simd::simd_dot(a, b)
     }
 
     /// Check if the dictionary is at capacity.
