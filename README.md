@@ -22,11 +22,11 @@
 
 irithyll is a streaming ML library for the case where data arrives in order and never stops. There is no training set. There is no batch loop. Every sample updates the model and is then released without buffering or replay. Trees, state-space models, kernels, attention, and spiking networks all expose the same two-method interface: `train_one(features, target, weight)` and `predict(features) -> f64`. A `Box<dyn StreamingLearner>` is a fully typed model.
 
-The library is structured as two crates that share a vocabulary but not their constraints. The full crate (`irithyll`) handles training, async ingestion, drift detection, and AutoML across every model family. The packed crate (`irithyll-core`) is `#![no_std]` and serves two roles: it carries the streaming model implementations that don't need `std` -- Mamba-3 (V3Exp / V3Mimo), Log-Linear Attention, SpikeNet, drift detectors, and the shared streaming primitives -- which train one sample at a time on-device, and it ships a 12-byte packed format that turns a trained tree into branch-free zero-allocation inference. Train on the cloud or on the microcontroller; export to packed for the tightest inference loops. The boundary is hard and tested against `thumbv6m-none-eabi`.
+The workspace splits into two crates: `irithyll` (the full library, `std`) and `irithyll-core` (a `no_std` subset that handles its share of the streaming models and the packed inference format). The Bare-Metal Deployment section below covers the embedded path.
 
 It is a deliberate library. Every threshold derives from a paper. Every neural readout is bounded before it touches the linear head. Every config field round-trips through a builder that validates rather than accepts. Where the literature gives an option, the option becomes a feature flag, not a default.
 
-The library serves four cases primarily: edge inference at sample rate, online forecasting under concept drift, embedded learning where the dataset would never fit in RAM, and research benches where a new streaming architecture lands beside `SGBT` and is held to the same throughput and accuracy floor.
+It serves online forecasting under concept drift, research benches where new streaming architectures land next to `SGBT` and are held to the same throughput and accuracy floor, edge inference at sample rate, and embedded learning where the dataset would never fit in RAM.
 
 ## Quick Start
 
@@ -92,9 +92,7 @@ For the longer ergonomics story -- pipeline composition, AutoML tournaments, dri
 
 The library has opinions. They are stable across releases and they shape every model.
 
-**One sample at a time, streaming throughout.** Streaming-only models remain streaming. Architectures originally designed for offline training (TTT, KAN, Mamba) are reimplemented with online updates that converge sample-by-sample. Training happens in a single pass through data with no replay.
-
-**O(1) memory per model.** State size is a function of the model, not the data seen. A model trained on a billion samples occupies the same memory as one trained on a thousand. Drift detectors are bounded ring buffers; histograms have fixed bin counts; subspace trackers carry rank-`k` projections.
+Streaming is total. Every sample triggers a complete forward and backward step and is then released; a single pass through the data is the only pass. Architectures originally designed for offline training -- TTT, KAN, Mamba -- are reimplemented with online updates that converge sample-by-sample. Memory follows the model, not the stream: a million samples and a billion samples occupy the same number of bytes, because drift detectors are bounded ring buffers, histograms carry fixed bin counts, and subspace trackers hold a rank-`k` projection.
 
 **Bounded readouts before linear heads.** Every neural model feeding a recursive least squares head bounds its features first with `tanh`, `sigmoid`, L2-normalization, or clamping. This prevents feature explosion in the RLS head and is required for all new neural architectures.
 
@@ -102,7 +100,7 @@ The library has opinions. They are stable across releases and they shape every m
 
 **Validation by builder.** Every public `Config` carries a `Builder` returning `Result<_, ConfigError>`. Bounds are checked before construction; impossible configurations cannot be created.
 
-**Safe Rust in the training surface.** `irithyll` has `#![forbid(unsafe_code)]` at its root, ensuring all training-side code is safe. `irithyll-core` uses localized `unsafe` for zero-copy view parsing of the packed binary format and AVX2 SIMD intrinsics (behind the `simd-avx2` feature), each with documented preconditions.
+Safety is structural. `irithyll` carries `#![forbid(unsafe_code)]` at the crate root, so the entire training surface is safe Rust by construction. `irithyll-core` uses localized `unsafe` for zero-copy view parsing of the packed binary format and AVX2 SIMD intrinsics (behind the `simd-avx2` feature), each with documented preconditions.
 
 ## Workspace
 
@@ -116,16 +114,14 @@ The library has opinions. They are stable across releases and they shape every m
 
 ## Models and Architecture
 
-irithyll's model lineup spans four tiers. Production models are the ones you reach for first: streaming gradient-boosted trees with drift-driven tree replacement, recursive least squares with confidence intervals, kernel RLS, Mondrian forests, and classical baselines. The neural tier includes selective state-space models, test-time-trained recurrent networks, Kolmogorov-Arnold networks, spiking networks, and a streaming linear-attention layer exposing twelve distinct attention modes (RetNet, Hawk/Griffin, GLA, GLAVector, DeltaNet, GatedDeltaNet, RWKV, RWKV-7, mLSTM, DeltaProduct, HGRN2, log-linear). Specialized tools cover conformal prediction, anomaly detection, online projection learning, packed inference, and TreeSHAP. Ensembles compose all of the above.
+Every model in irithyll is streaming-trainable end-to-end; there is no inference-only tier. Every model implements [`StreamingLearner`](https://docs.rs/irithyll/latest/irithyll/trait.StreamingLearner.html), and every neural readout is bounded before it reaches a recursive least squares head -- a structural rule, not a per-model decision. The four columns below group families by what they are, not by maturity.
 
-Every algorithm implements [`StreamingLearner`](https://docs.rs/irithyll/latest/irithyll/trait.StreamingLearner.html). Every neural model is online-trainable end-to-end. All readouts are bounded; every feature feeding a recursive least squares head is squashed, normalized, or clamped to maintain numerical stability under streaming conditions.
-
-| Tier | What it contains |
-|------|------------------|
-| **Production** | SGBT family (`SGBT`, `DistributionalSGBT`, `BaggedSGBT`, `MulticlassSGBT`, `ParallelSGBT`), `RecursiveLeastSquares`, `KRLS`, Mondrian forests, Hoeffding trees, Gaussian Naive Bayes, linear / polynomial models |
-| **Neural** | Mamba family (V1 / V3 / Mamba-3), Echo State Networks, Next-Gen Reservoir Computing, `StreamingTTT`, `StreamingKAN` / T-KAN, AGMP, mGRADE, HGRN2, sLSTM, SpikeNet (e-prop + surrogate gradients), `StreamingAttentionModel` (12 modes) |
-| **Specialized** | Packed inference (`irithyll-core`), conformal prediction with PID control, anomaly detection, `ProjectedLearner` (online subspace tracking via PAST), TreeSHAP |
-| **Ensemble** | `NeuralMoE` (heterogeneous experts, top-k routing, drift-aware), streaming AutoML (`AutoTuner`, tournament racing, drift re-racing, complexity-adjusted elimination) |
+| Family | Members |
+|--------|---------|
+| **Trees & classical** | SGBT family (`SGBT`, `DistributionalSGBT`, `BaggedSGBT`, `MulticlassSGBT`, `ParallelSGBT`), `RecursiveLeastSquares`, `KRLS`, Mondrian forests, Hoeffding trees, Gaussian Naive Bayes, linear / polynomial models |
+| **Neural** | Mamba family (V1 / V3 / Mamba-3), Echo State Networks, Next-Gen Reservoir Computing, `StreamingTTT`, `StreamingKAN` / T-KAN, AGMP, mGRADE, HGRN2, sLSTM, SpikeNet (e-prop + surrogate gradients), `StreamingAttentionModel` (12 attention modes including Log-Linear) |
+| **Wrappers & inspection** | Packed inference (`irithyll-core`), conformal prediction with PID control, anomaly detection, `ProjectedLearner` (online subspace tracking via PAST), TreeSHAP |
+| **Composition** | `NeuralMoE` (heterogeneous experts, top-k routing, drift-aware), streaming AutoML (`AutoTuner`, tournament racing, drift re-racing, complexity-adjusted elimination) |
 
 Classification works on top of regression: `binary_classifier(model)` and `multiclass_classifier(model, k)` wrap any `StreamingLearner` with bipolar one-vs-rest heads.
 
@@ -144,7 +140,13 @@ The `irithyll` command-line interface provides interactive training, evaluation,
 
 ![irithyll TUI](https://raw.githubusercontent.com/evilrat420/irithyll/master/docs/images/tui.png)
 
+*Live multi-family dashboard -- loss curve, per-family diagnostics, feature importance, drift markers.*
+
+&nbsp;
+
 ![irithyll TUI demo](https://raw.githubusercontent.com/evilrat420/irithyll/master/docs/images/tui.gif)
+
+*Throttled for demo; native throughput finishes the 20k-sample stream in well under a second.*
 
 Built-in benchmarks: `friedman`, `lorenz`, `mackey-glass`, `periodic`, `mqar`, `needle`. Supported families: `sgbt`, `mamba`, `ttt`, `kan`, `esn`, `ngrc`, `spike-net`. Per-feature importance is available for SGBT, KAN, and Linear models.
 
