@@ -1,8 +1,11 @@
-//! Configuration space for hyperparameter search.
+//! Legacy positional hyperparameter search space (deprecated).
 //!
-//! Defines the search space over hyperparameters and provides samplers
-//! for generating candidate configurations. Supports continuous (linear
-//! and log-scale), integer, and categorical parameters.
+//! These types are retained for one release cycle to give downstream crates
+//! time to migrate to the typed [`SearchSpace`][crate::automl::SearchSpace] /
+//! [`ParamMap`][crate::automl::ParamMap] API. New code should use the
+//! typed surface; the positional API will be removed in v11.0.
+
+#![allow(deprecated)]
 
 use irithyll_core::rng::{standard_normal, xorshift64, xorshift64_f64};
 
@@ -10,25 +13,39 @@ use irithyll_core::rng::{standard_normal, xorshift64, xorshift64_f64};
 // HyperParam
 // ---------------------------------------------------------------------------
 
-/// A single hyperparameter definition.
+/// A single hyperparameter definition (legacy, positional).
+#[deprecated(
+    since = "10.0.0",
+    note = "use the typed `SearchSpace` / `ParamMap` API in `irithyll::automl::space` instead"
+)]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum HyperParam {
     /// Continuous float parameter.
     Float {
+        /// Parameter name.
         name: &'static str,
+        /// Lower bound (inclusive).
         low: f64,
+        /// Upper bound (inclusive).
         high: f64,
+        /// If true, sample on a log scale.
         log_scale: bool,
     },
     /// Integer parameter.
     Int {
+        /// Parameter name.
         name: &'static str,
+        /// Lower bound (inclusive).
         low: i64,
+        /// Upper bound (inclusive).
         high: i64,
     },
     /// Categorical parameter (encoded as index `0..n_choices-1`).
     Categorical {
+        /// Parameter name.
         name: &'static str,
+        /// Number of distinct categories.
         n_choices: usize,
     },
 }
@@ -48,7 +65,11 @@ impl HyperParam {
 // ConfigSpace
 // ---------------------------------------------------------------------------
 
-/// A configuration space defining the hyperparameter search bounds.
+/// A configuration space defining the hyperparameter search bounds (legacy, positional).
+#[deprecated(
+    since = "10.0.0",
+    note = "use `irithyll::automl::SearchSpace` (typed, named-access) instead"
+)]
 #[derive(Debug, Clone)]
 pub struct ConfigSpace {
     params: Vec<HyperParam>,
@@ -132,10 +153,14 @@ impl Default for ConfigSpace {
 // HyperConfig
 // ---------------------------------------------------------------------------
 
-/// A concrete hyperparameter configuration (point in the config space).
+/// A concrete hyperparameter configuration (legacy, positional).
 ///
 /// All values are encoded as `f64`: floats are raw values, ints are cast,
 /// categoricals are indices.
+#[deprecated(
+    since = "10.0.0",
+    note = "use `irithyll::automl::ParamMap` (typed, named-access) instead"
+)]
 #[derive(Debug, Clone)]
 pub struct HyperConfig {
     values: Vec<f64>,
@@ -176,7 +201,11 @@ impl HyperConfig {
 // ConfigSampler
 // ---------------------------------------------------------------------------
 
-/// Sampler for generating hyperparameter configurations from a [`ConfigSpace`].
+/// Sampler for generating hyperparameter configurations from a [`ConfigSpace`] (legacy).
+#[deprecated(
+    since = "10.0.0",
+    note = "use `SearchSpace::sample(...)` (typed, named-access) instead"
+)]
 pub struct ConfigSampler {
     space: ConfigSpace,
     rng_state: u64,

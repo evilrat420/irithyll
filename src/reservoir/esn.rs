@@ -112,21 +112,18 @@ impl EchoStateNetwork {
     pub fn new(config: ESNConfig) -> Self {
         let rls = RecursiveLeastSquares::with_delta(config.forgetting_factor, config.delta);
 
-        // Create plasticity guard if enabled.
-        // Tracks n_reservoir units (group_size=1), regenerating the bottom 1%
-        // every 500 steps with utility EWMA alpha=0.99.
-        let plasticity_guard = if config.plasticity {
-            Some(NeuronRegeneration::new(
+        // Create plasticity guard if a PlasticityConfig was provided.
+        // Tracks n_reservoir units (group_size=1 = per-unit tracking).
+        let plasticity_guard = config.plasticity.as_ref().map(|p| {
+            NeuronRegeneration::new(
                 config.n_reservoir,
-                1,
-                0.01,
-                500,
-                0.99,
+                1, // group_size = 1 (per-unit tracking)
+                p.regen_fraction,
+                p.regen_interval,
+                p.utility_alpha,
                 config.seed.wrapping_add(0x_DEAD_CAFE),
-            ))
-        } else {
-            None
-        };
+            )
+        });
         let prev_state_energy = vec![0.0; config.n_reservoir];
 
         Self {
@@ -285,25 +282,30 @@ impl StreamingLearner for EchoStateNetwork {
             return;
         }
 
-        // Drive the reservoir forward one step with raw input.
-        // ESN uses input_scaling to control the drive strength — the reservoir's
-        // tanh nonlinearity inherently handles magnitude. Z-score normalization
-        // would destroy absolute position information (e.g. Lorenz attractor state).
-        self.reservoir.update(features);
+        // Option D: build RLS readout features from the PRE-update reservoir state,
+        // train the readout, then advance the reservoir.
+        //
+        // predict() uses the current (post-last-train) reservoir state. To keep the
+        // RLS feature distribution consistent with what predict() will see, the readout
+        // must be trained on pre-update features — the same reservoir state that will
+        // be visible to predict() before the next train_one call.
+        //
+        // Ordering:
+        //   1. Count this observation (total_seen advances here, preserving warmup semantics).
+        //   2. If past warmup: build readout features from current (pre-update) state,
+        //      train RLS on them — consistent with predict's feature source.
+        //   3. Drive the reservoir forward (state-advance step).
+        //   4. Update diagnostics (state activity EWMA, plasticity) from post-update state.
         self.total_seen += 1;
 
-        // Update per-neuron state activity EWMA for utilization entropy.
-        const STATE_ALPHA: f64 = 0.01;
-        let state = self.reservoir.state();
-        for (ewma, &s) in self.state_activity_ewma.iter_mut().zip(state.iter()) {
-            *ewma = (1.0 - STATE_ALPHA) * *ewma + STATE_ALPHA * s.abs();
-        }
-
-        // After warmup, train the RLS readout.
+        // After warmup, train the RLS readout on pre-update reservoir features.
         if self.past_warmup() {
             let readout_features = self.build_readout_features(features);
 
             if !readout_features.iter().all(|f| f.is_finite()) {
+                // Non-finite readout features: still advance the reservoir so that
+                // the reservoir state remains consistent with total_seen.
+                self.reservoir.update(features);
                 return;
             }
 
@@ -337,6 +339,19 @@ impl StreamingLearner for EchoStateNetwork {
 
             self.rls.train_one(&readout_features, target, weight);
             self.samples_trained += 1;
+        }
+
+        // Drive the reservoir forward one step with raw input (state-advance step).
+        // ESN uses input_scaling to control the drive strength — the reservoir's
+        // tanh nonlinearity inherently handles magnitude. Z-score normalization
+        // would destroy absolute position information (e.g. Lorenz attractor state).
+        self.reservoir.update(features);
+
+        // Update per-neuron state activity EWMA for utilization entropy (post-update).
+        const STATE_ALPHA: f64 = 0.01;
+        let state = self.reservoir.state();
+        for (ewma, &s) in self.state_activity_ewma.iter_mut().zip(state.iter()) {
+            *ewma = (1.0 - STATE_ALPHA) * *ewma + STATE_ALPHA * s.abs();
         }
 
         // Plasticity maintenance: track per-reservoir-unit state energy and
@@ -395,6 +410,28 @@ impl StreamingLearner for EchoStateNetwork {
         self.prev_state_energy.fill(0.0);
     }
 
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn readout_weights(&self) -> Option<&[f64]> {
+        let w = <Self as crate::learner::HasReadout>::readout_weights(self);
+        if w.is_empty() {
+            None
+        } else {
+            Some(w)
+        }
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        <Self as crate::learner::Tunable>::adjust_config(self, lr_multiplier, lambda_delta);
+    }
+}
+
+impl crate::learner::Tunable for EchoStateNetwork {
     fn diagnostics_array(&self) -> [f64; 5] {
         use crate::automl::DiagnosticSource;
         match self.config_diagnostics() {
@@ -409,13 +446,14 @@ impl StreamingLearner for EchoStateNetwork {
         }
     }
 
-    fn readout_weights(&self) -> Option<&[f64]> {
-        self.rls.readout_weights()
-    }
-
     fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
-        // Scale spectral radius as a proxy for memory/learning rate.
         self.config.spectral_radius = (self.config.spectral_radius * lr_multiplier).min(1.5);
+    }
+}
+
+impl crate::learner::HasReadout for EchoStateNetwork {
+    fn readout_weights(&self) -> &[f64] {
+        self.rls.weights()
     }
 }
 
@@ -750,6 +788,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn readout_projection_reduces_rls_dim() {
         // Explicit readout_dim=30 on n=100 reservoir (d_in=1, n_full=101).
         // With projection, RLS should see 30 features, not 101.
@@ -850,6 +889,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn small_reservoir_no_projection() {
         // n_reservoir=50 <= 64: no projection, RLS sees full features.
         let config = ESNConfig::builder()
@@ -929,7 +969,10 @@ mod tests {
     #[test]
     fn esn_plasticity_disabled_by_default() {
         let config = ESNConfig::builder().n_reservoir(50).build().unwrap();
-        assert!(!config.plasticity, "plasticity should default to false");
+        assert!(
+            config.plasticity.is_none(),
+            "plasticity should default to None"
+        );
         let esn = EchoStateNetwork::new(config);
         assert!(
             esn.plasticity_guard.is_none(),
@@ -939,9 +982,10 @@ mod tests {
 
     #[test]
     fn esn_plasticity_enabled_creates_guard() {
+        use crate::common::PlasticityConfig;
         let config = ESNConfig::builder()
             .n_reservoir(50)
-            .plasticity(true)
+            .plasticity(Some(PlasticityConfig::default()))
             .build()
             .unwrap();
         let esn = EchoStateNetwork::new(config);
@@ -958,10 +1002,11 @@ mod tests {
 
     #[test]
     fn esn_plasticity_train_runs_without_panic() {
+        use crate::common::PlasticityConfig;
         let config = ESNConfig::builder()
             .n_reservoir(30)
             .warmup(10)
-            .plasticity(true)
+            .plasticity(Some(PlasticityConfig::default()))
             .build()
             .unwrap();
         let mut esn = EchoStateNetwork::new(config);
@@ -1022,6 +1067,46 @@ mod tests {
         assert!(
             pred.is_finite(),
             "StreamingESN alias should work, got {pred}"
+        );
+    }
+
+    #[test]
+    fn predict_reads_current_input() {
+        // Option D invariant: predict(x_a) != predict(x_b) for distinct inputs,
+        // confirming that the RLS readout uses current-input-dependent features.
+        // The ESN readout features are [reservoir_state; input] where input is
+        // the passthrough component — different inputs must yield different predictions.
+        let config = ESNConfig::builder()
+            .n_reservoir(50)
+            .warmup(10)
+            .passthrough_input(true) // input appears in readout features
+            .seed(42)
+            .build()
+            .unwrap();
+        let mut esn = EchoStateNetwork::new(config);
+
+        // Train enough samples for RLS to develop meaningful weights.
+        for i in 0..100 {
+            let t = i as f64 * 0.1;
+            esn.train(&[t.sin()], (t + 0.1).sin());
+        }
+
+        // Two distinct inputs produce distinct predictions.
+        let pred_a = esn.predict(&[0.0]);
+        let pred_b = esn.predict(&[1.0]);
+
+        assert!(
+            pred_a.is_finite(),
+            "predict(0.0) should be finite, got {pred_a}"
+        );
+        assert!(
+            pred_b.is_finite(),
+            "predict(1.0) should be finite, got {pred_b}"
+        );
+        assert_ne!(
+            pred_a.to_bits(),
+            pred_b.to_bits(),
+            "ESN predict must use current input: predict(0.0)={pred_a} == predict(1.0)={pred_b}"
         );
     }
 }

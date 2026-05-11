@@ -1,15 +1,19 @@
 [package]
 name = "irithyll-python"
-version = "4.0.0"
+version = "10.0.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Python bindings for irithyll streaming gradient boosted trees"
+description = "Python bindings for irithyll streaming machine learning"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [lib]
 name = "irithyll_python"
 crate-type = ["cdylib"]
+
+[features]
+default = ["bincode"]
+bincode = ["irithyll/serde-bincode"]
 
 [dependencies]
 irithyll = { path = "..", features = ["serde-json"] }

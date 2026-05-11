@@ -653,6 +653,7 @@ unsafe impl Sync for AdaptiveLeafModel {}
 ///   tree's existing `delta` parameter -- no arbitrary thresholds.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum LeafModelType {
     /// Standard closed-form leaf weight.
     #[default]
@@ -667,9 +668,12 @@ pub enum LeafModelType {
     /// give each feature its own adaptive learning rate. When `false`
     /// (default), all weights share a single Newton-scaled learning rate.
     Linear {
+        /// SGD learning rate for the linear leaf weights.
         learning_rate: f64,
+        /// Optional exponential weight decay for non-stationary streams.
         #[cfg_attr(feature = "serde", serde(default))]
         decay: Option<f64>,
+        /// When true, per-weight AdaGrad accumulators give adaptive rates.
         #[cfg_attr(feature = "serde", serde(default))]
         use_adagrad: bool,
     },
@@ -678,8 +682,11 @@ pub enum LeafModelType {
     ///
     /// `decay`: optional exponential weight decay for non-stationary streams.
     MLP {
+        /// Number of hidden units in the single hidden layer.
         hidden_size: usize,
+        /// SGD learning rate for MLP weights.
         learning_rate: f64,
+        /// Optional exponential weight decay.
         #[cfg_attr(feature = "serde", serde(default))]
         decay: Option<f64>,
     },
@@ -689,7 +696,10 @@ pub enum LeafModelType {
     ///
     /// The `promote_to` field specifies the shadow model type to evaluate
     /// against the default closed-form baseline.
-    Adaptive { promote_to: Box<LeafModelType> },
+    Adaptive {
+        /// Shadow model type to evaluate for potential promotion.
+        promote_to: Box<LeafModelType>,
+    },
 }
 
 impl LeafModelType {

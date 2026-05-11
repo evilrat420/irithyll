@@ -1,7 +1,23 @@
-//! Python bindings for irithyll streaming gradient boosted trees.
+//! Python bindings for irithyll streaming machine learning.
 //!
-//! Provides `StreamingGBT`, `StreamingGBTConfig`, `ShapExplanation`,
-//! and `MultiTargetGBT` as Python classes via PyO3.
+//! Surface coverage:
+//!
+//! - **Trees** -- `StreamingGBT`, `StreamingGBTConfig`, `MultiTargetGBT`,
+//!   `DistributionalGBT`, `ClassifierGBT`, `ShapExplanation`.
+//! - **Neural** -- `EchoStateNetwork`, `NextGenRC`, `StreamingMamba`,
+//!   `StreamingMamba3`, `SpikeNet`, `StreamingTTT`, `StreamingKAN`,
+//!   `StreamingsLSTM`, `StreamingAttention`, `LogLinearAttention`, `GLA`,
+//!   `NeuralMoE`.
+//! - **AutoML** -- `AutoTuner`, `AutoTunerBuilder`, `Factory`.
+//! - **Wrappers** -- `ProjectedLearner`, `ProjectionConfig`,
+//!   `BinaryClassifier`, `MulticlassClassifier`, `ContinualLearner`.
+//! - **Preprocessing** -- `Pipeline`, `PipelineBuilder`,
+//!   `IncrementalNormalizer`, `MinMaxScaler`, `CCIPCA`.
+//! - **Drift** -- `Adwin`, `DDM`, `PageHinkley`, `DriftSignal`.
+//! - **Metrics** -- `RegressionMetrics`, `ClassificationMetrics`, `MAE`,
+//!   `MSE`, `RMSE`, `LogLoss`, `Accuracy`, `Pinball`.
+//! - **Evaluation** -- `PrequentialEvaluator`.
+//! - **Quantization** -- `TurboQuant`.
 
 use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -643,6 +659,25 @@ impl PyModel {
         let json =
             std::fs::read_to_string(path).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         Self::from_json(&json)
+    }
+
+    /// Serialize to compact bincode bytes (requires the `bincode` feature).
+    #[cfg(feature = "bincode")]
+    fn to_bincode(&self) -> PyResult<Vec<u8>> {
+        let state = self.inner.to_model_state_with(self.loss_type.clone());
+        irithyll::serde_support::to_bincode(&state)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Load from bincode bytes (requires the `bincode` feature).
+    #[cfg(feature = "bincode")]
+    #[staticmethod]
+    fn from_bincode(bytes: &[u8]) -> PyResult<Self> {
+        let state: ModelState = irithyll::serde_support::from_bincode(bytes)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let loss_type = state.loss_type.clone();
+        let inner = DynSGBT::from_model_state(state);
+        Ok(Self { inner, loss_type })
     }
 
     /// Dynamically adjust the learning rate.
@@ -1454,8 +1489,8 @@ impl PyNextGenRC {
 
     /// Raw diagnostic signals for adaptive tuning.
     fn diagnostics_array(&self) -> [f64; 5] {
-        use irithyll::StreamingLearner;
-        self.inner.diagnostics_array()
+        use irithyll::Tunable;
+        Tunable::diagnostics_array(&self.inner)
     }
 
     fn __repr__(&self) -> String {
@@ -1526,8 +1561,8 @@ impl PyEchoStateNetwork {
 
     /// Raw diagnostic signals for adaptive tuning.
     fn diagnostics_array(&self) -> [f64; 5] {
-        use irithyll::StreamingLearner;
-        self.inner.diagnostics_array()
+        use irithyll::Tunable;
+        Tunable::diagnostics_array(&self.inner)
     }
 
     /// Prediction uncertainty estimate.
@@ -1601,8 +1636,8 @@ impl PyStreamingMamba {
 
     /// Raw diagnostic signals for adaptive tuning.
     fn diagnostics_array(&self) -> [f64; 5] {
-        use irithyll::StreamingLearner;
-        self.inner.diagnostics_array()
+        use irithyll::Tunable;
+        Tunable::diagnostics_array(&self.inner)
     }
 
     /// Prediction uncertainty estimate.
@@ -1676,8 +1711,8 @@ impl PySpikeNet {
 
     /// Raw diagnostic signals for adaptive tuning.
     fn diagnostics_array(&self) -> [f64; 5] {
-        use irithyll::StreamingLearner;
-        self.inner.diagnostics_array()
+        use irithyll::Tunable;
+        Tunable::diagnostics_array(&self.inner)
     }
 
     fn __repr__(&self) -> String {
@@ -1750,8 +1785,8 @@ impl PyGLA {
 
     /// Raw diagnostic signals for adaptive tuning.
     fn diagnostics_array(&self) -> [f64; 5] {
-        use irithyll::StreamingLearner;
-        self.inner.diagnostics_array()
+        use irithyll::Tunable;
+        Tunable::diagnostics_array(&self.inner)
     }
 
     /// Prediction uncertainty estimate.
@@ -2019,8 +2054,8 @@ impl PyStreamingTTT {
 
     /// Raw diagnostic signals for adaptive tuning.
     fn diagnostics_array(&self) -> [f64; 5] {
-        use irithyll::StreamingLearner;
-        self.inner.diagnostics_array()
+        use irithyll::Tunable;
+        Tunable::diagnostics_array(&self.inner)
     }
 
     /// Prediction uncertainty estimate.
@@ -2108,8 +2143,8 @@ impl PyStreamingKAN {
 
     /// Raw diagnostic signals for adaptive tuning.
     fn diagnostics_array(&self) -> [f64; 5] {
-        use irithyll::StreamingLearner;
-        self.inner.diagnostics_array()
+        use irithyll::Tunable;
+        Tunable::diagnostics_array(&self.inner)
     }
 
     fn __repr__(&self) -> String {
@@ -2162,7 +2197,9 @@ impl PyNeuralMoE {
             builder = builder.expert(irithyll::sgbt(n_steps, learning_rate));
         }
         Ok(Self {
-            inner: builder.build(),
+            inner: builder
+                .build()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
         })
     }
 
@@ -2203,8 +2240,8 @@ impl PyNeuralMoE {
 
     /// Raw diagnostic signals for adaptive tuning.
     fn diagnostics_array(&self) -> [f64; 5] {
-        use irithyll::StreamingLearner;
-        self.inner.diagnostics_array()
+        use irithyll::Tunable;
+        Tunable::diagnostics_array(&self.inner)
     }
 
     /// Expert disagreement for a given feature vector.
@@ -2481,8 +2518,8 @@ impl PyProjectedLearner {
 
     /// Raw diagnostic signals for adaptive tuning.
     fn diagnostics_array(&self) -> [f64; 5] {
-        use irithyll::StreamingLearner;
-        self.inner.diagnostics_array()
+        use irithyll::Tunable;
+        Tunable::diagnostics_array(&self.inner)
     }
 
     fn __repr__(&self) -> String {
@@ -2543,16 +2580,30 @@ impl PyAutoTuner {
             "spikenet" | "spike_net" => irithyll::automl::Factory::spike_net(),
             "attention" => irithyll::automl::Factory::attention(n_features),
             "projected_mamba" => {
-                irithyll::automl::Factory::projected_mamba(n_features, n_features / 2)
+                let rank = (n_features / 2).max(1);
+                irithyll::automl::Factory::mamba(n_features)
+                    .with_projection(n_features, rank, 0.999)
             }
-            "projected_ttt" => irithyll::automl::Factory::projected_ttt(n_features, n_features / 2),
-            "projected_kan" => irithyll::automl::Factory::projected_kan(n_features, n_features / 2),
+            "projected_ttt" => {
+                let rank = (n_features / 2).max(1);
+                irithyll::automl::Factory::ttt(n_features).with_projection(n_features, rank, 0.999)
+            }
+            "projected_kan" => {
+                let rank = (n_features / 2).max(1);
+                irithyll::automl::Factory::kan(n_features).with_projection(n_features, rank, 0.999)
+            }
             "projected_sgbt" => {
-                irithyll::automl::Factory::projected_sgbt(n_features, n_features / 2)
+                let rank = (n_features / 2).max(1);
+                irithyll::automl::Factory::sgbt(n_features).with_projection(n_features, rank, 0.999)
             }
-            "projected_esn" => irithyll::automl::Factory::projected_esn(n_features, n_features / 2),
+            "projected_esn" => {
+                let rank = (n_features / 2).max(1);
+                irithyll::automl::Factory::esn().with_projection(n_features, rank, 0.999)
+            }
             "projected_attention" => {
-                irithyll::automl::Factory::projected_attention(n_features, n_features / 2)
+                let rank = (n_features / 2).max(1);
+                irithyll::automl::Factory::attention(n_features)
+                    .with_projection(n_features, rank, 0.999)
             }
             _ => {
                 return Err(PyValueError::new_err(format!(
@@ -2564,7 +2615,8 @@ impl PyAutoTuner {
             .factory(factory)
             .n_initial(n_initial)
             .round_budget(round_budget)
-            .build();
+            .build()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(Self { inner: tuner })
     }
 
@@ -2701,8 +2753,8 @@ impl PySLSTM {
 
     /// Raw diagnostic signals for adaptive tuning.
     fn diagnostics_array(&self) -> [f64; 5] {
-        use irithyll::StreamingLearner;
-        self.inner.diagnostics_array()
+        use irithyll::Tunable;
+        Tunable::diagnostics_array(&self.inner)
     }
 
     fn __repr__(&self) -> String {
@@ -2809,19 +2861,25 @@ impl PyStreamingAttention {
     #[new]
     #[pyo3(signature = (d_model, n_heads=2, mode="gla", seed=42))]
     fn new(d_model: usize, n_heads: usize, mode: &str, seed: u64) -> PyResult<Self> {
-        use irithyll::attention::AttentionMode;
+        use irithyll::attention::{AttentionMode, GatedDeltaMode};
 
         let attention_mode = match mode {
             "gla" => AttentionMode::GLA,
             "retnet" => AttentionMode::RetNet { gamma: 0.99 },
             "hawk" => AttentionMode::Hawk,
             "deltanet" => AttentionMode::DeltaNet,
-            "gated_deltanet" => AttentionMode::GatedDeltaNet { beta_scale: 1.0 },
+            "gated_deltanet" => AttentionMode::GatedDeltaNet {
+                beta_scale: 1.0,
+                gate_mode_delta: GatedDeltaMode::Static,
+            },
             "rwkv" => AttentionMode::RWKV {
                 initial_decay: 0.95,
             },
             "mlstm" => AttentionMode::MLSTM,
-            "delta_product" => AttentionMode::DeltaProduct { n_compositions: 3 },
+            "delta_product" => AttentionMode::DeltaProduct {
+                n_compositions: 3,
+                reflections: false,
+            },
             "rwkv7" => AttentionMode::RWKV7,
             other => {
                 return Err(PyValueError::new_err(format!(
@@ -2871,8 +2929,8 @@ impl PyStreamingAttention {
 
     /// Raw diagnostic signals for adaptive tuning.
     fn diagnostics_array(&self) -> [f64; 5] {
-        use irithyll::StreamingLearner;
-        self.inner.diagnostics_array()
+        use irithyll::Tunable;
+        Tunable::diagnostics_array(&self.inner)
     }
 
     /// Prediction uncertainty estimate.
@@ -2890,34 +2948,1798 @@ impl PyStreamingAttention {
 }
 
 // ---------------------------------------------------------------------------
+// StreamingMamba3 (Mamba-3 with QK-norm and complex SSM)
+// ---------------------------------------------------------------------------
+
+/// Streaming Mamba-3 (qk-norm, complex SSM, 6-MAC outer SSM).
+///
+/// Mamba-3 extends the selective SSM with complex-valued state evolution
+/// and QK normalization for long-context retrieval. Same per-step interface
+/// as `StreamingMamba`.
+///
+/// Example::
+///
+///     model = StreamingMamba3(d_in=8, n_state=32)
+///     model.train([1.0] * 8, 5.0)
+///     pred = model.predict([1.0] * 8)
+///
+#[pyclass(name = "StreamingMamba3")]
+struct PyStreamingMamba3 {
+    inner: irithyll::StreamingMamba,
+}
+
+#[pymethods]
+impl PyStreamingMamba3 {
+    #[new]
+    #[pyo3(signature = (d_in, n_state=32, seed=42))]
+    fn new(d_in: usize, n_state: usize, seed: u64) -> PyResult<Self> {
+        let config = irithyll::MambaConfig::builder()
+            .d_in(d_in)
+            .n_state(n_state)
+            .version(irithyll::ssm::MambaVersion::V3)
+            .seed(seed)
+            .build()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(Self {
+            inner: irithyll::StreamingMamba::new(config),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!("StreamingMamba3(samples={})", self.inner.n_samples_seen())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LogLinearAttention
+// ---------------------------------------------------------------------------
+
+/// Log-linear attention with O(log T) hierarchical Fenwick state.
+///
+/// Wraps a base linear-attention rule (GLA, RetNet, DeltaNet, ...) with a
+/// log-T hierarchical state that bridges linear-attention efficiency and
+/// softmax expressivity. State memory is `max_levels * d_k * d_v * n_heads`
+/// per layer.
+///
+/// Example::
+///
+///     model = LogLinearAttention(d_model=8, n_heads=2, base="gla", max_levels=8)
+///     model.train([1.0] * 8, 5.0)
+///     pred = model.predict([1.0] * 8)
+///
+#[pyclass(name = "LogLinearAttention")]
+struct PyLogLinearAttention {
+    inner: irithyll::StreamingAttentionModel,
+}
+
+#[pymethods]
+impl PyLogLinearAttention {
+    /// Create a log-linear attention model.
+    ///
+    /// Args:
+    ///     d_model: model dimension (must divide n_heads)
+    ///     n_heads: number of attention heads (default: 2)
+    ///     base: base linear-attention rule, one of "gla", "retnet", "hawk",
+    ///         "deltanet", "gated_deltanet", "rwkv", "mlstm", "rwkv7"
+    ///         (default: "gla")
+    ///     max_levels: number of Fenwick levels (default: 8)
+    #[new]
+    #[pyo3(signature = (d_model, n_heads=2, base="gla", max_levels=8))]
+    fn new(d_model: usize, n_heads: usize, base: &str, max_levels: usize) -> PyResult<Self> {
+        use irithyll::attention::{AttentionMode, GatedDeltaMode};
+
+        let inner_mode = match base {
+            "gla" => AttentionMode::GLA,
+            "retnet" => AttentionMode::RetNet { gamma: 0.99 },
+            "hawk" => AttentionMode::Hawk,
+            "deltanet" => AttentionMode::DeltaNet,
+            "gated_deltanet" => AttentionMode::GatedDeltaNet {
+                beta_scale: 1.0,
+                gate_mode_delta: GatedDeltaMode::Static,
+            },
+            "rwkv" => AttentionMode::RWKV {
+                initial_decay: 0.95,
+            },
+            "mlstm" => AttentionMode::MLSTM,
+            "rwkv7" => AttentionMode::RWKV7,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "Unknown base mode '{other}'. Use one of: gla, retnet, hawk, \
+                     deltanet, gated_deltanet, rwkv, mlstm, rwkv7"
+                )));
+            }
+        };
+
+        Ok(Self {
+            inner: irithyll::log_linear(d_model, n_heads, inner_mode, max_levels),
+        })
+    }
+
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!(
+            "LogLinearAttention(samples={})",
+            self.inner.n_samples_seen()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drift detectors
+// ---------------------------------------------------------------------------
+
+/// Drift signal returned by drift detectors. One of "Stable", "Warning",
+/// or "Drift".
+fn drift_signal_to_str(sig: irithyll::DriftSignal) -> &'static str {
+    match sig {
+        irithyll::DriftSignal::Stable => "Stable",
+        irithyll::DriftSignal::Warning => "Warning",
+        irithyll::DriftSignal::Drift => "Drift",
+    }
+}
+
+/// ADWIN (Adaptive Windowing) drift detector.
+///
+/// Maintains a sliding window over the input stream and signals drift when
+/// the window can be split into two halves with significantly different
+/// means (Bifet & Gavalda, 2007).
+///
+/// Example::
+///
+///     adwin = Adwin(delta=0.002)
+///     for x in stream:
+///         signal = adwin.update(x)
+///         if signal == "Drift":
+///             ...
+///
+#[pyclass(name = "Adwin")]
+struct PyAdwin {
+    inner: irithyll::drift::adwin::Adwin,
+}
+
+#[pymethods]
+impl PyAdwin {
+    /// Create an ADWIN detector.
+    ///
+    /// Args:
+    ///     delta: confidence parameter in (0, 1). Smaller values require
+    ///         stronger evidence to declare drift (default: 0.002).
+    #[new]
+    #[pyo3(signature = (delta=0.002))]
+    fn new(delta: f64) -> PyResult<Self> {
+        if delta <= 0.0 || delta >= 1.0 {
+            return Err(PyValueError::new_err(format!(
+                "delta must be in (0, 1), got {delta}"
+            )));
+        }
+        Ok(Self {
+            inner: irithyll::drift::adwin::Adwin::with_delta(delta),
+        })
+    }
+
+    /// Feed a value and return the drift signal as a string.
+    fn update(&mut self, value: f64) -> &'static str {
+        use irithyll::DriftDetector;
+        drift_signal_to_str(DriftDetector::update(&mut self.inner, value))
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::DriftDetector;
+        DriftDetector::reset(&mut self.inner);
+    }
+
+    /// Current window width (samples in the active window).
+    fn width(&self) -> u64 {
+        self.inner.width()
+    }
+
+    /// Current estimated mean of the monitored stream.
+    fn estimated_mean(&self) -> f64 {
+        use irithyll::DriftDetector;
+        self.inner.estimated_mean()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Adwin(width={}, estimated_mean={:.6})",
+            self.inner.width(),
+            irithyll::DriftDetector::estimated_mean(&self.inner)
+        )
+    }
+}
+
+/// DDM (Drift Detection Method) detector.
+///
+/// Monitors a running error rate and standard deviation. Signals warning at
+/// `mean + 2*std` above the historical minimum, drift at `mean + 3*std`
+/// (Gama et al., 2004).
+///
+/// Example::
+///
+///     ddm = DDM()
+///     for error in errors:
+///         signal = ddm.update(error)
+///
+#[pyclass(name = "DDM")]
+struct PyDDM {
+    inner: irithyll::drift::ddm::Ddm,
+}
+
+#[pymethods]
+impl PyDDM {
+    /// Create a DDM detector.
+    ///
+    /// Args:
+    ///     warning_level: multiplier for warning threshold (default: 2.0)
+    ///     drift_level: multiplier for drift threshold (default: 3.0)
+    ///     min_instances: warmup samples before signals are emitted
+    ///         (default: 30)
+    #[new]
+    #[pyo3(signature = (warning_level=2.0, drift_level=3.0, min_instances=30))]
+    fn new(warning_level: f64, drift_level: f64, min_instances: u64) -> Self {
+        Self {
+            inner: irithyll::drift::ddm::Ddm::with_params(
+                warning_level,
+                drift_level,
+                min_instances,
+            ),
+        }
+    }
+
+    /// Feed an error value and return the drift signal as a string.
+    fn update(&mut self, error: f64) -> &'static str {
+        drift_signal_to_str(self.inner.update(error))
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    /// Current standard deviation of the monitored error stream.
+    fn std_dev(&self) -> f64 {
+        self.inner.std_dev()
+    }
+
+    /// Current estimated mean.
+    fn estimated_mean(&self) -> f64 {
+        self.inner.estimated_mean()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "DDM(warning_level={}, drift_level={}, mean={:.6})",
+            self.inner.warning_level(),
+            self.inner.drift_level(),
+            self.inner.estimated_mean()
+        )
+    }
+}
+
+/// Page-Hinkley drift detector.
+///
+/// Cumulative-sum-style detector for shifts in the running mean of a stream
+/// (Page, 1954). Lightweight; suitable for prequential error monitoring.
+///
+/// Example::
+///
+///     pht = PageHinkley()
+///     for error in errors:
+///         signal = pht.update(error)
+///
+#[pyclass(name = "PageHinkley")]
+struct PyPageHinkley {
+    inner: irithyll::drift::pht::PageHinkleyTest,
+}
+
+#[pymethods]
+impl PyPageHinkley {
+    /// Create a Page-Hinkley detector with default parameters.
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: irithyll::drift::pht::PageHinkleyTest::new(),
+        }
+    }
+
+    /// Feed an error value and return the drift signal as a string.
+    fn update(&mut self, error: f64) -> &'static str {
+        drift_signal_to_str(self.inner.update(error))
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    /// Current estimated mean.
+    fn estimated_mean(&self) -> f64 {
+        self.inner.estimated_mean()
+    }
+
+    /// Current sample count.
+    fn count(&self) -> u64 {
+        self.inner.count()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PageHinkley(count={}, mean={:.6})",
+            self.inner.count(),
+            self.inner.estimated_mean()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming metrics
+// ---------------------------------------------------------------------------
+
+/// Mean Absolute Error metric.
+///
+/// `update(target, prediction)` adds one sample. `value()` returns the
+/// running MAE.
+#[pyclass(name = "MAE")]
+struct PyMAE {
+    inner: irithyll::MAE,
+}
+
+#[pymethods]
+impl PyMAE {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: irithyll::MAE::new(),
+        }
+    }
+
+    /// Update with a `(target, prediction)` pair.
+    fn update(&mut self, target: f64, prediction: f64) {
+        use irithyll::StreamingMetric;
+        // StreamingMetric::update takes (pred, actual)
+        self.inner.update(prediction, target);
+    }
+
+    /// Current metric value.
+    fn value(&self) -> f64 {
+        use irithyll::StreamingMetric;
+        self.inner.get()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingMetric;
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingMetric;
+        format!("MAE(value={:.6})", self.inner.get())
+    }
+}
+
+/// Mean Squared Error metric.
+#[pyclass(name = "MSE")]
+struct PyMSE {
+    inner: irithyll::MSE,
+}
+
+#[pymethods]
+impl PyMSE {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: irithyll::MSE::new(),
+        }
+    }
+
+    /// Update with a `(target, prediction)` pair.
+    fn update(&mut self, target: f64, prediction: f64) {
+        use irithyll::StreamingMetric;
+        self.inner.update(prediction, target);
+    }
+
+    /// Current metric value.
+    fn value(&self) -> f64 {
+        use irithyll::StreamingMetric;
+        self.inner.get()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingMetric;
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingMetric;
+        format!("MSE(value={:.6})", self.inner.get())
+    }
+}
+
+/// Root Mean Squared Error metric.
+#[pyclass(name = "RMSE")]
+struct PyRMSE {
+    inner: irithyll::RMSE,
+}
+
+#[pymethods]
+impl PyRMSE {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: irithyll::RMSE::new(),
+        }
+    }
+
+    /// Update with a `(target, prediction)` pair.
+    fn update(&mut self, target: f64, prediction: f64) {
+        use irithyll::StreamingMetric;
+        self.inner.update(prediction, target);
+    }
+
+    /// Current metric value.
+    fn value(&self) -> f64 {
+        use irithyll::StreamingMetric;
+        self.inner.get()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingMetric;
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingMetric;
+        format!("RMSE(value={:.6})", self.inner.get())
+    }
+}
+
+/// Binary cross-entropy (log loss) metric.
+///
+/// `update(target, predicted_proba)` where `target ∈ {0, 1}` and
+/// `predicted_proba ∈ [0, 1]`.
+#[pyclass(name = "LogLoss")]
+struct PyLogLoss {
+    inner: irithyll::LogLoss,
+}
+
+#[pymethods]
+impl PyLogLoss {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: irithyll::LogLoss::new(),
+        }
+    }
+
+    /// Update with `(target, predicted_proba)`.
+    fn update(&mut self, target: f64, predicted_proba: f64) {
+        use irithyll::StreamingMetric;
+        self.inner.update(predicted_proba, target);
+    }
+
+    /// Current metric value.
+    fn value(&self) -> f64 {
+        use irithyll::StreamingMetric;
+        self.inner.get()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingMetric;
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingMetric;
+        format!("LogLoss(value={:.6})", self.inner.get())
+    }
+}
+
+/// Classification accuracy metric (fraction correct).
+#[pyclass(name = "Accuracy")]
+struct PyAccuracy {
+    inner: irithyll::Accuracy,
+}
+
+#[pymethods]
+impl PyAccuracy {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: irithyll::Accuracy::new(),
+        }
+    }
+
+    /// Update with `(target, predicted)` class labels.
+    fn update(&mut self, target: f64, predicted: f64) {
+        use irithyll::StreamingMetric;
+        self.inner.update(predicted, target);
+    }
+
+    /// Current accuracy in `[0, 1]`.
+    fn value(&self) -> f64 {
+        use irithyll::StreamingMetric;
+        self.inner.get()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingMetric;
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingMetric;
+        format!("Accuracy(value={:.6})", self.inner.get())
+    }
+}
+
+/// Pinball (quantile) loss metric.
+///
+/// `Pinball(tau=0.5)` is scaled MAE. `tau` is structural — derive it from
+/// the asymmetric cost of over- vs under-prediction.
+#[pyclass(name = "Pinball")]
+struct PyPinball {
+    inner: irithyll::Pinball,
+}
+
+#[pymethods]
+impl PyPinball {
+    /// Create a Pinball metric at quantile level `tau` ∈ (0, 1).
+    #[new]
+    #[pyo3(signature = (tau=0.5))]
+    fn new(tau: f64) -> PyResult<Self> {
+        if tau <= 0.0 || tau >= 1.0 {
+            return Err(PyValueError::new_err(format!(
+                "tau must be in (0, 1), got {tau}"
+            )));
+        }
+        Ok(Self {
+            inner: irithyll::Pinball::new(tau),
+        })
+    }
+
+    /// Update with `(target, prediction)`.
+    fn update(&mut self, target: f64, prediction: f64) {
+        use irithyll::StreamingMetric;
+        self.inner.update(prediction, target);
+    }
+
+    /// Current metric value.
+    fn value(&self) -> f64 {
+        use irithyll::StreamingMetric;
+        self.inner.get()
+    }
+
+    /// The quantile level τ this metric tracks.
+    #[getter]
+    fn tau(&self) -> f64 {
+        self.inner.tau()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingMetric;
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingMetric;
+        format!(
+            "Pinball(tau={}, value={:.6})",
+            self.inner.tau(),
+            self.inner.get()
+        )
+    }
+}
+
+/// Aggregate regression metrics: MAE, MSE, RMSE, R².
+///
+/// Maintains all four with O(1) state via Welford's algorithm for the
+/// target-variance denominator of R².
+///
+/// Example::
+///
+///     metrics = RegressionMetrics()
+///     for y_true, y_pred in stream:
+///         metrics.update(y_true, y_pred)
+///     print(metrics.mae(), metrics.rmse(), metrics.r_squared())
+///
+#[pyclass(name = "RegressionMetrics")]
+struct PyRegressionMetrics {
+    inner: irithyll::RegressionMetrics,
+}
+
+#[pymethods]
+impl PyRegressionMetrics {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: irithyll::RegressionMetrics::new(),
+        }
+    }
+
+    /// Update with a `(target, prediction)` pair.
+    fn update(&mut self, target: f64, prediction: f64) {
+        self.inner.update(target, prediction);
+    }
+
+    /// Mean absolute error.
+    fn mae(&self) -> f64 {
+        self.inner.mae()
+    }
+
+    /// Mean squared error.
+    fn mse(&self) -> f64 {
+        self.inner.mse()
+    }
+
+    /// Root mean squared error.
+    fn rmse(&self) -> f64 {
+        self.inner.rmse()
+    }
+
+    /// Coefficient of determination (R²).
+    fn r_squared(&self) -> f64 {
+        self.inner.r_squared()
+    }
+
+    /// Number of samples observed.
+    #[getter]
+    fn n_samples(&self) -> u64 {
+        self.inner.n_samples()
+    }
+
+    /// Reset to initial empty state.
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "RegressionMetrics(n={}, mae={:.6}, rmse={:.6}, r2={:.6})",
+            self.inner.n_samples(),
+            self.inner.mae(),
+            self.inner.rmse(),
+            self.inner.r_squared()
+        )
+    }
+}
+
+/// Aggregate binary classification metrics: accuracy, precision, recall,
+/// F1, log loss.
+///
+/// Class 1 is treated as the positive class.
+///
+/// Example::
+///
+///     metrics = ClassificationMetrics()
+///     for y_true, y_pred, p_pos in stream:
+///         metrics.update(int(y_true), int(y_pred), p_pos)
+///     print(metrics.accuracy(), metrics.f1())
+///
+#[pyclass(name = "ClassificationMetrics")]
+struct PyClassificationMetrics {
+    inner: irithyll::ClassificationMetrics,
+}
+
+#[pymethods]
+impl PyClassificationMetrics {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: irithyll::ClassificationMetrics::new(),
+        }
+    }
+
+    /// Update with `(target, predicted, predicted_proba)`.
+    ///
+    /// ``target`` and ``predicted`` are class labels (0 or 1).
+    /// ``predicted_proba`` is the model's probability for class 1.
+    fn update(&mut self, target: usize, predicted: usize, predicted_proba: f64) {
+        self.inner.update(target, predicted, predicted_proba);
+    }
+
+    /// Classification accuracy.
+    fn accuracy(&self) -> f64 {
+        self.inner.accuracy()
+    }
+
+    /// Precision: TP / (TP + FP).
+    fn precision(&self) -> f64 {
+        self.inner.precision()
+    }
+
+    /// Recall: TP / (TP + FN).
+    fn recall(&self) -> f64 {
+        self.inner.recall()
+    }
+
+    /// F1-score: harmonic mean of precision and recall.
+    fn f1(&self) -> f64 {
+        self.inner.f1()
+    }
+
+    /// Mean log loss.
+    fn log_loss(&self) -> f64 {
+        self.inner.log_loss()
+    }
+
+    /// Number of samples observed.
+    #[getter]
+    fn n_samples(&self) -> u64 {
+        self.inner.n_samples()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ClassificationMetrics(n={}, acc={:.6}, f1={:.6})",
+            self.inner.n_samples(),
+            self.inner.accuracy(),
+            self.inner.f1()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Preprocessors
+// ---------------------------------------------------------------------------
+
+/// Online z-score normalizer using Welford's algorithm.
+///
+/// Maintains a running mean and variance per feature; transforms inputs
+/// to zero-mean, unit-variance.
+///
+/// Example::
+///
+///     norm = IncrementalNormalizer()
+///     z = norm.update_and_transform([10.0, 200.0])
+///     z2 = norm.transform([10.0, 200.0])  # frozen-stats transform
+///
+#[pyclass(name = "IncrementalNormalizer")]
+struct PyIncrementalNormalizer {
+    inner: irithyll::IncrementalNormalizer,
+}
+
+#[pymethods]
+impl PyIncrementalNormalizer {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: irithyll::IncrementalNormalizer::new(),
+        }
+    }
+
+    /// Update statistics from `features` and return transformed output.
+    fn update_and_transform(&mut self, features: Vec<f64>) -> Vec<f64> {
+        self.inner.update_and_transform(&features)
+    }
+
+    /// Transform without updating statistics.
+    fn transform(&self, features: Vec<f64>) -> Vec<f64> {
+        self.inner.transform(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        "IncrementalNormalizer()".to_string()
+    }
+}
+
+/// Online min-max scaler that maps each feature to `[0, 1]`.
+///
+/// Maintains a running min and max per feature.
+#[pyclass(name = "MinMaxScaler")]
+struct PyMinMaxScaler {
+    inner: irithyll::MinMaxScaler,
+}
+
+#[pymethods]
+impl PyMinMaxScaler {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: irithyll::MinMaxScaler::new(),
+        }
+    }
+
+    /// Update min/max from `features` and return scaled output.
+    fn update_and_transform(&mut self, features: Vec<f64>) -> Vec<f64> {
+        use irithyll::pipeline::StreamingPreprocessor;
+        self.inner.update_and_transform(&features)
+    }
+
+    /// Transform without updating statistics.
+    fn transform(&self, features: Vec<f64>) -> Vec<f64> {
+        use irithyll::pipeline::StreamingPreprocessor;
+        self.inner.transform(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::pipeline::StreamingPreprocessor;
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        "MinMaxScaler()".to_string()
+    }
+}
+
+/// CCIPCA: Candid Covariance-free Incremental PCA.
+///
+/// Streaming dimensionality reduction with O(kd) memory — no covariance
+/// matrix stored. Use as a pipeline preprocessor.
+///
+/// Example::
+///
+///     pca = CCIPCA(n_components=3)
+///     reduced = pca.update_and_transform([1.0, 2.0, 3.0, 4.0, 5.0])
+///     assert len(reduced) == 3
+///
+#[pyclass(name = "CCIPCA")]
+struct PyCCIPCA {
+    inner: irithyll::CCIPCA,
+}
+
+#[pymethods]
+impl PyCCIPCA {
+    /// Create a CCIPCA estimator with the given number of components.
+    #[new]
+    fn new(n_components: usize) -> Self {
+        Self {
+            inner: irithyll::CCIPCA::new(n_components),
+        }
+    }
+
+    /// Update components from `features` and return reduced output.
+    fn update_and_transform(&mut self, features: Vec<f64>) -> Vec<f64> {
+        self.inner.update_and_transform(&features)
+    }
+
+    /// Transform without updating components.
+    fn transform(&self, features: Vec<f64>) -> Vec<f64> {
+        self.inner.transform(&features)
+    }
+
+    /// Number of principal components.
+    #[getter]
+    fn n_components(&self) -> usize {
+        self.inner.n_components()
+    }
+
+    /// Number of samples seen.
+    #[getter]
+    fn count(&self) -> u64 {
+        self.inner.count()
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "CCIPCA(n_components={}, count={})",
+            self.inner.n_components(),
+            self.inner.count()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Factory (AutoML model factory)
+// ---------------------------------------------------------------------------
+
+/// Factory for an AutoTuner. Wraps a configurable model family with its
+/// search space and optional projection.
+///
+/// Static constructors mirror the supported algorithm families. Use
+/// `AutoTunerBuilder` to compose factories into a tournament.
+///
+/// `Factory` is consumable: each builder call returns a fresh `Factory`,
+/// and adding a factory to a tournament moves it into the tuner.
+///
+/// Example::
+///
+///     factory = Factory.sgbt(n_features=8)
+///     factory_neural = Factory.kan(n_features=8).with_projection(d_in=64, rank=8)
+///     tuner = (AutoTunerBuilder()
+///         .add_factory(factory)
+///         .add_factory(factory_neural)
+///         .build())
+///
+#[pyclass(name = "Factory")]
+struct PyFactory {
+    /// Holds the live `Factory` until it's consumed by a builder method or
+    /// added to a tuner. Once consumed, callers see a clear error rather
+    /// than silent re-use.
+    inner: Option<irithyll::automl::Factory>,
+}
+
+impl PyFactory {
+    fn take_inner(&mut self) -> PyResult<irithyll::automl::Factory> {
+        self.inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("Factory has already been consumed"))
+    }
+}
+
+#[pymethods]
+impl PyFactory {
+    /// Streaming gradient boosted trees factory.
+    #[staticmethod]
+    fn sgbt(n_features: usize) -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::sgbt(n_features)),
+        }
+    }
+
+    /// Distributional SGBT (Gaussian output) factory.
+    #[staticmethod]
+    fn distributional(n_features: usize) -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::distributional(n_features)),
+        }
+    }
+
+    /// Selective state space (Mamba) factory.
+    #[staticmethod]
+    fn mamba(d_in: usize) -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::mamba(d_in)),
+        }
+    }
+
+    /// Mamba-3 factory (qk-norm, complex SSM).
+    #[staticmethod]
+    fn mamba3(d_in: usize) -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::mamba3(d_in)),
+        }
+    }
+
+    /// Mamba block-diagonal recurrence factory.
+    #[staticmethod]
+    fn mamba_bd(d_in: usize) -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::mamba_bd(d_in)),
+        }
+    }
+
+    /// Stabilized LSTM (sLSTM) factory.
+    #[staticmethod]
+    fn slstm(n_features: usize) -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::slstm(n_features)),
+        }
+    }
+
+    /// Minimal recurrent gating with delay convolutions (mGRADE) factory.
+    #[staticmethod]
+    fn mgrade(d_in: usize) -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::mgrade(d_in)),
+        }
+    }
+
+    /// Echo State Network factory.
+    #[staticmethod]
+    fn esn() -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::esn()),
+        }
+    }
+
+    /// Kolmogorov-Arnold Network factory.
+    #[staticmethod]
+    fn kan(n_features: usize) -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::kan(n_features)),
+        }
+    }
+
+    /// Test-Time Training factory.
+    #[staticmethod]
+    fn ttt(n_features: usize) -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::ttt(n_features)),
+        }
+    }
+
+    /// Spiking neural network factory.
+    #[staticmethod]
+    fn spike_net() -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::spike_net()),
+        }
+    }
+
+    /// Streaming linear attention factory.
+    #[staticmethod]
+    fn attention(d_model: usize) -> Self {
+        Self {
+            inner: Some(irithyll::automl::Factory::attention(d_model)),
+        }
+    }
+
+    /// Wrap this factory's output in an online projection learner.
+    ///
+    /// The PAST subspace tracker reduces the input from `d_in` to `rank`
+    /// dimensions before the inner model sees it. Consumes self.
+    fn with_projection(&mut self, d_in: usize, rank: usize, lambda: f64) -> PyResult<Self> {
+        let f = self.take_inner()?;
+        Ok(Self {
+            inner: Some(f.with_projection(d_in, rank, lambda)),
+        })
+    }
+
+    /// Override the bounds of a named float hyperparameter. Consumes self.
+    fn with_config_range(&mut self, name: &str, low: f64, high: f64) -> PyResult<Self> {
+        let f = self.take_inner()?;
+        Ok(Self {
+            inner: Some(f.with_config_range(name, low, high)),
+        })
+    }
+
+    /// Override the bounds of a named integer hyperparameter. Consumes self.
+    fn with_config_int_range(&mut self, name: &str, low: i64, high: i64) -> PyResult<Self> {
+        let f = self.take_inner()?;
+        Ok(Self {
+            inner: Some(f.with_config_int_range(name, low, high)),
+        })
+    }
+
+    /// Override the seed. Consumes self.
+    fn with_seed(&mut self, seed: u64) -> PyResult<Self> {
+        let f = self.take_inner()?;
+        Ok(Self {
+            inner: Some(f.with_seed(seed)),
+        })
+    }
+
+    /// Algorithm family name (e.g. "SGBT", "ESN", "KAN").
+    fn name(&self) -> PyResult<String> {
+        use irithyll::automl::ModelFactory;
+        let f = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("Factory has already been consumed"))?;
+        Ok(f.name().to_string())
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::automl::ModelFactory;
+        match self.inner.as_ref() {
+            Some(f) => format!("Factory(name='{}')", f.name()),
+            None => "Factory(<consumed>)".to_string(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AutoTunerBuilder (ergonomic v10 builder)
+// ---------------------------------------------------------------------------
+
+/// Builder for `AutoTuner`. Mirrors the Rust `AutoTuner::builder()` API.
+///
+/// At least one factory must be added before `build()`.
+///
+/// Example::
+///
+///     tuner = (AutoTunerBuilder()
+///         .add_factory(Factory.sgbt(8))
+///         .add_factory(Factory.kan(8))
+///         .n_initial(6)
+///         .round_budget(100)
+///         .use_drift_rerace(True)
+///         .build())
+///
+#[pyclass(name = "AutoTunerBuilder")]
+struct PyAutoTunerBuilder {
+    factories: Vec<irithyll::automl::Factory>,
+    n_initial: usize,
+    round_budget: usize,
+    metric: String,
+    ewma_span: usize,
+    discount: f64,
+    perturb_sigma: f64,
+    seed: u64,
+    use_drift_rerace: bool,
+}
+
+#[pymethods]
+impl PyAutoTunerBuilder {
+    #[new]
+    fn new() -> Self {
+        Self {
+            factories: Vec::new(),
+            n_initial: 8,
+            round_budget: 100,
+            metric: "mae".to_string(),
+            ewma_span: 50,
+            discount: 0.99,
+            perturb_sigma: 0.2,
+            seed: 42,
+            use_drift_rerace: false,
+        }
+    }
+
+    /// Set the model factory (clears existing factories, sets exactly one).
+    /// Consumes the supplied `Factory`.
+    fn factory<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        factory: &Bound<'_, PyFactory>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let mut f = factory.borrow_mut();
+        let inner = f.take_inner()?;
+        slf.factories.clear();
+        slf.factories.push(inner);
+        Ok(slf)
+    }
+
+    /// Add an additional factory for multi-factory racing.
+    /// Consumes the supplied `Factory`.
+    fn add_factory<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        factory: &Bound<'_, PyFactory>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let mut f = factory.borrow_mut();
+        let inner = f.take_inner()?;
+        slf.factories.push(inner);
+        Ok(slf)
+    }
+
+    /// Set the initial candidates per tournament (default: 8).
+    fn n_initial<'py>(mut slf: PyRefMut<'py, Self>, n: usize) -> PyRefMut<'py, Self> {
+        slf.n_initial = n;
+        slf
+    }
+
+    /// Set the samples per elimination round (default: 100).
+    fn round_budget<'py>(mut slf: PyRefMut<'py, Self>, b: usize) -> PyRefMut<'py, Self> {
+        slf.round_budget = b;
+        slf
+    }
+
+    /// Set the metric to optimize. One of "mae", "mse", "rmse" (default: "mae").
+    fn metric<'py>(mut slf: PyRefMut<'py, Self>, m: String) -> PyRefMut<'py, Self> {
+        slf.metric = m;
+        slf
+    }
+
+    /// Set the EWMA span for metric tracking (default: 50).
+    fn ewma_span<'py>(mut slf: PyRefMut<'py, Self>, s: usize) -> PyRefMut<'py, Self> {
+        slf.ewma_span = s;
+        slf
+    }
+
+    /// Set the bandit discount factor (default: 0.99).
+    fn discount<'py>(mut slf: PyRefMut<'py, Self>, d: f64) -> PyRefMut<'py, Self> {
+        slf.discount = d;
+        slf
+    }
+
+    /// Set the warm-start perturbation strength (default: 0.2).
+    fn perturb_sigma<'py>(mut slf: PyRefMut<'py, Self>, s: f64) -> PyRefMut<'py, Self> {
+        slf.perturb_sigma = s;
+        slf
+    }
+
+    /// Set the RNG seed (default: 42).
+    fn seed<'py>(mut slf: PyRefMut<'py, Self>, s: u64) -> PyRefMut<'py, Self> {
+        slf.seed = s;
+        slf
+    }
+
+    /// Enable drift-triggered re-racing (default: False).
+    ///
+    /// When enabled, an ADWIN detector monitors the champion's prediction
+    /// error; on drift, the tournament is aborted and a new bracket starts.
+    fn use_drift_rerace<'py>(mut slf: PyRefMut<'py, Self>, enabled: bool) -> PyRefMut<'py, Self> {
+        slf.use_drift_rerace = enabled;
+        slf
+    }
+
+    /// Build the `AutoTuner`. Consumes accumulated factories.
+    fn build(&mut self) -> PyResult<PyAutoTuner> {
+        if self.factories.is_empty() {
+            return Err(PyValueError::new_err(
+                "AutoTunerBuilder.build(): at least one factory is required",
+            ));
+        }
+        let metric = match self.metric.to_lowercase().as_str() {
+            "mae" => irithyll::automl::AutoMetric::MAE,
+            "mse" => irithyll::automl::AutoMetric::MSE,
+            "rmse" => irithyll::automl::AutoMetric::RMSE,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "metric must be 'mae', 'mse', or 'rmse', got '{other}'"
+                )));
+            }
+        };
+        let factories = std::mem::take(&mut self.factories);
+        let mut iter = factories.into_iter();
+        let first = iter
+            .next()
+            .ok_or_else(|| PyValueError::new_err("at least one factory is required"))?;
+        let mut builder = irithyll::automl::AutoTuner::builder().factory(first);
+        for f in iter {
+            builder = builder.add_factory(f);
+        }
+        let tuner = builder
+            .n_initial(self.n_initial)
+            .round_budget(self.round_budget)
+            .metric(metric)
+            .ewma_span(self.ewma_span)
+            .discount(self.discount)
+            .perturb_sigma(self.perturb_sigma)
+            .seed(self.seed)
+            .use_drift_rerace(self.use_drift_rerace)
+            .build()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok(PyAutoTuner { inner: tuner })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AutoTunerBuilder(n_factories={}, n_initial={}, round_budget={}, metric='{}')",
+            self.factories.len(),
+            self.n_initial,
+            self.round_budget,
+            self.metric
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline / PipelineBuilder
+// ---------------------------------------------------------------------------
+
+/// Adapter that lets a `Box<dyn StreamingPreprocessor>` itself implement
+/// `StreamingPreprocessor` so it can be threaded into `PipelineBuilder::pipe`.
+struct BoxedPreprocessor(Box<dyn irithyll::StreamingPreprocessor>);
+
+impl irithyll::StreamingPreprocessor for BoxedPreprocessor {
+    fn update_and_transform(&mut self, features: &[f64]) -> Vec<f64> {
+        self.0.update_and_transform(features)
+    }
+
+    fn transform(&self, features: &[f64]) -> Vec<f64> {
+        self.0.transform(features)
+    }
+
+    fn output_dim(&self) -> Option<usize> {
+        self.0.output_dim()
+    }
+
+    fn reset(&mut self) {
+        self.0.reset();
+    }
+}
+
+/// Boxed preprocessor that can be added to a `PipelineBuilder`.
+///
+/// Construct via `Pipeline.normalizer()`, `Pipeline.min_max()`, or
+/// `Pipeline.ccipca(n)`.
+#[pyclass(name = "Preprocessor")]
+struct PyPreprocessor {
+    inner: Option<Box<dyn irithyll::StreamingPreprocessor>>,
+}
+
+#[pymethods]
+impl PyPreprocessor {
+    fn __repr__(&self) -> String {
+        if self.inner.is_some() {
+            "Preprocessor(<live>)".to_string()
+        } else {
+            "Preprocessor(<consumed>)".to_string()
+        }
+    }
+}
+
+/// Boxed terminal learner suitable for use in a `PipelineBuilder`.
+///
+/// Construct via `Pipeline.linear(lr)`, `Pipeline.rls(forgetting_factor)`,
+/// or `Pipeline.sgbt(n_steps, learning_rate)`.
+#[pyclass(name = "PipelineLearner")]
+struct PyPipelineLearner {
+    inner: Option<Box<dyn irithyll::StreamingLearner>>,
+}
+
+#[pymethods]
+impl PyPipelineLearner {
+    fn __repr__(&self) -> String {
+        if self.inner.is_some() {
+            "PipelineLearner(<live>)".to_string()
+        } else {
+            "PipelineLearner(<consumed>)".to_string()
+        }
+    }
+}
+
+/// Builder for `Pipeline`. Chain preprocessors with `pipe()`, terminate
+/// with `learner()`.
+///
+/// Example::
+///
+///     model = (PipelineBuilder()
+///         .pipe(Pipeline.normalizer())
+///         .pipe(Pipeline.ccipca(3))
+///         .learner(Pipeline.rls(0.99)))
+///
+#[pyclass(name = "PipelineBuilder")]
+struct PyPipelineBuilder {
+    preprocessors: Vec<Box<dyn irithyll::StreamingPreprocessor>>,
+}
+
+#[pymethods]
+impl PyPipelineBuilder {
+    #[new]
+    fn new() -> Self {
+        Self {
+            preprocessors: Vec::new(),
+        }
+    }
+
+    /// Append a preprocessor step. Consumes the supplied `Preprocessor`.
+    fn pipe<'py>(
+        mut slf: PyRefMut<'py, Self>,
+        p: &Bound<'_, PyPreprocessor>,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        let mut p_mut = p.borrow_mut();
+        let inner = p_mut.inner.take().ok_or_else(|| {
+            PyValueError::new_err("Preprocessor already consumed by another pipeline")
+        })?;
+        slf.preprocessors.push(inner);
+        Ok(slf)
+    }
+
+    /// Terminate the pipeline with a learner.
+    fn learner(&mut self, learner: &Bound<'_, PyPipelineLearner>) -> PyResult<PyPipeline> {
+        let mut learner_mut = learner.borrow_mut();
+        let inner = learner_mut
+            .inner
+            .take()
+            .ok_or_else(|| PyValueError::new_err("PipelineLearner already consumed"))?;
+        let preprocessors = std::mem::take(&mut self.preprocessors);
+        let mut builder = irithyll::Pipeline::builder();
+        for p in preprocessors {
+            builder = builder.pipe(BoxedPreprocessor(p));
+        }
+        let pipeline = builder.learner_boxed(inner);
+        Ok(PyPipeline { inner: pipeline })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "PipelineBuilder(n_preprocessors={})",
+            self.preprocessors.len()
+        )
+    }
+}
+
+/// Streaming preprocessor → learner pipeline.
+///
+/// During `train`, preprocessors update statistics and transform features
+/// in order, then the learner trains on the final transformed features.
+/// During `predict`, preprocessors only transform (no update).
+///
+/// Use `PipelineBuilder` to construct.
+#[pyclass(name = "Pipeline")]
+struct PyPipeline {
+    inner: irithyll::Pipeline,
+}
+
+#[pymethods]
+impl PyPipeline {
+    /// Train on a single sample.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict from a feature vector.
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Reset all preprocessors and the learner.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Number of preprocessor steps.
+    #[getter]
+    fn n_preprocessors(&self) -> usize {
+        self.inner.n_preprocessors()
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    // -- Static constructors for common preprocessors / learners --
+
+    /// Create a normalizer preprocessor.
+    #[staticmethod]
+    fn normalizer() -> PyPreprocessor {
+        PyPreprocessor {
+            inner: Some(Box::new(irithyll::IncrementalNormalizer::new())),
+        }
+    }
+
+    /// Create a min-max preprocessor.
+    #[staticmethod]
+    fn min_max() -> PyPreprocessor {
+        PyPreprocessor {
+            inner: Some(Box::new(irithyll::MinMaxScaler::new())),
+        }
+    }
+
+    /// Create a streaming PCA preprocessor.
+    #[staticmethod]
+    fn ccipca(n_components: usize) -> PyPreprocessor {
+        PyPreprocessor {
+            inner: Some(Box::new(irithyll::CCIPCA::new(n_components))),
+        }
+    }
+
+    /// Create a linear-regression terminal learner.
+    #[staticmethod]
+    fn linear(learning_rate: f64) -> PyPipelineLearner {
+        PyPipelineLearner {
+            inner: Some(Box::new(irithyll::linear(learning_rate))),
+        }
+    }
+
+    /// Create an RLS terminal learner.
+    #[staticmethod]
+    fn rls(forgetting_factor: f64) -> PyPipelineLearner {
+        PyPipelineLearner {
+            inner: Some(Box::new(irithyll::rls(forgetting_factor))),
+        }
+    }
+
+    /// Create an SGBT terminal learner.
+    #[staticmethod]
+    fn sgbt(n_steps: usize, learning_rate: f64) -> PyPipelineLearner {
+        PyPipelineLearner {
+            inner: Some(Box::new(irithyll::sgbt(n_steps, learning_rate))),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!(
+            "Pipeline(n_preprocessors={}, samples={})",
+            self.inner.n_preprocessors(),
+            self.inner.n_samples_seen()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Classifier wrappers
+// ---------------------------------------------------------------------------
+
+/// Wrap any streaming regressor with a binary-classifier head.
+///
+/// Targets are mapped {0, 1} → bipolar {-1, +1} during training. At
+/// prediction time, the raw output is thresholded at 0.0 (returns 0 or 1).
+/// `predict_proba` returns `[P(0), P(1)]` via sigmoid.
+///
+/// The inner model can be any algorithm: pass an instance of e.g.
+/// `EchoStateNetwork`, `StreamingMamba`, or `StreamingKAN`.
+///
+/// Example::
+///
+///     base = EchoStateNetwork(n_reservoir=64)
+///     clf = BinaryClassifier(base)
+///     clf.train([1.0, 2.0], 1.0)
+///     pred = clf.predict([1.0, 2.0])
+///
+#[pyclass(name = "BinaryClassifier")]
+struct PyBinaryClassifier {
+    inner: irithyll::ClassificationWrapper,
+}
+
+/// Helper: build a binary `ClassificationWrapper` from a model factory chosen
+/// by a string identifier. Used by both `BinaryClassifier::new` and
+/// `MulticlassClassifier::new`.
+fn make_inner_learner(
+    model_type: &str,
+    n_features: usize,
+) -> PyResult<Box<dyn irithyll::StreamingLearner>> {
+    match model_type {
+        "linear" => Ok(Box::new(irithyll::linear(0.01))),
+        "rls" => Ok(Box::new(irithyll::rls(0.99))),
+        "sgbt" => Ok(Box::new(irithyll::sgbt(50, 0.01))),
+        "esn" => Ok(Box::new(irithyll::esn(50, 0.9))),
+        "mamba" => Ok(Box::new(irithyll::mamba(n_features.max(1), 16))),
+        "kan" => Ok(Box::new(irithyll::streaming_kan(
+            &[n_features.max(1), (n_features.max(1)).max(4) * 2, 1],
+            0.01,
+        ))),
+        "ttt" => Ok(Box::new(irithyll::streaming_ttt(n_features.max(1), 0.1))),
+        other => Err(PyValueError::new_err(format!(
+            "Unknown model_type '{other}'. Use one of: linear, rls, sgbt, esn, mamba, kan, ttt"
+        ))),
+    }
+}
+
+#[pymethods]
+impl PyBinaryClassifier {
+    /// Wrap a regressor by name.
+    ///
+    /// Args:
+    ///     model_type: one of "linear", "rls", "sgbt", "esn", "mamba",
+    ///         "kan", "ttt"
+    ///     n_features: input dimensionality (used by "mamba", "kan", "ttt")
+    #[new]
+    #[pyo3(signature = (model_type="rls", n_features=8))]
+    fn new(model_type: &str, n_features: usize) -> PyResult<Self> {
+        let inner = make_inner_learner(model_type, n_features)?;
+        Ok(Self {
+            inner: irithyll::ClassificationWrapper::binary(inner),
+        })
+    }
+
+    /// Train on a single sample. ``target`` should be 0.0 or 1.0.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict the class label (0.0 or 1.0).
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Predict probabilities `[P(0), P(1)]`.
+    fn predict_proba(&self, features: Vec<f64>) -> Vec<f64> {
+        self.inner.predict_proba(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!("BinaryClassifier(samples={})", self.inner.n_samples_seen())
+    }
+}
+
+/// Wrap any streaming regressor with a K-class softmax classifier.
+///
+/// Maintains K independent scalar heads (the wrapped model as head 0, plus
+/// K−1 additional RLS heads). Predictions are softmax over all heads;
+/// `predict` returns the argmax class index.
+///
+/// Example::
+///
+///     clf = MulticlassClassifier("rls", n_classes=3, n_features=4)
+///     clf.train([1.0, 2.0, 3.0, 4.0], 2.0)
+///     pred = clf.predict([1.0, 2.0, 3.0, 4.0])
+///     proba = clf.predict_proba([1.0, 2.0, 3.0, 4.0])
+///
+#[pyclass(name = "MulticlassClassifier")]
+struct PyMulticlassClassifier {
+    inner: irithyll::ClassificationWrapper,
+}
+
+#[pymethods]
+impl PyMulticlassClassifier {
+    /// Args:
+    ///     model_type: one of "linear", "rls", "sgbt", "esn", "mamba",
+    ///         "kan", "ttt"
+    ///     n_classes: number of classes (must be >= 2)
+    ///     n_features: input dimensionality (used by "mamba", "kan", "ttt")
+    #[new]
+    #[pyo3(signature = (model_type="rls", n_classes=3, n_features=8))]
+    fn new(model_type: &str, n_classes: usize, n_features: usize) -> PyResult<Self> {
+        if n_classes < 2 {
+            return Err(PyValueError::new_err(format!(
+                "n_classes must be >= 2, got {n_classes}"
+            )));
+        }
+        let inner = make_inner_learner(model_type, n_features)?;
+        Ok(Self {
+            inner: irithyll::ClassificationWrapper::multiclass(inner, n_classes),
+        })
+    }
+
+    /// Train on a single sample. ``target`` should be a class index in
+    /// `[0, n_classes)`.
+    fn train(&mut self, features: Vec<f64>, target: f64) {
+        use irithyll::StreamingLearner;
+        self.inner.train(&features, target);
+    }
+
+    /// Predict the argmax class index (as f64).
+    fn predict(&self, features: Vec<f64>) -> f64 {
+        use irithyll::StreamingLearner;
+        self.inner.predict(&features)
+    }
+
+    /// Predict softmax-normalized probabilities (length `n_classes`).
+    fn predict_proba(&self, features: Vec<f64>) -> Vec<f64> {
+        self.inner.predict_proba(&features)
+    }
+
+    /// Reset to initial state.
+    fn reset(&mut self) {
+        use irithyll::StreamingLearner;
+        self.inner.reset();
+    }
+
+    /// Total samples trained.
+    #[getter]
+    fn n_samples_seen(&self) -> u64 {
+        use irithyll::StreamingLearner;
+        self.inner.n_samples_seen()
+    }
+
+    fn __repr__(&self) -> String {
+        use irithyll::StreamingLearner;
+        format!(
+            "MulticlassClassifier(samples={})",
+            self.inner.n_samples_seen()
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Module
 // ---------------------------------------------------------------------------
 
-/// Irithyll: Streaming Gradient Boosted Trees for Python.
+/// Irithyll: streaming machine learning for Python.
 #[pymodule]
 fn irithyll_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Trees + GBT family
     m.add_class::<PyConfig>()?;
     m.add_class::<PyModel>()?;
     m.add_class::<PyShapExplanation>()?;
     m.add_class::<PyMultiTarget>()?;
     m.add_class::<PyDistributional>()?;
     m.add_class::<PyClassifier>()?;
+
+    // Evaluation
     m.add_class::<PyEvaluator>()?;
+
+    // Reservoir / SSM / Neural
     m.add_class::<PyNextGenRC>()?;
     m.add_class::<PyEchoStateNetwork>()?;
     m.add_class::<PyStreamingMamba>()?;
+    m.add_class::<PyStreamingMamba3>()?;
     m.add_class::<PySpikeNet>()?;
     m.add_class::<PyGLA>()?;
-    m.add_class::<PyContinualLearner>()?;
-    m.add_class::<PyConformalPID>()?;
     m.add_class::<PyStreamingTTT>()?;
     m.add_class::<PyStreamingKAN>()?;
     m.add_class::<PyNeuralMoE>()?;
+    m.add_class::<PySLSTM>()?;
+    m.add_class::<PyStreamingAttention>()?;
+    m.add_class::<PyLogLinearAttention>()?;
+
+    // Wrappers
+    m.add_class::<PyContinualLearner>()?;
+    m.add_class::<PyConformalPID>()?;
     m.add_class::<PyProjectionConfig>()?;
     m.add_class::<PyProjectedLearner>()?;
+    m.add_class::<PyBinaryClassifier>()?;
+    m.add_class::<PyMulticlassClassifier>()?;
+
+    // AutoML
     m.add_class::<PyAutoTuner>()?;
-    m.add_class::<PySLSTM>()?;
+    m.add_class::<PyAutoTunerBuilder>()?;
+    m.add_class::<PyFactory>()?;
+
+    // Drift
+    m.add_class::<PyAdwin>()?;
+    m.add_class::<PyDDM>()?;
+    m.add_class::<PyPageHinkley>()?;
+
+    // Metrics
+    m.add_class::<PyMAE>()?;
+    m.add_class::<PyMSE>()?;
+    m.add_class::<PyRMSE>()?;
+    m.add_class::<PyLogLoss>()?;
+    m.add_class::<PyAccuracy>()?;
+    m.add_class::<PyPinball>()?;
+    m.add_class::<PyRegressionMetrics>()?;
+    m.add_class::<PyClassificationMetrics>()?;
+
+    // Preprocessing / Pipeline
+    m.add_class::<PyIncrementalNormalizer>()?;
+    m.add_class::<PyMinMaxScaler>()?;
+    m.add_class::<PyCCIPCA>()?;
+    m.add_class::<PyPreprocessor>()?;
+    m.add_class::<PyPipelineLearner>()?;
+    m.add_class::<PyPipelineBuilder>()?;
+    m.add_class::<PyPipeline>()?;
+
+    // Quantization
     m.add_class::<PyTurboQuant>()?;
-    m.add_class::<PyStreamingAttention>()?;
     Ok(())
 }

@@ -37,6 +37,7 @@ pub mod normalizer;
 pub mod one_hot;
 pub mod polynomial;
 pub mod target_encoder;
+pub mod target_preprocessor;
 
 pub use ccipca::CCIPCA;
 pub use feature_hasher::FeatureHasher;
@@ -46,6 +47,9 @@ pub use normalizer::IncrementalNormalizer;
 pub use one_hot::OneHotEncoder;
 pub use polynomial::PolynomialFeatures;
 pub use target_encoder::TargetEncoder;
+pub use target_preprocessor::{
+    StreamingTargetPreprocessor, TargetEncoderPreprocessor, TargetLog1pTransform, TargetScaler,
+};
 
 // Re-export the StreamingPreprocessor trait (defined in pipeline module).
 pub use crate::pipeline::StreamingPreprocessor;

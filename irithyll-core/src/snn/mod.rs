@@ -41,6 +41,6 @@ pub use eprop::{
     update_pre_trace_fixed, update_weights_fixed,
 };
 pub use lif::{lif_step, surrogate_gradient_pwl, Q14_HALF, Q14_ONE};
-pub use network_fixed::SpikeNetFixed;
+pub use network_fixed::{Precision, SpikeNetFixed};
 pub use readout::ReadoutNeuron;
 pub use spike_encoding::DeltaEncoderFixed;

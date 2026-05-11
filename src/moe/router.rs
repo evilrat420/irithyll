@@ -37,6 +37,7 @@ pub(crate) struct LinearRouter {
     load_balance_rate: f64, // Rate of load bias adjustment
     load_alpha: f64,        // EWMA decay factor for load tracking
     k_experts: usize,       // Total number of routed experts
+    seed: u64,              // RNG seed for reproducible initialization
     initialized: bool,      // Whether weights have been lazily initialized
 }
 
@@ -44,7 +45,14 @@ impl LinearRouter {
     /// Create a new router for `k_experts` experts.
     ///
     /// Weights are lazily initialized on first use (when input dimension is known).
-    pub fn new(k_experts: usize, lr: f64, load_balance_rate: f64, utilization_span: usize) -> Self {
+    /// The seed determines the initial weight distribution.
+    pub fn new(
+        k_experts: usize,
+        lr: f64,
+        load_balance_rate: f64,
+        utilization_span: usize,
+        seed: u64,
+    ) -> Self {
         let load_alpha = 2.0 / (utilization_span as f64 + 1.0);
         Self {
             weights: Vec::new(),
@@ -55,14 +63,33 @@ impl LinearRouter {
             load_balance_rate,
             load_alpha,
             k_experts,
+            seed,
             initialized: false,
         }
     }
 
-    /// Lazily initialize weights to zeros when input dimension is first known.
+    /// Lazily initialize weights using seed-based deterministic pseudo-RNG when input dimension is first known.
     fn ensure_init(&mut self, d: usize) {
         if !self.initialized {
-            self.weights = vec![vec![0.0; d]; self.k_experts];
+            // Deterministic pseudo-RNG: xor-shift based on seed
+            self.weights = (0..self.k_experts)
+                .map(|k| {
+                    (0..d)
+                        .map(|j| {
+                            // Mix seed, expert index, and feature index to produce reproducible but different values
+                            let mut state = self.seed ^ ((k as u64) << 32) ^ (j as u64);
+                            // XOR-shift to get a value in [0, 1)
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            let u = (state as f64) / (u64::MAX as f64);
+                            // Box-Muller-ish: scale to roughly [-1, 1] range for initial weight
+                            // Divide by sqrt(d) for Xavier-style initialization
+                            (u - 0.5) * 2.0 / (d as f64).sqrt()
+                        })
+                        .collect()
+                })
+                .collect();
             self.initialized = true;
         }
     }
@@ -309,7 +336,7 @@ mod tests {
 
     #[test]
     fn router_uniform_before_init() {
-        let router = LinearRouter::new(4, 0.01, 0.001, 100);
+        let router = LinearRouter::new(4, 0.01, 0.001, 100, 42);
         let features = vec![1.0, 2.0, 3.0];
         let probs = router.probabilities(&features);
         let expected = 0.25;
@@ -326,7 +353,7 @@ mod tests {
 
     #[test]
     fn router_select_top_k() {
-        let mut router = LinearRouter::new(4, 0.1, 0.0, 100);
+        let mut router = LinearRouter::new(4, 0.1, 0.0, 100, 42);
         let features = vec![1.0, 0.5];
         // Train repeatedly to favor expert 2
         for _ in 0..100 {
@@ -347,7 +374,7 @@ mod tests {
 
     #[test]
     fn router_select_top_k_exceeds_n() {
-        let router = LinearRouter::new(3, 0.01, 0.0, 100);
+        let router = LinearRouter::new(3, 0.01, 0.0, 100, 42);
         let features = vec![1.0];
         let top = router.select_top_k(&features, 10);
         assert_eq!(
@@ -360,7 +387,7 @@ mod tests {
 
     #[test]
     fn router_update_shifts_distribution() {
-        let mut router = LinearRouter::new(3, 0.1, 0.0, 100);
+        let mut router = LinearRouter::new(3, 0.1, 0.0, 100, 42);
         let features = vec![1.0, -0.5, 2.0];
         // Train heavily toward expert 0
         for _ in 0..200 {
@@ -383,7 +410,7 @@ mod tests {
 
     #[test]
     fn router_renormalized_weights_sum_to_one() {
-        let mut router = LinearRouter::new(5, 0.05, 0.0, 100);
+        let mut router = LinearRouter::new(5, 0.05, 0.0, 100, 42);
         let features = vec![0.3, 1.0, -0.7];
         // Do some training to create non-uniform distribution
         for _ in 0..50 {
@@ -417,7 +444,7 @@ mod tests {
 
     #[test]
     fn router_load_balance_corrects_imbalance() {
-        let mut router = LinearRouter::new(4, 0.01, 0.1, 20);
+        let mut router = LinearRouter::new(4, 0.01, 0.1, 20, 42);
         let features = vec![1.0];
         // Initialize weights so logits reflect biases
         router.update(&features, 0);
@@ -462,7 +489,7 @@ mod tests {
 
     #[test]
     fn router_reset_clears_state() {
-        let mut router = LinearRouter::new(3, 0.1, 0.01, 50);
+        let mut router = LinearRouter::new(3, 0.1, 0.01, 50, 42);
         let features = vec![1.0, 2.0];
         // Train to create non-trivial state
         for _ in 0..100 {

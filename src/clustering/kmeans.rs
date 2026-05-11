@@ -58,14 +58,16 @@ impl StreamingKMeansConfigBuilder {
     /// Validate and build the configuration.
     ///
     /// Returns an error if `k < 1` or `forgetting_factor` is outside (0, 1].
-    pub fn build(self) -> Result<StreamingKMeansConfig, String> {
+    pub fn build(self) -> Result<StreamingKMeansConfig, irithyll_core::error::ConfigError> {
+        use irithyll_core::error::ConfigError;
         if self.k < 1 {
-            return Err("k must be >= 1".to_string());
+            return Err(ConfigError::out_of_range("k", "must be >= 1", self.k));
         }
         if self.forgetting_factor <= 0.0 || self.forgetting_factor > 1.0 {
-            return Err(format!(
-                "forgetting_factor must be in (0, 1], got {}",
-                self.forgetting_factor
+            return Err(ConfigError::out_of_range(
+                "forgetting_factor",
+                "must be in (0, 1]",
+                self.forgetting_factor,
             ));
         }
         Ok(StreamingKMeansConfig {
@@ -592,10 +594,15 @@ mod tests {
 
     #[test]
     fn config_builder_validates() {
+        use irithyll_core::error::ConfigError;
+
         // k = 0 should fail.
         let result = StreamingKMeansConfig::builder(0).build();
         assert!(result.is_err(), "k=0 should fail validation");
-        assert!(result.unwrap_err().contains("k must be >= 1"));
+        assert!(
+            matches!(&result.unwrap_err(), ConfigError::OutOfRange { param, .. } if *param == "k"),
+            "expected OutOfRange for k"
+        );
 
         // forgetting_factor = 0.0 should fail.
         let result = StreamingKMeansConfig::builder(3)

@@ -38,8 +38,8 @@ pub struct EvalArgs {
     #[arg(long)]
     pub max_depth: Option<usize>,
 
-    /// Model type: sgbt (default), distributional, multiclass, bagged, ngrc, esn, mamba, spikenet, gla, deltanet, hawk, retnet, ttt, kan, factory
-    #[arg(long, default_value = "sgbt")]
+    /// Model type. See `train --help` for the full list.
+    #[arg(long, default_value = "sgbt", value_name = "TYPE")]
     pub model_type: String,
 
     /// Number of classes (required for softmax loss and multiclass model type)
@@ -50,12 +50,27 @@ pub struct EvalArgs {
     #[arg(long, default_value = "1000")]
     pub window: usize,
 
-    /// Comma-separated list of factories to race (default: sgbt,esn,mamba).
-    /// Available: sgbt, esn, mamba, mamba3, ttt, kan, spikenet, attention, distributional
-    #[arg(long, default_value = "sgbt,esn,mamba")]
+    /// Wrap the chosen model in an AutoTuner; equivalent to --model-type factory --factories <type>
+    #[arg(long)]
+    pub auto_tune: bool,
+
+    /// Comma-separated list of factories to race when --model-type=factory
+    #[arg(long, default_value = "sgbt,esn,mamba", value_name = "LIST")]
     pub factories: String,
 
-    /// Launch TUI dashboard
+    /// Initial candidates per AutoTuner tournament
+    #[arg(long, value_name = "N")]
+    pub n_initial: Option<usize>,
+
+    /// Maximum bracket size for adaptive AutoTuner tournaments
+    #[arg(long, value_name = "N")]
+    pub max_n_initial: Option<usize>,
+
+    /// Enable drift-triggered re-racing in AutoTuner
+    #[arg(long)]
+    pub use_drift_rerace: bool,
+
+    /// Launch the TUI dashboard
     #[arg(long)]
     #[cfg(feature = "tui")]
     pub tui: bool,
@@ -82,6 +97,39 @@ pub fn run(args: EvalArgs) -> Result<()> {
     let model_type = ModelType::from_str(&args.model_type)?;
     let dataset = Dataset::from_csv(Path::new(&args.data), args.target.as_deref())?;
 
+    // --auto-tune shortcut: wrap the chosen model in AutoTuner racing.
+    if args.auto_tune && !matches!(model_type, ModelType::Factory) {
+        let seed_factory = super::train::factory_key_for_model_pub(&model_type)?;
+        return run_neural_eval_factory_with_keys(&args, &dataset, &[seed_factory]);
+    }
+
+    // --tui dispatch for any supported family. Multi-family routing matches
+    // `train --tui` so users can flip between train/eval with the same
+    // dashboard and same model selection rules.
+    #[cfg(feature = "tui")]
+    if args.tui {
+        let family = match model_type {
+            ModelType::Sgbt => Some(crate::tui::ModelFamily::Sgbt),
+            ModelType::Mamba => Some(crate::tui::ModelFamily::Mamba),
+            ModelType::Ttt => Some(crate::tui::ModelFamily::Ttt),
+            ModelType::Kan => Some(crate::tui::ModelFamily::Kan),
+            ModelType::Esn => Some(crate::tui::ModelFamily::Esn),
+            ModelType::Ngrc => Some(crate::tui::ModelFamily::Ngrc),
+            ModelType::SpikeNet => Some(crate::tui::ModelFamily::SpikeNet),
+            _ => None,
+        };
+        if let Some(family) = family {
+            let model = crate::tui::DemoModel::build_for_dataset(family, dataset.n_features);
+            let label = crate::tui::label_from_csv_path(&args.data);
+            return crate::tui::run_eval_with_dataset(model, dataset, label);
+        } else {
+            return Err(eyre!(
+                "--tui not yet supported for --model-type {}. Supported: sgbt, mamba, ttt, kan, esn, ngrc, spike-net",
+                args.model_type
+            ));
+        }
+    }
+
     // Route neural models through the neural eval path
     match model_type {
         ModelType::Sgbt | ModelType::Distributional | ModelType::Multiclass | ModelType::Bagged => {
@@ -92,21 +140,24 @@ pub fn run(args: EvalArgs) -> Result<()> {
                 .build()?;
             let mut model = DynSGBT::with_loss(sgbt_config, loss_type.into_loss());
 
-            #[cfg(feature = "tui")]
-            if args.tui {
-                return run_eval_tui(model, dataset);
-            }
-
             run_eval_headless(&mut model, &dataset)
         }
         ModelType::Ngrc => run_neural_eval_ngrc(&cli_config, &dataset),
         ModelType::Esn => run_neural_eval_esn(&cli_config, &dataset),
         ModelType::Mamba => run_neural_eval_mamba(&cli_config, &dataset),
+        ModelType::Mamba3 => run_neural_eval_mamba3(&cli_config, &dataset),
+        ModelType::MambaBd => run_neural_eval_mamba_bd(&cli_config, &dataset),
+        ModelType::Slstm => run_neural_eval_slstm(&dataset),
+        ModelType::Mgrade => run_neural_eval_mgrade(&dataset),
         ModelType::SpikeNet => run_neural_eval_spikenet(&cli_config, &dataset),
         ModelType::Gla => run_neural_eval_gla(&cli_config, &dataset),
         ModelType::DeltaNet => run_neural_eval_deltanet(&cli_config, &dataset),
+        ModelType::DeltaProduct => run_neural_eval_delta_product(&dataset),
+        ModelType::Rwkv7 => run_neural_eval_rwkv7(&dataset),
+        ModelType::Hgrn2 => run_neural_eval_hgrn2(&dataset),
         ModelType::Hawk => run_neural_eval_hawk(&cli_config, &dataset),
         ModelType::RetNet => run_neural_eval_retnet(&cli_config, &dataset),
+        ModelType::LogLinear => run_neural_eval_log_linear(&dataset),
         ModelType::Ttt => run_neural_eval_ttt(&cli_config, &dataset),
         ModelType::Kan => run_neural_eval_kan(&cli_config, &dataset),
         ModelType::Factory => run_neural_eval_factory(&args, &dataset),
@@ -182,114 +233,6 @@ fn run_eval_headless(model: &mut DynSGBT, dataset: &Dataset) -> Result<()> {
     println!("  Leaves: {}", model.total_leaves());
 
     Ok(())
-}
-
-#[cfg(feature = "tui")]
-fn run_eval_tui(mut model: DynSGBT, dataset: Dataset) -> Result<()> {
-    use crate::tui::{AppState, SharedState};
-    use std::sync::{Arc, Mutex};
-
-    let state: SharedState = Arc::new(Mutex::new(AppState::new(dataset.n_samples as u64)));
-    let tui_state = state.clone();
-
-    let rt = tokio::runtime::Runtime::new()?;
-
-    rt.block_on(async {
-        let train_state = state.clone();
-        let train_handle = tokio::task::spawn_blocking(move || {
-            let start = Instant::now();
-            let update_interval = (dataset.n_samples / 200).max(1);
-
-            let mut reg_metrics = RegressionMetrics::new();
-            let mut n_correct: u64 = 0;
-            let mut n_total: u64 = 0;
-
-            for i in 0..dataset.n_samples {
-                let features = &dataset.features[i];
-                let target = dataset.targets[i];
-
-                let raw_pred = model.predict(features);
-                let pred = model.loss().predict_transform(raw_pred);
-                let loss_val = model.loss().loss(target, pred);
-
-                reg_metrics.update(target, pred);
-                let pred_class = pred.round() as usize;
-                let target_class = target.round() as usize;
-                if pred_class == target_class {
-                    n_correct += 1;
-                }
-                n_total += 1;
-
-                let sample = Sample::new(features.clone(), target);
-                model.train_one(&sample);
-
-                if i % update_interval == 0 || i == dataset.n_samples - 1 {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let throughput = if elapsed > 0.0 {
-                        (i + 1) as f64 / elapsed
-                    } else {
-                        0.0
-                    };
-                    let accuracy = if n_total > 0 {
-                        n_correct as f64 / n_total as f64
-                    } else {
-                        0.0
-                    };
-
-                    let mut s = train_state.lock().unwrap();
-                    s.n_samples = (i + 1) as u64;
-                    s.elapsed_secs = elapsed;
-                    s.throughput = throughput;
-                    s.loss_history.push(loss_val);
-                    s.accuracy_history.push(accuracy);
-                    s.metrics = vec![
-                        ("Accuracy".to_string(), accuracy),
-                        ("RMSE".to_string(), reg_metrics.rmse()),
-                        ("MAE".to_string(), reg_metrics.mae()),
-                        ("Throughput".to_string(), throughput),
-                    ];
-                    s.status_message = format!("Evaluating... {:.0} s/s", throughput);
-                }
-            }
-
-            let elapsed = start.elapsed();
-            let accuracy = if n_total > 0 {
-                n_correct as f64 / n_total as f64
-            } else {
-                0.0
-            };
-
-            {
-                let mut s = train_state.lock().unwrap();
-                s.is_training = false;
-                s.is_done = true;
-                s.metrics = vec![
-                    ("Accuracy".to_string(), accuracy),
-                    ("RMSE".to_string(), reg_metrics.rmse()),
-                    ("MAE".to_string(), reg_metrics.mae()),
-                    ("R-squared".to_string(), reg_metrics.r_squared()),
-                    (
-                        "Throughput".to_string(),
-                        dataset.n_samples as f64 / elapsed.as_secs_f64(),
-                    ),
-                    ("Time (s)".to_string(), elapsed.as_secs_f64()),
-                ];
-                s.feature_importances = model
-                    .feature_importances()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &v)| (format!("f{}", i), v))
-                    .filter(|(_, v)| *v > 0.0)
-                    .collect();
-            }
-
-            Ok::<(), color_eyre::Report>(())
-        });
-
-        let tui_result = crate::tui::run_tui(tui_state).await;
-        let _ = train_handle.await?;
-        tui_result
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -379,13 +322,18 @@ fn run_neural_eval_gla(cli_config: &CliConfig, dataset: &Dataset) -> Result<()> 
 }
 
 fn run_neural_eval_deltanet(cli_config: &CliConfig, dataset: &Dataset) -> Result<()> {
-    use irithyll::attention::{AttentionMode, StreamingAttentionConfig, StreamingAttentionModel};
+    use irithyll::attention::{
+        AttentionMode, GatedDeltaMode, StreamingAttentionConfig, StreamingAttentionModel,
+    };
 
     let att = &cli_config.neural.attention;
     let config = StreamingAttentionConfig::builder()
         .d_model(dataset.n_features)
         .n_heads(att.n_heads)
-        .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
+        .mode(AttentionMode::GatedDeltaNet {
+            beta_scale: 1.0,
+            gate_mode_delta: GatedDeltaMode::Static,
+        })
         .seed(att.seed)
         .warmup(att.warmup)
         .build()
@@ -447,43 +395,114 @@ fn run_neural_eval_kan(cli_config: &CliConfig, dataset: &Dataset) -> Result<()> 
     run_neural_eval_headless(&mut model, dataset, "kan")
 }
 
+// ---------------------------------------------------------------------------
+// New v10 model eval constructors
+// ---------------------------------------------------------------------------
+
+fn run_neural_eval_mamba3(cli_config: &CliConfig, dataset: &Dataset) -> Result<()> {
+    use irithyll::ssm::{MambaConfig, MambaVersion, StreamingMamba};
+
+    let mc = &cli_config.neural.mamba;
+    let config = MambaConfig::builder()
+        .d_in(dataset.n_features)
+        .n_state(mc.n_state)
+        .version(MambaVersion::V3Exp { use_bcnorm: true })
+        .seed(mc.seed)
+        .warmup(mc.warmup)
+        .build()
+        .map_err(|e| eyre!("invalid Mamba-3 config: {}", e))?;
+
+    let mut model = StreamingMamba::new(config);
+    run_neural_eval_headless(&mut model, dataset, "mamba-3")
+}
+
+fn run_neural_eval_mamba_bd(cli_config: &CliConfig, dataset: &Dataset) -> Result<()> {
+    let mc = &cli_config.neural.mamba;
+    let block_size = (dataset.n_features / 2).max(1);
+    let mut model = irithyll::mamba_bd(dataset.n_features, mc.n_state, block_size);
+    run_neural_eval_headless(&mut model, dataset, "mamba-bd")
+}
+
+fn run_neural_eval_slstm(dataset: &Dataset) -> Result<()> {
+    let mut model = irithyll::streaming_slstm(dataset.n_features.max(2));
+    run_neural_eval_headless(&mut model, dataset, "s-lstm")
+}
+
+fn run_neural_eval_mgrade(dataset: &Dataset) -> Result<()> {
+    let d_hidden = (dataset.n_features * 2).max(8);
+    let mut model = irithyll::mgrade(dataset.n_features, d_hidden);
+    run_neural_eval_headless(&mut model, dataset, "mgrade")
+}
+
+fn run_neural_eval_delta_product(dataset: &Dataset) -> Result<()> {
+    let mut model = irithyll::attention::delta_product(dataset.n_features.max(2), 1, 3);
+    run_neural_eval_headless(&mut model, dataset, "delta-product")
+}
+
+fn run_neural_eval_rwkv7(dataset: &Dataset) -> Result<()> {
+    let mut model = irithyll::attention::rwkv7(dataset.n_features.max(2), 1);
+    run_neural_eval_headless(&mut model, dataset, "rwkv-7")
+}
+
+fn run_neural_eval_hgrn2(dataset: &Dataset) -> Result<()> {
+    let mut model = irithyll::attention::hgrn2(dataset.n_features.max(2), 1, 0.9);
+    run_neural_eval_headless(&mut model, dataset, "hgrn2")
+}
+
+fn run_neural_eval_log_linear(dataset: &Dataset) -> Result<()> {
+    use irithyll::attention::AttentionMode;
+    let mut model = irithyll::log_linear(
+        dataset.n_features.max(2),
+        1,
+        AttentionMode::GLA,
+        irithyll::DEFAULT_MAX_LEVELS,
+    );
+    run_neural_eval_headless(&mut model, dataset, "log-linear")
+}
+
 fn run_neural_eval_factory(args: &EvalArgs, dataset: &Dataset) -> Result<()> {
-    use irithyll::automl::Factory;
+    let factory_names: Vec<&str> = args.factories.split(',').map(|s| s.trim()).collect();
+    run_neural_eval_factory_with_keys(args, dataset, &factory_names)
+}
+
+/// Build an `AutoTuner` from a list of factory keys and stream the dataset
+/// through prequential eval.
+fn run_neural_eval_factory_with_keys(
+    args: &EvalArgs,
+    dataset: &Dataset,
+    factory_keys: &[&str],
+) -> Result<()> {
     use irithyll::{AutoTuner, AutoTunerBuilder};
 
     let n_features = dataset.n_features;
-    let factory_names: Vec<&str> = args.factories.split(',').map(|s| s.trim()).collect();
 
     let mut builder: Option<AutoTunerBuilder> = None;
-    for name in &factory_names {
-        let factory = match *name {
-            "sgbt" => Factory::sgbt(n_features),
-            "esn" => Factory::esn(),
-            "mamba" => Factory::mamba(n_features),
-            "mamba3" => Factory::mamba3(n_features),
-            "ttt" => Factory::ttt(n_features),
-            "kan" => Factory::kan(n_features),
-            "spikenet" => Factory::spike_net(),
-            "attention" => Factory::attention(n_features),
-            "distributional" => Factory::distributional(n_features),
-            _ => return Err(eyre!(
-                "unknown factory '{}'. available: sgbt, esn, mamba, mamba3, ttt, kan, spikenet, attention, distributional",
-                name
-            )),
-        };
+    for name in factory_keys {
+        let factory = super::train::factory_from_name(name, n_features)?;
         builder = Some(match builder {
             None => AutoTuner::builder().factory(factory),
             Some(b) => b.add_factory(factory),
         });
     }
 
+    let mut builder =
+        builder.ok_or_else(|| eyre!("--factories must specify at least one factory"))?;
+    if let Some(n) = args.n_initial {
+        builder = builder.n_initial(n);
+    }
+    if let Some(n) = args.max_n_initial {
+        builder = builder.max_n_initial(n);
+    }
+    if args.use_drift_rerace {
+        builder = builder.use_drift_rerace(true);
+    }
+
     let mut model = builder
-        .ok_or_else(|| eyre!("--factories must specify at least one factory"))?
-        .build();
+        .build()
+        .map_err(|e| eyre!("AutoTuner config error: {}", e))?;
 
-    println!("Racing factories: {}", factory_names.join(" + "),);
-
-    run_neural_eval_headless(&mut model, dataset, "factory")
+    println!("Racing factories: {}", factory_keys.join(" + "));
+    run_neural_eval_headless(&mut model, dataset, "auto-tune")
 }
 
 // ---------------------------------------------------------------------------

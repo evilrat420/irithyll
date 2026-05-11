@@ -17,24 +17,32 @@
 //!     -kernel target/thumbv6m-none-eabi/release/examples/cortex_m_drift
 //! ```
 
-#![no_std]
-#![no_main]
+#![cfg_attr(target_arch = "arm", no_std)]
+#![cfg_attr(target_arch = "arm", no_main)]
 
+#[cfg(target_arch = "arm")]
 use cortex_m_rt::entry;
+#[cfg(target_arch = "arm")]
 use cortex_m_semihosting::hprintln;
+#[cfg(target_arch = "arm")]
 use panic_halt as _;
 
+#[cfg(target_arch = "arm")]
 use irithyll_core::drift::ddm::Ddm;
+#[cfg(target_arch = "arm")]
 use irithyll_core::drift::pht::PageHinkleyTest;
+#[cfg(target_arch = "arm")]
 use irithyll_core::drift::DriftSignal;
 
 /// Deterministic value generator — sin-based oscillation around a centre.
 /// No alloc, no randomness.
+#[cfg(target_arch = "arm")]
 fn deterministic_value(centre: f64, jitter: f64, index: u32) -> f64 {
     let t = index as f64;
     centre + jitter * irithyll_core::math::sin(t * 0.7)
 }
 
+#[cfg(target_arch = "arm")]
 #[entry]
 fn main() -> ! {
     hprintln!("irithyll-core Cortex-M0+ drift detection test");
@@ -218,3 +226,7 @@ fn main() -> ! {
     cortex_m_semihosting::debug::exit(cortex_m_semihosting::debug::EXIT_SUCCESS);
     loop {}
 }
+
+// Stub for non-ARM hosts (x86 CI, cargo check --all-targets).
+#[cfg(not(target_arch = "arm"))]
+fn main() {}

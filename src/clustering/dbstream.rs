@@ -53,21 +53,42 @@ impl DBStreamConfigBuilder {
     /// Validate and build the configuration.
     ///
     /// Returns `Err` if any parameter is out of range.
-    pub fn build(self) -> Result<DBStreamConfig, String> {
+    pub fn build(self) -> Result<DBStreamConfig, irithyll_core::error::ConfigError> {
+        use irithyll_core::error::ConfigError;
         if self.radius <= 0.0 {
-            return Err("radius must be > 0".to_string());
+            return Err(ConfigError::out_of_range(
+                "radius",
+                "must be > 0",
+                self.radius,
+            ));
         }
         if self.decay_rate <= 0.0 {
-            return Err("decay_rate must be > 0".to_string());
+            return Err(ConfigError::out_of_range(
+                "decay_rate",
+                "must be > 0",
+                self.decay_rate,
+            ));
         }
         if self.min_weight < 0.0 {
-            return Err("min_weight must be >= 0".to_string());
+            return Err(ConfigError::out_of_range(
+                "min_weight",
+                "must be >= 0",
+                self.min_weight,
+            ));
         }
         if self.cleanup_interval == 0 {
-            return Err("cleanup_interval must be > 0".to_string());
+            return Err(ConfigError::out_of_range(
+                "cleanup_interval",
+                "must be > 0",
+                self.cleanup_interval,
+            ));
         }
         if self.shared_density_threshold < 0.0 || self.shared_density_threshold > 1.0 {
-            return Err("shared_density_threshold must be in [0, 1]".to_string());
+            return Err(ConfigError::out_of_range(
+                "shared_density_threshold",
+                "must be in [0, 1]",
+                self.shared_density_threshold,
+            ));
         }
         Ok(DBStreamConfig {
             radius: self.radius,

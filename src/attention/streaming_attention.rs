@@ -10,19 +10,24 @@
 //! mapping from attention outputs to the target variable. Both components update
 //! incrementally, making the model fully streaming with O(1) memory per timestep.
 //!
-//! # Training Flow
+//! # Training Flow (Option D — prequential-consistent)
 //!
 //! ```text
-//! features ──→ attention.forward() ──→ attn_output ──→ RLS.train_one(attn_output, target)
-//!                                                      RLS.predict(attn_output)  ←── prediction
+//! train_one(x_t, y_t):
+//!   1. query_state(x_t)         → pre_features  (q(x_t) · S_{t-1}, no state mutation)
+//!   2. RLS.train_one(pre_features, y_t)          (RLS trained on pre-update features)
+//!   3. attention.forward(x_t)                   (advance S_{t-1} → S_t)
 //! ```
 //!
 //! # Prediction
 //!
-//! `predict()` uses the cached attention output from the most recent `train_one()` call.
-//! This avoids a side-effect (advancing attention state) during prediction, maintaining
-//! the contract that `predict()` is read-only. If no training has occurred, returns 0.0.
+//! `predict(x_t)` calls `attention.query_state(x_t)` — the canonical streaming
+//! readout `q(x_t) · S_{t-1}` — without advancing the attention state. RLS is
+//! queried on these pre-update features, matching the distribution it was trained
+//! on exactly. If no training has occurred, returns 0.0.
 
+#[cfg(test)]
+use irithyll_core::attention::GatedDeltaMode;
 use irithyll_core::attention::{
     AttentionConfig, AttentionLayer, AttentionMode, MultiHeadAttention,
 };
@@ -110,21 +115,18 @@ impl StreamingAttentionModel {
         let readout = RecursiveLeastSquares::with_delta(config.forgetting_factor, config.delta);
         let last_features = vec![0.0; output_dim];
 
-        // Create plasticity guard if enabled.
-        // Tracks output_dim units (group_size=1), regenerating the bottom 1%
-        // every 500 steps with utility EWMA alpha=0.99.
-        let plasticity_guard = if config.plasticity {
-            Some(NeuronRegeneration::new(
+        // Create plasticity guard if a PlasticityConfig was provided.
+        // Tracks output_dim units (group_size=1 = per-unit tracking).
+        let plasticity_guard = config.plasticity.as_ref().map(|p| {
+            NeuronRegeneration::new(
                 output_dim,
-                1,
-                0.01,
-                500,
-                0.99,
+                1, // group_size = 1 (per-unit tracking)
+                p.regen_fraction,
+                p.regen_interval,
+                p.utility_alpha,
                 config.seed.wrapping_add(0x_DEAD_CAFE),
-            ))
-        } else {
-            None
-        };
+            )
+        });
         let prev_head_energy = vec![0.0; output_dim];
 
         Self {
@@ -190,23 +192,22 @@ impl StreamingLearner for StreamingAttentionModel {
             return;
         }
 
-        // 1. Forward through attention to get temporal features
-        let attn_output = self.attention.forward(features);
+        // Option D prequential ordering — eliminates train/predict feature mismatch:
+        //
+        // 1. READ STATE:  query current state with current input (no state mutation).
+        //    These pre-update features are what predict(x_t) will also compute.
+        // 2. TRAIN READOUT: RLS trains on the same pre-update features.
+        // 3. ADVANCE STATE: attention.forward() advances S_{t-1} → S_t.
+        //
+        // This ensures the readout sees a single consistent feature distribution
+        // in both train and predict, closing the one-step train/predict mismatch
+        // present when RLS is trained on post-update features (the classical error).
 
-        // Track attention state Frobenius squared norm for utilization ratio.
-        {
-            let state = self.attention.state();
-            let frob_sq: f64 = state.iter().map(|s| s * s).sum();
-            const FROB_ALPHA: f64 = 0.001;
-            self.max_frob_sq_ewma = if frob_sq > self.max_frob_sq_ewma {
-                frob_sq
-            } else {
-                (1.0 - FROB_ALPHA) * self.max_frob_sq_ewma + FROB_ALPHA * frob_sq
-            };
-        }
+        // Step 1 — read state: q(x_t) · S_{t-1}.
+        let pre_features = self.attention.query_state(features);
 
-        // 2. Update residual alignment tracking (acceleration-based).
-        let current_pred = self.readout.predict(&attn_output);
+        // Step 2 — update residual alignment tracking on pre-update prediction.
+        let current_pred = self.readout.predict(&pre_features);
         let current_change = current_pred - self.prev_prediction;
         if self.n_samples > 0 {
             let acceleration = current_change - self.prev_change;
@@ -232,18 +233,36 @@ impl StreamingLearner for StreamingAttentionModel {
         self.prev_change = current_change;
         self.prev_prediction = current_pred;
 
-        // 3. Train RLS readout on attention output
-        if !attn_output.iter().all(|f| f.is_finite()) {
-            self.last_features = attn_output;
+        // Guard: skip RLS update if pre-update features are non-finite.
+        if !pre_features.iter().all(|f| f.is_finite()) {
+            self.last_features = pre_features;
             self.n_samples += 1;
             return;
         }
-        self.readout.train_one(&attn_output, target, weight);
 
-        // 4. Plasticity maintenance: track per-output-unit energy and
+        // Step 2 (cont.) — train RLS readout on pre-update features.
+        self.readout.train_one(&pre_features, target, weight);
+
+        // Step 3 — advance state: S_{t-1} → S_t.
+        let post_output = self.attention.forward(features);
+
+        // Track attention state Frobenius squared norm (post-advance) for
+        // utilization diagnostics.
+        {
+            let state = self.attention.state();
+            let frob_sq: f64 = state.iter().map(|s| s * s).sum();
+            const FROB_ALPHA: f64 = 0.001;
+            self.max_frob_sq_ewma = if frob_sq > self.max_frob_sq_ewma {
+                frob_sq
+            } else {
+                (1.0 - FROB_ALPHA) * self.max_frob_sq_ewma + FROB_ALPHA * frob_sq
+            };
+        }
+
+        // Step 4 — plasticity maintenance: track post-advance output energy and
         //    surgically reinitialize dead heads instead of resetting the whole layer.
         if let Some(ref mut guard) = self.plasticity_guard {
-            let mut output_energy: Vec<f64> = attn_output.iter().map(|x| x.abs()).collect();
+            let mut output_energy: Vec<f64> = post_output.iter().map(|x| x.abs()).collect();
             guard.pre_update(&self.prev_head_energy, &mut output_energy);
             guard.post_update(&self.prev_head_energy);
             let mut reinit_rng = self.config.seed.wrapping_add(self.n_samples);
@@ -255,8 +274,8 @@ impl StreamingLearner for StreamingAttentionModel {
             self.prev_head_energy = output_energy;
         }
 
-        // 5. Cache the attention output for predict()
-        self.last_features = attn_output;
+        // Cache the pre-update features (what predict() will recompute).
+        self.last_features = pre_features;
 
         self.n_samples += 1;
     }
@@ -269,13 +288,11 @@ impl StreamingLearner for StreamingAttentionModel {
         }
 
         // Design: attention state advances only during train_one(). At prediction
-        // time t, the state reflects history through t-1. We call forward_readonly()
-        // to compute S^T * q(x_t) — a query of the current state with the current
-        // input's query projection — without mutating state. This is the attention
-        // analogue of Mamba's "cached SSM output × gate(current_input) + residual"
-        // pattern and fixes the near-chance accuracy caused by using stale t-1
-        // features for classification.
-        let attn_output = self.attention.forward_readonly(features);
+        // time t, the state reflects history through t-1. We call query_state()
+        // to compute q(x_t) · S_{t-1} — the canonical streaming readout that
+        // separates readout from state update. This fixes near-chance accuracy
+        // from stale t-1 features and implements eq. R8.1 (pre-update readout).
+        let attn_output = self.attention.query_state(features);
         self.readout.predict(&attn_output)
     }
 
@@ -301,6 +318,23 @@ impl StreamingLearner for StreamingAttentionModel {
         self.prev_head_energy.fill(0.0);
     }
 
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn readout_weights(&self) -> Option<&[f64]> {
+        let w = <Self as crate::learner::HasReadout>::readout_weights(self);
+        if w.is_empty() {
+            None
+        } else {
+            Some(w)
+        }
+    }
+}
+
+impl crate::learner::Tunable for StreamingAttentionModel {
     fn diagnostics_array(&self) -> [f64; 5] {
         use crate::automl::DiagnosticSource;
         match self.config_diagnostics() {
@@ -315,8 +349,19 @@ impl StreamingLearner for StreamingAttentionModel {
         }
     }
 
-    fn readout_weights(&self) -> Option<&[f64]> {
-        self.readout.readout_weights()
+    fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
+        // Scale the RLS readout forgetting factor as the primary tuning knob.
+        <crate::learners::RecursiveLeastSquares as crate::learner::Tunable>::adjust_config(
+            &mut self.readout,
+            lr_multiplier,
+            0.0,
+        );
+    }
+}
+
+impl crate::learner::HasReadout for StreamingAttentionModel {
+    fn readout_weights(&self) -> &[f64] {
+        self.readout.weights()
     }
 }
 
@@ -492,7 +537,10 @@ mod tests {
         let config = StreamingAttentionConfig::builder()
             .d_model(4)
             .n_heads(2)
-            .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
+            .mode(AttentionMode::GatedDeltaNet {
+                beta_scale: 1.0,
+                gate_mode_delta: GatedDeltaMode::Static,
+            })
             .build()
             .unwrap();
         let model = StreamingAttentionModel::new(config);
@@ -576,7 +624,10 @@ mod tests {
     #[test]
     fn attention_plasticity_disabled_by_default() {
         let config = default_config(4, 2);
-        assert!(!config.plasticity, "plasticity should default to false");
+        assert!(
+            config.plasticity.is_none(),
+            "plasticity should default to None"
+        );
         let model = StreamingAttentionModel::new(config);
         assert!(
             model.plasticity_guard.is_none(),
@@ -586,10 +637,11 @@ mod tests {
 
     #[test]
     fn attention_plasticity_enabled_creates_guard() {
+        use crate::common::PlasticityConfig;
         let config = StreamingAttentionConfig::builder()
             .d_model(4)
             .n_heads(2)
-            .plasticity(true)
+            .plasticity(Some(PlasticityConfig::default()))
             .build()
             .unwrap();
         let model = StreamingAttentionModel::new(config);
@@ -601,10 +653,11 @@ mod tests {
 
     #[test]
     fn attention_plasticity_train_runs_without_panic() {
+        use crate::common::PlasticityConfig;
         let config = StreamingAttentionConfig::builder()
             .d_model(4)
             .n_heads(2)
-            .plasticity(true)
+            .plasticity(Some(PlasticityConfig::default()))
             .build()
             .unwrap();
         let mut model = StreamingAttentionModel::new(config);
@@ -621,6 +674,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_attention_nan_skipped() {
         // NaN features should not corrupt the attention state or RLS readout.
         // The input finiteness check fires before attention forward, so neither
@@ -656,14 +710,10 @@ mod tests {
 
     #[test]
     fn gla_predict_uses_current_input_not_stale() {
-        // Before the fix, predict() used self.last_features (attention output
-        // from t-1), ignoring the current input entirely. This caused near-chance
-        // accuracy on binary classification because the class-discriminating
-        // features at time t were never seen by the readout during prediction.
-        //
-        // After the fix, predict(x_t) calls forward_readonly(x_t) which queries
-        // the current attention state with a query computed from x_t. Two
-        // predictions with clearly different inputs should give different outputs.
+        // predict() calls query_state(x_t) which queries the current attention
+        // state with a query computed from x_t — the canonical streaming readout.
+        // Two predictions with clearly different inputs must give different outputs
+        // (stale-feature regression guard: stale path ignores x_t entirely).
         use irithyll_core::attention::AttentionMode as SAMode;
         let config = StreamingAttentionConfig::builder()
             .d_model(4)
@@ -759,18 +809,62 @@ mod tests {
     fn predict_after_reset_returns_zero() {
         // After reset, predict() must return 0.0 regardless of input because
         // n_samples=0 and the attention state is zeroed. Also verifies that
-        // forward_readonly on a zero-state produces 0.0 output (as expected for
-        // zero-init state: S^T * q = 0 for all q).
+        // query_state on a zero-state produces 0.0 output (as expected:
+        // S^T * q = 0 for all q when S = 0).
         let mut model = StreamingAttentionModel::new(default_config(4, 2));
         for i in 0..10 {
             model.train(&[i as f64; 4], i as f64);
         }
         model.reset();
-        // predict after reset: n_samples=0 guard triggers, returns 0.0
+        // predict after reset: n_samples=0 guard triggers before query_state,
+        // returns 0.0 without touching the zeroed attention state.
         let pred = model.predict(&[1.0, 2.0, 3.0, 4.0]);
         assert!(
             pred.abs() < 1e-15,
             "predict after reset should return 0.0 (n_samples=0 guard), got {pred}"
+        );
+    }
+
+    #[test]
+    fn predict_reads_current_input() {
+        // Verifies the Option D invariant: predict(x_t) returns a value
+        // influenced by the CURRENT x_t, not the stale x_{t-1} state.
+        //
+        // After training, call predict() with two clearly distinct inputs.
+        // Both must (a) be finite, and (b) differ — proving the query
+        // projection of x_t reaches the readout rather than a cached output.
+        let config = StreamingAttentionConfig::builder()
+            .d_model(4)
+            .n_heads(2)
+            .mode(AttentionMode::GLA)
+            .forgetting_factor(0.999)
+            .seed(42)
+            .build()
+            .unwrap();
+        let mut model = StreamingAttentionModel::new(config);
+
+        // Build up non-trivial attention state.
+        for i in 0..30 {
+            let t = i as f64 * 0.2;
+            model.train(&[t.sin(), t.cos(), t * 0.05, 1.0], t.sin());
+        }
+
+        // predict() with x_a and x_b must be different (current input is used).
+        let pred_a = model.predict(&[1.0, 0.0, 0.0, 0.0]);
+        let pred_b = model.predict(&[-1.0, 0.0, 0.0, 0.0]);
+
+        assert!(
+            pred_a.is_finite(),
+            "predict(x_a) should be finite, got {pred_a}"
+        );
+        assert!(
+            pred_b.is_finite(),
+            "predict(x_b) should be finite, got {pred_b}"
+        );
+        assert!(
+            (pred_a - pred_b).abs() > 1e-15,
+            "predict must differ for different inputs — Option D current-input invariant: \
+             pred_a={pred_a}, pred_b={pred_b}"
         );
     }
 }

@@ -36,7 +36,7 @@ pub struct ModelConfig {
     #[serde(default)]
     pub seed: u64,
 
-    // --- Advanced fields (v8.2+) ---
+    // --- Advanced fields ---
     /// Fraction of features to subsample per tree. Default 0.75.
     #[serde(default = "default_feature_subsample_rate")]
     pub feature_subsample_rate: f64,

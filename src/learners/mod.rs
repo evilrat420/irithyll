@@ -15,6 +15,7 @@
 //! | [`rls`] | [`LocallyWeightedRegression`] | Nadaraya-Watson with circular buffer |
 //! | [`krls`] | [`KRLS`] | Kernel RLS with ALD sparsification |
 
+pub mod bounded_rls;
 pub mod classification;
 pub mod krls;
 pub mod linear;
@@ -23,6 +24,7 @@ pub mod multinomial_bernoulli_nb;
 pub mod naive_bayes;
 pub mod rls;
 
+pub use bounded_rls::BoundedRls;
 pub use classification::{ClassificationMode, ClassificationWrapper};
 pub use krls::{Kernel, LinearKernel, PolynomialKernel, RBFKernel, KRLS};
 pub use linear::StreamingLinearModel;

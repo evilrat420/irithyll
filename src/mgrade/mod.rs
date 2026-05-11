@@ -25,25 +25,24 @@ use crate::learner::StreamingLearner;
 use crate::learners::RecursiveLeastSquares;
 
 // ---------------------------------------------------------------------------
-// mGRADEConfig
+// MGradeConfig
 // ---------------------------------------------------------------------------
 
-/// Configuration for [`StreamingmGRADE`].
+/// Configuration for [`StreamingMGrade`].
 ///
 /// Create via the builder pattern:
 ///
 /// ```
-/// use irithyll::mgrade::mGRADEConfig;
+/// use irithyll::mgrade::MGradeConfig;
 ///
-/// let config = mGRADEConfig::builder()
+/// let config = MGradeConfig::builder()
 ///     .d_in(3)
 ///     .d_hidden(32)
 ///     .build()
 ///     .unwrap();
 /// ```
 #[derive(Debug, Clone)]
-#[allow(non_camel_case_types)]
-pub struct mGRADEConfig {
+pub struct MGradeConfig {
     /// Input feature dimension (required).
     pub d_in: usize,
     /// MinGRU hidden state dimension (default: 32).
@@ -60,7 +59,7 @@ pub struct mGRADEConfig {
     pub seed: u64,
 }
 
-impl Default for mGRADEConfig {
+impl Default for MGradeConfig {
     fn default() -> Self {
         Self {
             d_in: 0,
@@ -74,11 +73,11 @@ impl Default for mGRADEConfig {
     }
 }
 
-impl std::fmt::Display for mGRADEConfig {
+impl std::fmt::Display for MGradeConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "mGRADEConfig(d_in={}, d_hidden={}, kernel_size={}, ff={}, warmup={}, seed={})",
+            "MGradeConfig(d_in={}, d_hidden={}, kernel_size={}, ff={}, warmup={}, seed={})",
             self.d_in,
             self.d_hidden,
             self.kernel_size,
@@ -90,17 +89,17 @@ impl std::fmt::Display for mGRADEConfig {
 }
 
 // ---------------------------------------------------------------------------
-// mGRADEConfigBuilder
+// MGradeConfigBuilder
 // ---------------------------------------------------------------------------
 
-/// Builder for [`mGRADEConfig`] with validation.
+/// Builder for [`MGradeConfig`] with validation.
 ///
 /// # Example
 ///
 /// ```
-/// use irithyll::mgrade::mGRADEConfig;
+/// use irithyll::mgrade::MGradeConfig;
 ///
-/// let config = mGRADEConfig::builder()
+/// let config = MGradeConfig::builder()
 ///     .d_in(5)
 ///     .d_hidden(16)
 ///     .kernel_size(4)
@@ -109,23 +108,20 @@ impl std::fmt::Display for mGRADEConfig {
 ///
 /// assert_eq!(config.d_hidden, 16);
 /// ```
-#[allow(non_camel_case_types)]
-pub struct mGRADEConfigBuilder {
-    config: mGRADEConfig,
+pub struct MGradeConfigBuilder {
+    config: MGradeConfig,
 }
 
-#[allow(non_camel_case_types)]
-impl mGRADEConfig {
+impl MGradeConfig {
     /// Create a new builder with default values.
-    pub fn builder() -> mGRADEConfigBuilder {
-        mGRADEConfigBuilder {
-            config: mGRADEConfig::default(),
+    pub fn builder() -> MGradeConfigBuilder {
+        MGradeConfigBuilder {
+            config: MGradeConfig::default(),
         }
     }
 }
 
-#[allow(non_camel_case_types)]
-impl mGRADEConfigBuilder {
+impl MGradeConfigBuilder {
     /// Set the input feature dimension (required).
     pub fn d_in(mut self, d: usize) -> Self {
         self.config.d_in = d;
@@ -176,7 +172,9 @@ impl mGRADEConfigBuilder {
     /// - `d_in` is 0
     /// - `d_hidden` is 0
     /// - `kernel_size` is less than 2
-    pub fn build(self) -> Result<mGRADEConfig, ConfigError> {
+    /// - `forgetting_factor` is not in (0, 1]
+    /// - `delta_rls` is not > 0
+    pub fn build(self) -> Result<MGradeConfig, ConfigError> {
         let c = &self.config;
         if c.d_in == 0 {
             return Err(ConfigError::out_of_range("d_in", "must be > 0", c.d_in));
@@ -193,6 +191,20 @@ impl mGRADEConfigBuilder {
                 "kernel_size",
                 "must be >= 2",
                 c.kernel_size,
+            ));
+        }
+        if c.forgetting_factor <= 0.0 || c.forgetting_factor > 1.0 {
+            return Err(ConfigError::out_of_range(
+                "forgetting_factor",
+                "must be in (0, 1]",
+                c.forgetting_factor,
+            ));
+        }
+        if c.delta_rls <= 0.0 {
+            return Err(ConfigError::out_of_range(
+                "delta_rls",
+                "must be > 0",
+                c.delta_rls,
             ));
         }
         Ok(self.config)
@@ -212,16 +224,16 @@ impl mGRADEConfigBuilder {
 /// # Example
 ///
 /// ```no_run
-/// use irithyll::mgrade::{StreamingMGrade, mGRADEConfig};
+/// use irithyll::mgrade::{StreamingMGrade, MGradeConfig};
 /// use irithyll::StreamingLearner;
 ///
-/// let config = mGRADEConfig::builder().d_in(3).d_hidden(16).build().unwrap();
+/// let config = MGradeConfig::builder().d_in(3).d_hidden(16).build().unwrap();
 /// let mut model = StreamingMGrade::new(config);
 /// model.train(&[1.0, 2.0, 3.0], 4.0);
 /// let pred = model.predict(&[1.0, 2.0, 3.0]);
 /// ```
 pub struct StreamingMGrade {
-    config: mGRADEConfig,
+    config: MGradeConfig,
     delay_conv: irithyll_core::mgrade::DelayConv1D,
     min_gru: irithyll_core::mgrade::MinGRUCell,
     readout: RecursiveLeastSquares,
@@ -252,7 +264,7 @@ pub struct StreamingMGrade {
 
 impl StreamingMGrade {
     /// Create a new StreamingMGrade from config.
-    pub fn new(config: mGRADEConfig) -> Self {
+    pub fn new(config: MGradeConfig) -> Self {
         let delay_conv =
             irithyll_core::mgrade::DelayConv1D::new(config.d_in, config.kernel_size, config.seed);
         let min_gru = irithyll_core::mgrade::MinGRUCell::new(config.d_hidden, config.seed);
@@ -318,7 +330,7 @@ impl StreamingMGrade {
     }
 
     /// Access the config.
-    pub fn config(&self) -> &mGRADEConfig {
+    pub fn config(&self) -> &MGradeConfig {
         &self.config
     }
 
@@ -418,10 +430,29 @@ impl StreamingLearner for StreamingMGrade {
         //     unbounded linear combinations that cause RLS weight explosion.
         let normalized = self.normalize_input(features);
 
-        // 4b. Forward through delay conv then minGRU (updates state).
+        // Option D step 1: compute readout features from PRE-update recurrent state.
+        // delay_conv.forward_predict does not mutate buffer; min_gru.forward_predict does not
+        // mutate hidden state. Together they compute what the cell output would be, using the
+        // current recurrent state, without advancing it. This is the same feature path used
+        // by predict(), making train and predict use identical feature distributions.
+        //
+        // delay_conv.forward_predict is always safe (reads from buffer, no init requirement).
+        // min_gru.forward_predict requires the cell to be initialized (total_seen > 0).
+        let pre_readout_features: Option<Vec<f64>> = if self.total_seen > 0 {
+            let pre_delay_raw = self.delay_conv.forward_predict(&normalized);
+            let pre_delay: Vec<f64> = pre_delay_raw.iter().map(|&v| v.tanh()).collect();
+            let pre_cell = self.min_gru.forward_predict(&pre_delay);
+            let mut feats = vec![0.0; self.config.d_hidden + self.config.d_in];
+            Self::build_readout_features(&pre_cell, &pre_delay, &mut feats);
+            Some(feats)
+        } else {
+            None
+        };
+
+        // Option D step 2: advance the pipeline state (delay conv then minGRU).
         let delay_output_raw = self.delay_conv.forward(&normalized);
 
-        // 4c. Clamp delay conv output via tanh to ensure it is bounded in [-1, 1].
+        // Clamp delay conv output via tanh to ensure it is bounded in [-1, 1].
         //     The delay conv is a linear combination of buffered inputs, so without
         //     squashing it is fully unbounded. All readout features must be bounded
         //     so RLS weights stay stable — this mirrors Mamba's gated output approach.
@@ -430,13 +461,23 @@ impl StreamingLearner for StreamingMGrade {
         let cell_output = self.min_gru.forward(&delay_output).to_vec();
         self.total_seen += 1;
 
-        // 5a. Build readout features: [hidden_state; tanh(delay_output)]
-        //     Both components are now bounded: hidden state in [-1,1] (minGRU interpolation),
-        //     delay output in [-1,1] (tanh squash above).
+        // Option D step 3: train RLS on pre-update features (before caching new state).
+        // past_warmup() uses total_seen which was just incremented, preserving the same
+        // warmup boundary as the original implementation.
+        if self.past_warmup() {
+            if let Some(ref feats) = pre_readout_features {
+                if feats.iter().all(|f| f.is_finite()) {
+                    self.readout.train_one(feats, target, weight);
+                    self.samples_trained += 1;
+                }
+            }
+        }
+
+        // Build post-update readout features for diagnostics (Frobenius ratio).
         let mut readout_features = std::mem::take(&mut self.last_features);
         Self::build_readout_features(&cell_output, &delay_output, &mut readout_features);
 
-        // 5b. Track output utilization
+        // Track output utilization (post-update features for diagnostic ratio).
         let frob_sq: f64 = readout_features.iter().map(|s| s * s).sum();
         const FROB_ALPHA: f64 = 0.001;
         self.max_frob_sq_ewma = if frob_sq > self.max_frob_sq_ewma {
@@ -445,17 +486,7 @@ impl StreamingLearner for StreamingMGrade {
             (1.0 - FROB_ALPHA) * self.max_frob_sq_ewma + FROB_ALPHA * frob_sq
         };
 
-        // 6. Train RLS readout (after warmup)
-        if self.past_warmup() {
-            if !readout_features.iter().all(|f| f.is_finite()) {
-                self.last_features = readout_features;
-                return;
-            }
-            self.readout.train_one(&readout_features, target, weight);
-            self.samples_trained += 1;
-        }
-
-        // 7. Cache for predict()
+        // Cache post-update features for alignment diagnostics and last_features.
         self.last_features = readout_features;
     }
 
@@ -513,6 +544,28 @@ impl StreamingLearner for StreamingMGrade {
         self.input_count = 0;
     }
 
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn readout_weights(&self) -> Option<&[f64]> {
+        let w = <Self as crate::learner::HasReadout>::readout_weights(self);
+        if w.is_empty() {
+            None
+        } else {
+            Some(w)
+        }
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        <Self as crate::learner::Tunable>::adjust_config(self, lr_multiplier, lambda_delta);
+    }
+}
+
+impl crate::learner::Tunable for StreamingMGrade {
     fn diagnostics_array(&self) -> [f64; 5] {
         use crate::automl::DiagnosticSource;
         match self.config_diagnostics() {
@@ -527,23 +580,17 @@ impl StreamingLearner for StreamingMGrade {
         }
     }
 
-    fn readout_weights(&self) -> Option<&[f64]> {
-        self.readout.readout_weights()
-    }
-
     fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
         self.config.forgetting_factor =
             (self.config.forgetting_factor * lr_multiplier).clamp(0.9, 1.0);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Backward-compatible type alias
-// ---------------------------------------------------------------------------
-
-/// Deprecated name. Use [`StreamingMGrade`] instead.
-#[allow(non_camel_case_types)]
-pub type StreamingmGRADE = StreamingMGrade;
+impl crate::learner::HasReadout for StreamingMGrade {
+    fn readout_weights(&self) -> &[f64] {
+        self.readout.weights()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Debug impl
@@ -622,7 +669,7 @@ mod tests {
 
     #[test]
     fn mgrade_config_builder_default() {
-        let config = mGRADEConfig::builder().d_in(3).build().unwrap();
+        let config = MGradeConfig::builder().d_in(3).build().unwrap();
         assert_eq!(config.d_hidden, 32);
         assert_eq!(config.kernel_size, 4);
         assert_eq!(config.warmup, 10);
@@ -630,17 +677,17 @@ mod tests {
 
     #[test]
     fn mgrade_config_rejects_zero_d_in() {
-        assert!(mGRADEConfig::builder().build().is_err());
+        assert!(MGradeConfig::builder().build().is_err());
     }
 
     #[test]
     fn mgrade_config_rejects_zero_d_hidden() {
-        assert!(mGRADEConfig::builder().d_in(3).d_hidden(0).build().is_err());
+        assert!(MGradeConfig::builder().d_in(3).d_hidden(0).build().is_err());
     }
 
     #[test]
     fn mgrade_config_rejects_kernel_size_one() {
-        assert!(mGRADEConfig::builder()
+        assert!(MGradeConfig::builder()
             .d_in(3)
             .kernel_size(1)
             .build()
@@ -649,25 +696,25 @@ mod tests {
 
     #[test]
     fn mgrade_new_creates_model() {
-        let config = mGRADEConfig::builder()
+        let config = MGradeConfig::builder()
             .d_in(3)
             .d_hidden(16)
             .build()
             .unwrap();
-        let model = StreamingmGRADE::new(config);
+        let model = StreamingMGrade::new(config);
         assert_eq!(model.n_samples_seen(), 0);
         assert!(!model.past_warmup());
     }
 
     #[test]
     fn mgrade_train_and_predict_finite() {
-        let config = mGRADEConfig::builder()
+        let config = MGradeConfig::builder()
             .d_in(2)
             .d_hidden(16)
             .warmup(5)
             .build()
             .unwrap();
-        let mut model = StreamingmGRADE::new(config);
+        let mut model = StreamingMGrade::new(config);
         for i in 0..50 {
             let x = [i as f64 * 0.1, (i as f64).sin()];
             let y = x[0] * 2.0 + 1.0;
@@ -680,13 +727,13 @@ mod tests {
 
     #[test]
     fn mgrade_reset_clears_state() {
-        let config = mGRADEConfig::builder()
+        let config = MGradeConfig::builder()
             .d_in(2)
             .d_hidden(8)
             .warmup(3)
             .build()
             .unwrap();
-        let mut model = StreamingmGRADE::new(config);
+        let mut model = StreamingMGrade::new(config);
         for i in 0..20 {
             model.train(&[i as f64, (i as f64) * 0.5], i as f64 * 2.0);
         }
@@ -698,20 +745,21 @@ mod tests {
 
     #[test]
     fn mgrade_predict_before_train_returns_zero() {
-        let config = mGRADEConfig::builder().d_in(2).d_hidden(8).build().unwrap();
-        let model = StreamingmGRADE::new(config);
+        let config = MGradeConfig::builder().d_in(2).d_hidden(8).build().unwrap();
+        let model = StreamingMGrade::new(config);
         assert_eq!(model.predict(&[1.0, 2.0]), 0.0);
     }
 
     #[test]
+    #[allow(deprecated)]
     fn mgrade_diagnostics_array_finite() {
-        let config = mGRADEConfig::builder()
+        let config = MGradeConfig::builder()
             .d_in(1)
             .d_hidden(8)
             .warmup(3)
             .build()
             .unwrap();
-        let mut model = StreamingmGRADE::new(config);
+        let mut model = StreamingMGrade::new(config);
         for i in 0..30 {
             model.train(&[i as f64 * 0.1], i as f64);
         }
@@ -725,14 +773,15 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn mgrade_readout_weights_available_after_training() {
-        let config = mGRADEConfig::builder()
+        let config = MGradeConfig::builder()
             .d_in(2)
             .d_hidden(8)
             .warmup(3)
             .build()
             .unwrap();
-        let mut model = StreamingmGRADE::new(config);
+        let mut model = StreamingMGrade::new(config);
         assert!(model.readout_weights().is_none());
         for i in 0..20 {
             model.train(&[i as f64, (i as f64) * 0.5], i as f64);
@@ -742,15 +791,15 @@ mod tests {
 
     #[test]
     fn mgrade_streaming_learner_boxable() {
-        let config = mGRADEConfig::builder().d_in(2).d_hidden(8).build().unwrap();
-        let model = StreamingmGRADE::new(config);
+        let config = MGradeConfig::builder().d_in(2).d_hidden(8).build().unwrap();
+        let model = StreamingMGrade::new(config);
         let _boxed: Box<dyn StreamingLearner> = Box::new(model);
     }
 
     #[test]
     fn test_mgrade_nan_skipped() {
         // Train past warmup then send a NaN sample; model must remain healthy.
-        let config = mGRADEConfig::builder()
+        let config = MGradeConfig::builder()
             .d_in(2)
             .d_hidden(8)
             .warmup(3)
@@ -777,9 +826,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn test_mgrade_adjust_config() {
         // adjust_config should scale forgetting_factor by lr_multiplier.
-        let config = mGRADEConfig::builder()
+        let config = MGradeConfig::builder()
             .d_in(2)
             .d_hidden(8)
             .forgetting_factor(0.998)
@@ -800,11 +850,10 @@ mod tests {
     }
 
     #[test]
-    fn test_mgrade_type_alias() {
-        // StreamingmGRADE alias and StreamingMGrade refer to the same type.
-        let config = mGRADEConfig::builder().d_in(2).d_hidden(8).build().unwrap();
-        let _model: StreamingMGrade = StreamingMGrade::new(config.clone());
-        let _alias: StreamingmGRADE = StreamingmGRADE::new(config);
+    fn mgrade_type_is_pascal_case() {
+        // MGradeConfig and StreamingMGrade use canonical PascalCase names.
+        let config = MGradeConfig::builder().d_in(2).d_hidden(8).build().unwrap();
+        let _model: StreamingMGrade = StreamingMGrade::new(config);
     }
 
     /// Regression test: mGRADE must achieve reasonable RMSE on a sine regression task.
@@ -814,7 +863,7 @@ mod tests {
     /// and RMSE ~300. After the fix, RMSE should be well under 5.0.
     #[test]
     fn test_mgrade_sine_regression_reasonable() {
-        let config = mGRADEConfig::builder()
+        let config = MGradeConfig::builder()
             .d_in(1)
             .d_hidden(16)
             .kernel_size(4)
@@ -833,7 +882,7 @@ mod tests {
 
         // Compute RMSE by replaying the sequence with a fresh model.
         let mut model2 = {
-            let config2 = mGRADEConfig::builder()
+            let config2 = MGradeConfig::builder()
                 .d_in(1)
                 .d_hidden(16)
                 .kernel_size(4)
@@ -864,6 +913,105 @@ mod tests {
         assert!(
             rmse < 5.0,
             "mGRADE sine regression RMSE should be < 5.0 after fix, got {rmse:.4} (count={count})"
+        );
+    }
+
+    #[test]
+    fn mgrade_rejects_invalid_forgetting_factor() {
+        assert!(
+            MGradeConfig::builder()
+                .d_in(3)
+                .forgetting_factor(0.0)
+                .build()
+                .is_err(),
+            "forgetting_factor=0 must be rejected"
+        );
+        assert!(
+            MGradeConfig::builder()
+                .d_in(3)
+                .forgetting_factor(-0.5)
+                .build()
+                .is_err(),
+            "negative forgetting_factor must be rejected"
+        );
+        assert!(
+            MGradeConfig::builder()
+                .d_in(3)
+                .forgetting_factor(1.01)
+                .build()
+                .is_err(),
+            "forgetting_factor>1 must be rejected"
+        );
+    }
+
+    #[test]
+    fn mgrade_rejects_invalid_delta_rls() {
+        assert!(
+            MGradeConfig::builder()
+                .d_in(3)
+                .delta_rls(0.0)
+                .build()
+                .is_err(),
+            "delta_rls=0 must be rejected"
+        );
+        assert!(
+            MGradeConfig::builder()
+                .d_in(3)
+                .delta_rls(-1.0)
+                .build()
+                .is_err(),
+            "delta_rls<0 must be rejected"
+        );
+    }
+
+    #[test]
+    fn mgrade_accepts_forgetting_factor_one() {
+        assert!(
+            MGradeConfig::builder()
+                .d_in(3)
+                .forgetting_factor(1.0)
+                .build()
+                .is_ok(),
+            "forgetting_factor=1.0 (no forgetting) should be valid"
+        );
+    }
+
+    /// Option D correctness: predict(x_t) must strongly correlate with x_t, not x_{t-1}.
+    ///
+    /// Train on y_t = x_t[0] * 2.0 for many steps. Then verify that predict(x_a) and
+    /// predict(x_b) differ meaningfully when x_a and x_b differ in the current input.
+    /// A label-leak model would fail to distinguish inputs that differ only in the
+    /// current timestep because predict would see stale (prior-step) features.
+    #[test]
+    fn mgrade_predict_reads_current_input() {
+        let config = MGradeConfig::builder()
+            .d_in(2)
+            .d_hidden(16)
+            .kernel_size(4)
+            .warmup(5)
+            .forgetting_factor(0.999)
+            .build()
+            .unwrap();
+        let mut model = StreamingMGrade::new(config);
+
+        // Train on y_t = x_t[0] * 2.0 for 200 samples.
+        for i in 0..200 {
+            let x0 = (i as f64) * 0.05;
+            model.train(&[x0, 0.0], x0 * 2.0);
+        }
+
+        // predict(x_a) and predict(x_b) should differ for x_a != x_b.
+        let pred_a = model.predict(&[1.0, 0.0]);
+        let pred_b = model.predict(&[5.0, 0.0]);
+
+        assert!(
+            pred_a.is_finite() && pred_b.is_finite(),
+            "both predictions must be finite: pred_a={pred_a}, pred_b={pred_b}"
+        );
+        assert!(
+            (pred_a - pred_b).abs() > 0.1,
+            "predict must respond to current input: pred_a={pred_a} (x=1.0), pred_b={pred_b} (x=5.0), diff={}",
+            (pred_a - pred_b).abs()
         );
     }
 }

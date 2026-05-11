@@ -22,7 +22,11 @@
 use std::fmt;
 
 use irithyll_core::attention::AttentionMode;
+#[cfg(test)]
+use irithyll_core::attention::GatedDeltaMode;
 use irithyll_core::error::ConfigError;
+
+use crate::common::PlasticityConfig;
 
 /// Configuration for a [`StreamingAttentionModel`](super::StreamingAttentionModel).
 ///
@@ -58,12 +62,13 @@ pub struct StreamingAttentionConfig {
     pub seed: u64,
     /// Number of warmup samples before predictions are trusted (default: 10).
     pub warmup: usize,
-    /// Enable plasticity maintenance via neuron regeneration (default: false).
+    /// Optional plasticity configuration for neuron regeneration (default: None).
     ///
-    /// When enabled, tracks per-head attention output energy and periodically
+    /// When `Some`, tracks per-head attention output energy and periodically
     /// reinitializes dead heads to maintain learning capacity over long
-    /// streams (Dohare et al., Nature 2024).
-    pub plasticity: bool,
+    /// streams (Dohare et al., Nature 2024). Use [`PlasticityConfig::default()`]
+    /// for paper-recommended defaults.
+    pub plasticity: Option<PlasticityConfig>,
 }
 
 impl StreamingAttentionConfig {
@@ -128,7 +133,7 @@ pub struct StreamingAttentionConfigBuilder {
     delta: f64,
     seed: u64,
     warmup: usize,
-    plasticity: bool,
+    plasticity: Option<PlasticityConfig>,
 }
 
 impl Default for StreamingAttentionConfigBuilder {
@@ -143,7 +148,7 @@ impl Default for StreamingAttentionConfigBuilder {
             delta: 100.0,
             seed: 42,
             warmup: 10,
-            plasticity: false,
+            plasticity: None,
         }
     }
 }
@@ -212,12 +217,13 @@ impl StreamingAttentionConfigBuilder {
         self
     }
 
-    /// Enable or disable plasticity maintenance (default: false).
+    /// Set the plasticity configuration (default: None = disabled).
     ///
-    /// When enabled, tracks per-head attention output energy and periodically
+    /// When `Some`, tracks per-head attention output energy and periodically
     /// reinitializes dead heads to maintain learning capacity over long
-    /// streams (Dohare et al., Nature 2024).
-    pub fn plasticity(mut self, p: bool) -> Self {
+    /// streams (Dohare et al., Nature 2024). Use [`PlasticityConfig::default()`]
+    /// for paper-recommended defaults.
+    pub fn plasticity(mut self, p: Option<PlasticityConfig>) -> Self {
         self.plasticity = p;
         self
     }
@@ -350,7 +356,10 @@ mod tests {
         let config = StreamingAttentionConfig::builder()
             .d_model(16)
             .n_heads(4)
-            .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
+            .mode(AttentionMode::GatedDeltaNet {
+                beta_scale: 1.0,
+                gate_mode_delta: GatedDeltaMode::Static,
+            })
             .forgetting_factor(0.99)
             .delta(50.0)
             .seed(123)

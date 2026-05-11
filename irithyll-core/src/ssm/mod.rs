@@ -14,32 +14,41 @@
 //! y(t)  = C * h(t) + D * x(t)     (output equation)
 //! ```
 //!
-//! For discrete-time processing, we discretize via Zero-Order Hold (ZOH) or
-//! bilinear transform. The **selective** variant (Mamba) makes B, C, and the
-//! discretization step Delta input-dependent, enabling content-aware filtering.
+//! For discrete-time processing, we discretize via Zero-Order Hold (ZOH),
+//! bilinear (Tustin), or exponential-trapezoidal transform. The **selective**
+//! variant (Mamba) makes B, C, and Delta input-dependent.
 //!
 //! # Modules
 //!
 //! - [`diagonal`] -- Non-selective diagonal SSM with fixed parameters
 //! - [`selective`] -- Mamba-style selective SSM with input-dependent projections
-//! - [`selective_bd`] -- Block-diagonal SSM with dense per-block A matrices for cross-channel mixing
-//! - [`selective_v3`] -- Mamba-3 MIMO SSM with complex states and trapezoidal discretization
-//! - [`discretize`] -- ZOH, bilinear, and trapezoidal complex discretization methods
+//! - [`selective_bd`] -- Block-diagonal SSM with dense per-block A matrices
+//! - [`selective_v3`] -- Mamba-3 variants:
+//!   - [`SelectiveSSMv3`] -- Tustin complex (original)
+//!   - [`SelectiveSSMv3Exp`] -- exp-trapezoidal 3-term + data-dependent λ_t (paper spec)
+//!   - [`SelectiveSSMv3Mimo`] -- true rank-R MIMO with matrix-valued state H ∈ R^{N×P}
+//! - [`complex_diag`] -- Standalone complex diagonal SSM primitive (reusable)
+//! - [`norm`] -- BCNorm: RMSNorm for B/C stabilization in Mamba-3
+//! - [`discretize`] -- ZOH, bilinear (Tustin), and exp-trapezoidal discretization
 //! - [`init`] -- A-matrix initialization strategies (Mamba, S4D real/complex)
 //! - [`projection`] -- Linear algebra helpers and PRNG for weight initialization
 
+pub mod complex_diag;
 pub mod diagonal;
 pub mod discretize;
 pub mod init;
+pub mod norm;
 pub mod projection;
 pub mod selective;
 pub mod selective_bd;
 pub mod selective_v3;
 
+pub use complex_diag::{ComplexDiagonalSSM, DiscretizeMethod};
 pub use diagonal::DiagonalSSM;
+pub use norm::BCNorm;
 pub use selective::SelectiveSSM;
 pub use selective_bd::SelectiveSSMBD;
-pub use selective_v3::SelectiveSSMv3;
+pub use selective_v3::{SelectiveSSMv3, SelectiveSSMv3Exp, SelectiveSSMv3Mimo};
 
 use alloc::vec::Vec;
 

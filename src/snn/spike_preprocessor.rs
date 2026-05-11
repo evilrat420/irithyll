@@ -15,6 +15,7 @@
 //! to downstream learners.
 
 use crate::pipeline::StreamingPreprocessor;
+use irithyll_core::snn::astrocyte::AstrocyteMode;
 use irithyll_core::snn::lif::{f64_to_q14, Q14_HALF, Q14_ONE};
 use irithyll_core::snn::network_fixed::{SpikeNetFixed, SpikeNetFixedConfig};
 
@@ -108,6 +109,9 @@ impl SpikePreprocessor {
             weight_init_range: f64_to_q14(0.1),
             use_astrocyte: false,
             astrocyte_tau: 1000.0,
+            // Preprocessor never uses astrocyte modulation; default to WeightMod
+            // (the prior behaviour before AGMP field was added).
+            astrocyte_mode: AstrocyteMode::WeightMod,
         };
 
         self.inner = Some(SpikeNetFixed::new(config));

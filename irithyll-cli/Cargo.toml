@@ -1,8 +1,10 @@
 [package]
 name = "irithyll-cli"
-version = "0.1.0"
+version = "10.0.0"
 edition = "2021"
-rust-version = "1.75"
+# `ratatui-image` requires Rust 1.81+. CLI is `publish = false`, so the bump is
+# build-tooling only — the published `irithyll` crate keeps its 1.75 MSRV.
+rust-version = "1.81"
 description = "Command-line interface for irithyll streaming ML"
 license = "MIT OR Apache-2.0"
 publish = false
@@ -34,6 +36,9 @@ color-eyre = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Concurrency primitives (read-heavy lock for TUI shared state)
+parking_lot = "0.12"
+
 # TUI (optional)
 ratatui = { version = "0.29", optional = true }
 crossterm = { version = "0.28", optional = true, features = ["event-stream"] }
@@ -41,6 +46,32 @@ crossterm = { version = "0.28", optional = true, features = ["event-stream"] }
 # Async (for TUI event loop)
 tokio = { version = "1", features = ["full"], optional = true }
 
+# Sixel-quality chart rendering (Metrics tab):
+# `plotters` renders into an RGB buffer via `BitMapBackend::with_buffer`,
+# `image` wraps the buffer as a `DynamicImage`, and `ratatui-image` embeds it
+# inline using whichever protocol the terminal speaks (sixel on Windows
+# Terminal 1.22+, Kitty on Kitty/Konsole, iTerm2 on iTerm2/WezTerm,
+# half-blocks fallback elsewhere). All three opt into the `tui` feature so
+# the non-TUI build (`--no-default-features`) stays lean.
+#
+# Pinned: `ratatui-image` =8.0.1 supports `ratatui` 0.29 and Rust 1.81 (edition
+# 2021). 8.1+ bumps to Rust 1.86 + edition 2024 — ahead of our MSRV. 9.0+
+# requires `ratatui` 0.30. `default-features = false` keeps libchafa optional.
+plotters = { version = "0.3", optional = true, default-features = false, features = [
+    "bitmap_backend",
+    "line_series",
+    "ttf",
+] }
+image = { version = "0.25", optional = true, default-features = false, features = ["png"] }
+ratatui-image = { version = "=8.0.1", optional = true, default-features = false, features = ["crossterm", "image-defaults"] }
+
 [features]
 default = ["tui"]
-tui = ["dep:ratatui", "dep:crossterm", "dep:tokio"]
+tui = [
+    "dep:ratatui",
+    "dep:crossterm",
+    "dep:tokio",
+    "dep:plotters",
+    "dep:image",
+    "dep:ratatui-image",
+]

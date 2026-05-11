@@ -39,6 +39,7 @@
 //! ```
 
 use crate::learner::StreamingLearner;
+use crate::preprocessing::StreamingTargetPreprocessor;
 
 // ---------------------------------------------------------------------------
 // StreamingPreprocessor trait
@@ -100,6 +101,7 @@ pub trait StreamingPreprocessor: Send + Sync {
 /// ```
 pub struct PipelineBuilder {
     preprocessors: Vec<Box<dyn StreamingPreprocessor>>,
+    target_preprocessor: Option<Box<dyn StreamingTargetPreprocessor>>,
 }
 
 impl PipelineBuilder {
@@ -107,6 +109,7 @@ impl PipelineBuilder {
     pub fn new() -> Self {
         Self {
             preprocessors: Vec::new(),
+            target_preprocessor: None,
         }
     }
 
@@ -119,6 +122,35 @@ impl PipelineBuilder {
         self
     }
 
+    /// Attach an optional target preprocessor to the pipeline.
+    ///
+    /// The target preprocessor transforms the regression target before the
+    /// learner sees it during training, and inverts the transformation on
+    /// the predict output so that predictions are in the original target scale.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use irithyll::preprocessing::{TargetScaler, IncrementalNormalizer};
+    /// use irithyll::pipeline::PipelineBuilder;
+    /// use irithyll::learners::StreamingLinearModel;
+    /// use irithyll::StreamingLearner;
+    ///
+    /// let mut pipeline = PipelineBuilder::new()
+    ///     .pipe(IncrementalNormalizer::new())
+    ///     .target_preprocessor(TargetScaler::new())
+    ///     .learner(StreamingLinearModel::new(0.01));
+    ///
+    /// pipeline.train(&[100.0, 0.5], 1000.0);
+    /// let pred = pipeline.predict(&[100.0, 0.5]);
+    /// // pred is in the original target scale (not z-scored).
+    /// assert!(pred.is_finite());
+    /// ```
+    pub fn target_preprocessor(mut self, tp: impl StreamingTargetPreprocessor + 'static) -> Self {
+        self.target_preprocessor = Some(Box::new(tp));
+        self
+    }
+
     /// Terminate the pipeline with a learner, producing a [`Pipeline`].
     ///
     /// The learner receives features that have been transformed by all
@@ -127,6 +159,7 @@ impl PipelineBuilder {
         Pipeline {
             preprocessors: self.preprocessors,
             learner: Box::new(learner),
+            target_preprocessor: self.target_preprocessor,
             samples_seen: 0,
         }
     }
@@ -138,6 +171,7 @@ impl PipelineBuilder {
         Pipeline {
             preprocessors: self.preprocessors,
             learner,
+            target_preprocessor: self.target_preprocessor,
             samples_seen: 0,
         }
     }
@@ -192,6 +226,9 @@ impl Default for PipelineBuilder {
 pub struct Pipeline {
     preprocessors: Vec<Box<dyn StreamingPreprocessor>>,
     learner: Box<dyn StreamingLearner>,
+    /// Optional target preprocessor: applied to the target before `train_one`
+    /// and inverted on the output of `predict`.
+    target_preprocessor: Option<Box<dyn StreamingTargetPreprocessor>>,
     samples_seen: u64,
 }
 
@@ -240,13 +277,25 @@ impl Pipeline {
 impl StreamingLearner for Pipeline {
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
         let x = self.update_and_transform_features(features);
-        self.learner.train_one(&x, target, weight);
+        // === Wave 7-3 target preprocessor ===
+        let transformed_target = if let Some(tp) = self.target_preprocessor.as_mut() {
+            tp.fit_transform(target)
+        } else {
+            target
+        };
+        self.learner.train_one(&x, transformed_target, weight);
         self.samples_seen += 1;
     }
 
     fn predict(&self, features: &[f64]) -> f64 {
         let x = self.transform_features(features);
-        self.learner.predict(&x)
+        let raw = self.learner.predict(&x);
+        // === Wave 7-3 target preprocessor ===
+        if let Some(tp) = self.target_preprocessor.as_ref() {
+            tp.inverse_transform(raw)
+        } else {
+            raw
+        }
     }
 
     fn n_samples_seen(&self) -> u64 {
@@ -258,22 +307,30 @@ impl StreamingLearner for Pipeline {
             preprocessor.reset();
         }
         self.learner.reset();
+        // === Wave 7-3 target preprocessor ===
+        if let Some(tp) = self.target_preprocessor.as_mut() {
+            tp.reset();
+        }
         self.samples_seen = 0;
     }
 
+    #[allow(deprecated)]
     fn diagnostics_array(&self) -> [f64; 5] {
         self.learner.diagnostics_array()
     }
 
+    #[allow(deprecated)]
     fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
         self.learner.adjust_config(lr_multiplier, lambda_delta);
     }
 
+    #[allow(deprecated)]
     fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
         self.learner
             .apply_structural_change(depth_delta, steps_delta);
     }
 
+    #[allow(deprecated)]
     fn replacement_count(&self) -> u64 {
         self.learner.replacement_count()
     }
@@ -288,6 +345,10 @@ impl fmt::Debug for Pipeline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Pipeline")
             .field("n_preprocessors", &self.preprocessors.len())
+            .field(
+                "has_target_preprocessor",
+                &self.target_preprocessor.is_some(),
+            )
             .field("samples_seen", &self.samples_seen)
             .finish()
     }
@@ -514,5 +575,159 @@ mod tests {
         p.train(&[3.0], 0.0);
         let pred = p.predict(&[3.0]);
         assert!((pred - 6.0).abs() < EPS);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Wave 7-3: target preprocessor wiring tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn pipeline_with_target_preprocessor_inverts_on_predict() {
+        use crate::preprocessing::{StreamingTargetPreprocessor, TargetScaler};
+
+        // Use a simple identity learner: predict returns the target it was trained on.
+        // We approximate this by training a MeanLearner with a constant target.
+        // Strategy: train pipeline with target preprocessor on a constant target (5.0),
+        // then verify that predict output is back in the original scale.
+        //
+        // TargetScaler with a single distinct value: after 1 sample the mean=5.0,
+        // std=sqrt(variance_floor). fit_transform(5.0) = 0.0. The learner trains on 0.0.
+        // predict returns MeanLearner output (mean of features). inverse_transform of that
+        // value brings it back. The key invariant tested here: predict() inverts the
+        // target transform so the output is in original-target units.
+        // Drive a primary scaler and a parallel reference scaler through the same
+        // sequence of fit_transform calls, so the reference matches the pipeline
+        // scaler's post-train state. predict() uses post-train statistics, so the
+        // expected value must be computed from those same statistics.
+        let mut scaler = TargetScaler::new();
+        let mut reference = TargetScaler::new();
+        for i in 0..100_i32 {
+            scaler.fit_transform(i as f64);
+            reference.fit_transform(i as f64);
+        }
+        let warm_mean = scaler.mean();
+
+        let mut pipeline = Pipeline::builder()
+            .target_preprocessor(scaler)
+            .learner_boxed(Box::new(MeanLearner::new()));
+
+        // Pipeline.train() advances its scaler by one sample; mirror on reference.
+        pipeline.train(&[1.0, 2.0], warm_mean);
+        reference.fit_transform(warm_mean);
+
+        let pred = pipeline.predict(&[1.0, 2.0]);
+        // MeanLearner predicts mean(1, 2) = 1.5 in z-space; inverse → 1.5 * σ + μ
+        // computed from the reference scaler's post-train statistics.
+        let expected = reference.inverse_transform(1.5);
+        assert!(
+            (pred - expected).abs() < 1e-9,
+            "predict should invert target scaler: expected {}, got {}",
+            expected,
+            pred
+        );
+    }
+
+    #[test]
+    fn pipeline_target_preprocessor_reset_clears_scaler() {
+        use crate::preprocessing::TargetScaler;
+
+        let mut pipeline = Pipeline::builder()
+            .target_preprocessor(TargetScaler::new())
+            .learner_boxed(Box::new(MeanLearner::new()));
+
+        for i in 0..10_i32 {
+            pipeline.train(&[1.0], i as f64);
+        }
+        // After training, scaler has non-trivial stats.
+        assert_eq!(pipeline.n_samples_seen(), 10);
+
+        pipeline.reset();
+        assert_eq!(pipeline.n_samples_seen(), 0);
+        // After reset, scaler returns to initial state: transforming any value
+        // should still produce a finite result (cold-start behaviour).
+        let pred = pipeline.predict(&[1.0]);
+        assert!(
+            pred.is_finite(),
+            "predict after reset should be finite, got {}",
+            pred
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // make_pipeline! macro tests (Wave 7-2)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn make_pipeline_compiles_with_one_stage() {
+        // Degenerate case: a single learner, no preprocessors.
+        let mut p = crate::make_pipeline!(MeanLearner::new());
+        assert_eq!(
+            p.n_preprocessors(),
+            0,
+            "no preprocessors in single-stage pipeline"
+        );
+        p.train(&[3.0, 7.0], 0.0);
+        let pred = p.predict(&[3.0, 7.0]);
+        // MeanLearner returns mean of features: (3+7)/2 = 5
+        assert!(
+            (pred - 5.0).abs() < EPS,
+            "single-stage pipeline pred = {pred}"
+        );
+    }
+
+    #[test]
+    fn make_pipeline_chains_three_stages() {
+        // Three stages: two preprocessors + one learner.
+        // ScalePreprocessor(2) then ScalePreprocessor(3): [1,1] -> [2,2] -> [6,6]
+        // MeanLearner returns 6.0
+        let mut p = crate::make_pipeline!(
+            ScalePreprocessor::new(2.0) =>
+            ScalePreprocessor::new(3.0) =>
+            MeanLearner::new()
+        );
+        assert_eq!(
+            p.n_preprocessors(),
+            2,
+            "two preprocessors in three-stage pipeline"
+        );
+        p.train(&[1.0, 1.0], 0.0);
+        let pred = p.predict(&[1.0, 1.0]);
+        assert!(
+            (pred - 6.0).abs() < EPS,
+            "three-stage make_pipeline! expected 6.0, got {pred}"
+        );
+    }
+
+    #[test]
+    fn make_pipeline_two_stages() {
+        // One preprocessor + learner: [2,4] -> *2 -> [4,8] -> mean -> 6.0
+        let mut p = crate::make_pipeline!(
+            ScalePreprocessor::new(2.0) =>
+            MeanLearner::new()
+        );
+        assert_eq!(
+            p.n_preprocessors(),
+            1,
+            "one preprocessor in two-stage pipeline"
+        );
+        p.train(&[2.0, 4.0], 0.0);
+        let pred = p.predict(&[2.0, 4.0]);
+        assert!(
+            (pred - 6.0).abs() < EPS,
+            "two-stage make_pipeline! expected 6.0, got {pred}"
+        );
+    }
+
+    #[test]
+    fn make_pipeline_implements_streaming_learner() {
+        // Pipeline produced by make_pipeline! must satisfy StreamingLearner.
+        let mut p: Box<dyn StreamingLearner> =
+            Box::new(crate::make_pipeline!(ScalePreprocessor::new(1.0) => MeanLearner::new()));
+        p.train(&[5.0, 10.0], 0.0);
+        let pred = p.predict(&[5.0, 10.0]);
+        assert!(
+            (pred - 7.5).abs() < EPS,
+            "boxed make_pipeline! pred = {pred}"
+        );
     }
 }

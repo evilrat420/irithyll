@@ -29,8 +29,10 @@
 //! (SNN) provides temporal state; the linear readout (RLS) maps that state
 //! plus the current input to the target prediction in a side-effect-free way.
 
+use super::spikenet_config::LearningRule;
 use crate::learner::StreamingLearner;
 use crate::learners::RecursiveLeastSquares;
+use irithyll_core::snn::astrocyte::AstrocyteMode;
 use irithyll_core::snn::lif::{f64_to_q14, Q14_HALF, Q14_ONE};
 use irithyll_core::snn::network_fixed::{SpikeNetFixed, SpikeNetFixedConfig};
 
@@ -149,6 +151,17 @@ impl SpikeNet {
     fn initialize(&mut self, n_input: usize) {
         self.n_input = n_input;
 
+        // PpProp is a forward-compatible placeholder: it falls back to e-prop
+        // (Stdp) until a PP-prop kernel lands in SpikeNetFixed.
+        // Ref: Kaiser et al., NeurIPS 2022.
+        if self.config.learning_rule == LearningRule::PpProp {
+            tracing::warn!(
+                "SpikeNet: LearningRule::PpProp is not yet implemented in the \
+                 fixed-point kernel; falling back to e-prop (Stdp). \
+                 Ref: Kaiser et al., NeurIPS 2022."
+            );
+        }
+
         let fixed_config = SpikeNetFixedConfig {
             n_input,
             n_hidden: self.config.n_hidden,
@@ -164,6 +177,9 @@ impl SpikeNet {
             weight_init_range: f64_to_q14(self.config.weight_init_range),
             use_astrocyte: self.config.astrocyte,
             astrocyte_tau: self.config.astrocyte_tau,
+            // SpikeNetConfig doesn't yet expose astrocyte_mode; default to the
+            // conservative WeightMod path (prior behaviour before AGMP addition).
+            astrocyte_mode: AstrocyteMode::WeightMod,
         };
 
         self.inner = Some(SpikeNetFixed::new(fixed_config));
@@ -299,6 +315,33 @@ impl StreamingLearner for SpikeNet {
         // This is the prediction surface used by predict(), ensuring that
         // predict(features) actually uses the current input rather than
         // just echoing the stale SNN membrane.
+        //
+        // Option D — eligibility trace natural alignment:
+        //
+        // SpikeNet naturally follows Option D for the RLS readout. The e-prop
+        // learning rule inside `net.train_step()` works as follows:
+        //
+        //   1. Run the current input through the SNN (forward pass), producing spikes.
+        //   2. Compute eligibility traces from the pre-update membrane potential and
+        //      presynaptic activity — these represent the pre-spike-advance state.
+        //   3. Update SNN weights using eligibility × learning signal (weight update).
+        //
+        // The spikes cached in `last_spike_state` are from step 1 (the forward pass),
+        // which runs with the SNN weights BEFORE the e-prop update in step 3. This
+        // means `last_spike_state` encodes the pre-weight-update network response.
+        //
+        // At predict time, `last_spike_state` from the previous train_one call is
+        // used — which was computed with pre-update weights at that step. The RLS
+        // is therefore trained on the same class of features (pre-update spike
+        // responses) that predict() will observe, eliminating the train/predict
+        // feature-distribution mismatch.
+        //
+        // SpikeNet is the canonical reference implementation of the Option D pattern
+        // for recurrent learners with an RLS readout. Other recurrent models (ESN,
+        // TTT) should follow the same ordering: compute readout features from the
+        // pre-advance state, train RLS, then advance the recurrent state.
+        //
+        // Reference: R8 — GLA predict() quality: a mathematically principled fix.
         if weight > 1e-10 {
             let mut readout_features = Vec::with_capacity(self.config.n_hidden + self.n_input);
             readout_features.extend_from_slice(&self.last_spike_state);
@@ -390,6 +433,13 @@ impl StreamingLearner for SpikeNet {
         self.spike_rate_ewma = 0.0;
     }
 
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+}
+
+impl crate::learner::Tunable for SpikeNet {
     fn diagnostics_array(&self) -> [f64; 5] {
         use crate::automl::DiagnosticSource;
         match self.config_diagnostics() {
@@ -402,6 +452,10 @@ impl StreamingLearner for SpikeNet {
             ],
             None => [0.0; 5],
         }
+    }
+
+    fn adjust_config(&mut self, _lr_multiplier: f64, _lambda_delta: f64) {
+        // SpikeNet does not expose a tunable LR/lambda; no-op.
     }
 }
 
@@ -693,6 +747,58 @@ mod tests {
             accuracy,
             correct,
             total
+        );
+    }
+
+    #[test]
+    fn spikenet_predict_reads_current_input() {
+        // Option D empirical confirmation: predict(x_a) != predict(x_b) for distinct
+        // inputs, confirming the RLS readout uses the current-input component of its
+        // feature vector [last_spike_state; input_features].
+        //
+        // SpikeNet is the canonical Option D implementation: last_spike_state encodes
+        // pre-weight-update spikes (eligibility trace alignment), and input_features
+        // provides direct current-input dependence in the readout. This test verifies
+        // both that predictions are finite and that they discriminate distinct inputs.
+        let config = SpikeNetConfig::builder()
+            .n_hidden(32)
+            .learning_rate(0.02)
+            .alpha(0.9)
+            .v_thr(0.3)
+            .gamma(0.5)
+            .spike_threshold(0.01)
+            .seed(42)
+            .weight_init_range(0.2)
+            .build()
+            .unwrap();
+
+        let mut model = SpikeNet::new(config);
+
+        // Train enough to build meaningful RLS readout weights.
+        for i in 0..100 {
+            let x = if i % 2 == 0 { 1.0_f64 } else { -1.0_f64 };
+            let y = if i % 2 == 0 { 1.0_f64 } else { 0.0_f64 };
+            model.train(&[x, x * 0.5], y);
+        }
+
+        // Two distinct inputs should produce distinct predictions because
+        // the input_features component of [last_spike_state; input_features]
+        // differs between them.
+        let pred_a = model.predict(&[1.0, 0.5]);
+        let pred_b = model.predict(&[-1.0, -0.5]);
+
+        assert!(
+            pred_a.is_finite(),
+            "predict(+1.0, +0.5) should be finite, got {pred_a}"
+        );
+        assert!(
+            pred_b.is_finite(),
+            "predict(-1.0, -0.5) should be finite, got {pred_b}"
+        );
+        assert_ne!(
+            pred_a.to_bits(),
+            pred_b.to_bits(),
+            "SpikeNet predict must reflect current input: predict(+1,+0.5)={pred_a} == predict(-1,-0.5)={pred_b}"
         );
     }
 }

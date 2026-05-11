@@ -38,7 +38,6 @@ use crate::ensemble::step::BoostingStep;
 use crate::loss::squared::SquaredLoss;
 use crate::loss::Loss;
 use crate::sample::Observation;
-use crate::tree::builder::TreeConfig;
 
 use core::fmt;
 
@@ -145,18 +144,8 @@ impl<L: Loss> ParallelSGBT<L> {
             .leaf_half_life
             .map(|hl| crate::math::exp(-crate::math::ln(2.0) / hl as f64));
 
-        let tree_config = TreeConfig::new()
-            .max_depth(config.max_depth)
-            .n_bins(config.n_bins)
-            .lambda(config.lambda)
-            .gamma(config.gamma)
-            .grace_period(config.grace_period)
-            .delta(config.delta)
-            .feature_subsample_rate(config.feature_subsample_rate)
-            .leaf_decay_alpha_opt(leaf_decay_alpha)
-            .split_reeval_interval_opt(config.split_reeval_interval)
-            .adaptive_depth_opt(config.adaptive_depth)
-            .leaf_model_type(config.leaf_model_type.clone());
+        let tree_config = crate::ensemble::config::build_tree_config(&config)
+            .leaf_decay_alpha_opt(leaf_decay_alpha);
 
         let max_tree_samples = config.max_tree_samples;
 

@@ -10,9 +10,11 @@ use alloc::vec::Vec;
 pub mod bins;
 pub mod categorical;
 #[cfg(feature = "kmeans-binning")]
+#[cfg_attr(docsrs, doc(cfg(feature = "kmeans-binning")))]
 pub mod kmeans;
 pub mod quantile;
 #[cfg(feature = "simd")]
+#[cfg_attr(docsrs, doc(cfg(feature = "simd")))]
 pub mod simd;
 pub mod uniform;
 
@@ -68,6 +70,7 @@ pub trait BinningStrategy: Send + Sync + 'static {
 /// This is used internally by `HoeffdingTree`
 /// leaf states. Each variant delegates to the corresponding strategy impl.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum BinnerKind {
     /// Equal-width binning (default).
     Uniform(uniform::UniformBinning),
@@ -77,6 +80,7 @@ pub enum BinnerKind {
 
     /// K-means binning (feature-gated).
     #[cfg(feature = "kmeans-binning")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "kmeans-binning")))]
     KMeans(kmeans::KMeansBinning),
 }
 
@@ -95,6 +99,7 @@ impl BinnerKind {
 
     /// Create a new k-means binner.
     #[cfg(feature = "kmeans-binning")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "kmeans-binning")))]
     #[inline]
     pub fn kmeans() -> Self {
         BinnerKind::KMeans(kmeans::KMeansBinning::new())

@@ -40,7 +40,7 @@
 //! dimension mismatch at the warmup-to-projection transition.
 
 use crate::error::{ConfigError, IrithyllError, Result};
-use crate::learner::StreamingLearner;
+use crate::learner::{StreamingLearner, Tunable};
 use crate::preprocessing::IncrementalNormalizer;
 use crate::projection::SubspaceTracker;
 
@@ -65,7 +65,7 @@ use std::fmt;
 /// | `delta` | 100.0 | Initial P diagonal scaling |
 /// | `warmup` | 200 | Warmup samples (normalizer only, no PAST updates) |
 /// | `seed` | 42 | RNG seed for Xavier initialization |
-/// | `supervised_lr` | 0.01 | Learning rate for supervised projection gradient |
+/// | `supervised_lr` | 0.001 | Learning rate for supervised projection gradient |
 #[derive(Clone, Debug)]
 pub struct ProjectionConfig {
     /// Projection rank (output dimension). Default: 8.
@@ -353,6 +353,7 @@ impl ProjectedLearner {
 // ---------------------------------------------------------------------------
 
 impl StreamingLearner for ProjectedLearner {
+    #[allow(deprecated)]
     fn train_one(&mut self, features: &[f64], target: f64, weight: f64) {
         // 1. Update normalizer statistics with raw input.
         self.normalizer.update(features);
@@ -427,30 +428,37 @@ impl StreamingLearner for ProjectedLearner {
         self.n_samples = 0;
     }
 
+    #[allow(deprecated)]
     fn diagnostics_array(&self) -> [f64; 5] {
         self.inner.diagnostics_array()
     }
 
+    #[allow(deprecated)]
     fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
         self.inner.adjust_config(lr_multiplier, lambda_delta);
     }
 
+    #[allow(deprecated)]
     fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
         self.inner.apply_structural_change(depth_delta, steps_delta);
     }
 
+    #[allow(deprecated)]
     fn replacement_count(&self) -> u64 {
         self.inner.replacement_count()
     }
 
+    #[allow(deprecated)]
     fn check_proactive_prune(&mut self) -> bool {
         self.inner.check_proactive_prune()
     }
 
+    #[allow(deprecated)]
     fn set_prune_half_life(&mut self, hl: usize) {
         self.inner.set_prune_half_life(hl);
     }
 
+    #[allow(deprecated)]
     fn readout_weights(&self) -> Option<&[f64]> {
         self.inner.readout_weights()
     }
@@ -464,6 +472,22 @@ impl crate::automl::DiagnosticSource for ProjectedLearner {
     fn config_diagnostics(&self) -> Option<crate::automl::ConfigDiagnostics> {
         // Cannot access inner learner diagnostics through Box<dyn StreamingLearner>.
         None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tunable impl — delegate to inner learner
+// ---------------------------------------------------------------------------
+
+impl Tunable for ProjectedLearner {
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        self.inner.diagnostics_array()
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        self.inner.adjust_config(lr_multiplier, lambda_delta);
     }
 }
 
@@ -752,6 +776,40 @@ mod tests {
         // have been exercised correctly.
         assert_eq!(model.inner().n_samples_seen(), 50);
         assert_eq!(model.tracker().n_samples(), 40); // 50 - 10 warmup
+    }
+
+    #[test]
+    fn predict_reads_current_input() {
+        use crate::learners::RecursiveLeastSquares;
+
+        // Use RLS as the inner model — it uses its input features to predict.
+        let config = ProjectionConfig::builder()
+            .rank(2)
+            .warmup(0)
+            .seed(42)
+            .build()
+            .unwrap();
+        let inner = RecursiveLeastSquares::new(0.999);
+        let mut model = ProjectedLearner::from_learner(inner, 4, config);
+
+        // Train on enough samples so RLS has a non-trivial readout.
+        for i in 0..20 {
+            let x = [i as f64 * 0.1, (i as f64).sin(), (i as f64).cos(), 1.0];
+            model.train(&x, x[0] + x[1]);
+        }
+
+        // Two clearly different inputs must produce different predictions.
+        let out_a = model.predict(&[0.0, 0.0, 1.0, 1.0]);
+        let out_b = model.predict(&[10.0, 10.0, 1.0, 1.0]);
+
+        assert!(
+            out_a.is_finite() && out_b.is_finite(),
+            "both predictions must be finite: out_a={out_a}, out_b={out_b}"
+        );
+        assert!(
+            (out_a - out_b).abs() > 1e-9,
+            "predict must read current x_t, got identical {out_a} for different inputs"
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@
 ///   category `i` goes left. This supports up to 64 distinct category values per feature.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum FeatureType {
     /// Numeric feature split by threshold comparisons (default).
     #[default]

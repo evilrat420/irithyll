@@ -19,7 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Nightly is required because `--cfg docsrs` activates
+      # `#![cfg_attr(docsrs, feature(doc_cfg))]` at the crate root, and
+      # `feature(...)` is a nightly-only opt-in. docs.rs itself builds on
+      # nightly, so this matches the toolchain that powers the published docs.
+      - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
       - name: Build documentation
         env:

@@ -27,11 +27,15 @@
 
 pub mod config;
 pub mod gating;
+pub mod log_linear;
+pub mod log_linear_state;
 pub mod multi_head;
 pub mod state;
 pub mod update_rules;
 
-pub use config::{AttentionConfig, AttentionMode};
+pub use config::{AttentionConfig, AttentionMode, GateMode, GatedDeltaMode};
+pub use log_linear::{default_lambda_init, LogLinearAttention, DEFAULT_MAX_LEVELS, DEFAULT_TAU};
+pub use log_linear_state::LogLinearState;
 pub use multi_head::MultiHeadAttention;
 pub use state::AttentionState;
 

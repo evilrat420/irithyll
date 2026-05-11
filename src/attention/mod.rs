@@ -54,7 +54,8 @@ pub use streaming_attention::StreamingAttentionModel;
 
 // Re-export core types
 pub use irithyll_core::attention::{
-    AttentionConfig, AttentionLayer, AttentionMode, MultiHeadAttention,
+    default_lambda_init, AttentionConfig, AttentionLayer, AttentionMode, GateMode, GatedDeltaMode,
+    LogLinearAttention, LogLinearState, MultiHeadAttention, DEFAULT_MAX_LEVELS, DEFAULT_TAU,
 };
 
 // ---------------------------------------------------------------------------
@@ -101,7 +102,10 @@ pub fn delta_net(d_model: usize, n_heads: usize) -> StreamingAttentionModel {
         StreamingAttentionConfig::builder()
             .d_model(d_model)
             .n_heads(n_heads)
-            .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
+            .mode(AttentionMode::GatedDeltaNet {
+                beta_scale: 1.0,
+                gate_mode_delta: GatedDeltaMode::Static,
+            })
             .build()
             .expect("delta_net() factory: invalid parameters"),
     )
@@ -129,7 +133,10 @@ pub fn delta_product(
         StreamingAttentionConfig::builder()
             .d_model(d_model)
             .n_heads(n_heads)
-            .mode(AttentionMode::DeltaProduct { n_compositions })
+            .mode(AttentionMode::DeltaProduct {
+                n_compositions,
+                reflections: false,
+            })
             .build()
             .expect("delta_product() factory: invalid parameters"),
     )
@@ -249,5 +256,65 @@ pub fn streaming_attention(d_model: usize, mode: AttentionMode) -> StreamingAtte
             .mode(mode)
             .build()
             .expect("streaming_attention() factory: invalid parameters"),
+    )
+}
+
+/// Create a Log-Linear Attention model (Han Guo et al., ICLR 2026).
+///
+/// Wraps any inner linear-attention rule with an O(log T) hierarchical
+/// Fenwick state. The headline novelty of irithyll v10: bridges
+/// linear-attention efficiency and softmax expressivity. State memory
+/// is `max_levels * d_k * d_v * n_heads` per layer, padded to a
+/// constant shape regardless of stream length (paper §3.4 stability
+/// choice).
+///
+/// # Arguments
+///
+/// - `d_model` — model dimension.
+/// - `n_heads` — number of attention heads.
+/// - `inner` — inner linear-attention mode wrapped per token. Must NOT
+///   itself be `AttentionMode::LogLinear`. Recommended: `GatedDeltaNet`
+///   for strongest associative recall, `GLA` for stability.
+/// - `max_levels` — Fenwick depth cap; 32 covers streams up to ~4 G
+///   tokens.
+///
+/// # Paper reference
+///
+/// Han Guo, Songlin Yang, Tarushii Goel, Eric P. Xing, Tri Dao, Yoon
+/// Kim. *Log-Linear Attention*. ICLR 2026. arXiv:2506.04761.
+///
+/// ```ignore
+/// use irithyll::attention::{log_linear, AttentionMode};
+/// use irithyll::learner::StreamingLearner;
+///
+/// let mut model = log_linear(
+///     8,
+///     2,
+///     AttentionMode::GatedDeltaNet {
+///         beta_scale: 1.0,
+///         gate_mode_delta: irithyll::attention::GatedDeltaMode::Static,
+///     },
+///     32,
+/// );
+/// model.train(&[1.0; 8], 0.5);
+/// ```
+pub fn log_linear(
+    d_model: usize,
+    n_heads: usize,
+    inner: AttentionMode,
+    max_levels: usize,
+) -> StreamingAttentionModel {
+    let lambda_init = default_lambda_init(max_levels);
+    StreamingAttentionModel::new(
+        StreamingAttentionConfig::builder()
+            .d_model(d_model)
+            .n_heads(n_heads)
+            .mode(AttentionMode::LogLinear {
+                inner: Box::new(inner),
+                max_levels,
+                lambda_init,
+            })
+            .build()
+            .expect("log_linear() factory: invalid parameters"),
     )
 }

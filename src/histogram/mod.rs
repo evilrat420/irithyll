@@ -11,7 +11,9 @@ pub use irithyll_core::histogram::quantile;
 pub use irithyll_core::histogram::uniform;
 
 #[cfg(feature = "simd")]
+#[cfg_attr(docsrs, doc(cfg(feature = "simd")))]
 pub use irithyll_core::histogram::simd;
 
 #[cfg(feature = "kmeans-binning")]
+#[cfg_attr(docsrs, doc(cfg(feature = "kmeans-binning")))]
 pub use irithyll_core::histogram::kmeans;

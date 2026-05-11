@@ -12,6 +12,7 @@ use crate::learner::StreamingLearner;
 
 /// Type of seasonal decomposition.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum Seasonality {
     /// Seasonal effects are added to the level+trend.
     Additive,
@@ -109,18 +110,35 @@ impl HoltWintersConfigBuilder {
     /// Build the configuration, validating all parameters.
     ///
     /// Returns `Err` if any smoothing parameter is not in (0, 1) or period < 2.
-    pub fn build(self) -> Result<HoltWintersConfig, String> {
+    pub fn build(self) -> Result<HoltWintersConfig, irithyll_core::error::ConfigError> {
+        use irithyll_core::error::ConfigError;
         if self.alpha <= 0.0 || self.alpha >= 1.0 {
-            return Err(format!("alpha must be in (0, 1), got {}", self.alpha));
+            return Err(ConfigError::out_of_range(
+                "alpha",
+                "must be in (0, 1)",
+                self.alpha,
+            ));
         }
         if self.beta <= 0.0 || self.beta >= 1.0 {
-            return Err(format!("beta must be in (0, 1), got {}", self.beta));
+            return Err(ConfigError::out_of_range(
+                "beta",
+                "must be in (0, 1)",
+                self.beta,
+            ));
         }
         if self.gamma <= 0.0 || self.gamma >= 1.0 {
-            return Err(format!("gamma must be in (0, 1), got {}", self.gamma));
+            return Err(ConfigError::out_of_range(
+                "gamma",
+                "must be in (0, 1)",
+                self.gamma,
+            ));
         }
         if self.period < 2 {
-            return Err(format!("period must be >= 2, got {}", self.period));
+            return Err(ConfigError::out_of_range(
+                "period",
+                "must be >= 2",
+                self.period,
+            ));
         }
         Ok(HoltWintersConfig {
             alpha: self.alpha,

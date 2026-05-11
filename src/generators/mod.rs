@@ -18,6 +18,10 @@
 //! | [`Friedman`] | Regression | Gradual | Friedman, 1991 |
 //! | [`MackeyGlass`] | Regression | None | Mackey & Glass, 1977 |
 //! | [`Lorenz`] | Regression | None | Lorenz, 1963 |
+//! | [`MqarStream`] | Regression | Phase boundary | Arora et al., 2024 |
+//! | [`NeedleStream`] | Regression | Epoch boundary | — |
+//! | [`PeriodicStream`] | Regression | None | — |
+//! | [`ParityStream`] | Binary classification | None | Abbe et al., 2023 |
 //!
 //! # Example
 //!
@@ -38,6 +42,10 @@ pub mod hyperplane;
 pub mod led;
 pub mod lorenz;
 pub mod mackey_glass;
+pub mod mqar;
+pub mod needle;
+pub mod parity;
+pub mod periodic;
 pub mod rbf;
 pub mod sea;
 pub mod waveform;
@@ -48,6 +56,10 @@ pub use hyperplane::Hyperplane;
 pub use led::LED;
 pub use lorenz::Lorenz;
 pub use mackey_glass::MackeyGlass;
+pub use mqar::MqarStream;
+pub use needle::NeedleStream;
+pub use parity::ParityStream;
+pub use periodic::PeriodicStream;
 pub use rbf::RandomRBF;
 pub use sea::SEA;
 pub use waveform::Waveform;
@@ -58,6 +70,7 @@ pub use waveform::Waveform;
 
 /// Describes the learning task for a stream generator.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TaskType {
     /// Continuous target prediction.
     Regression,

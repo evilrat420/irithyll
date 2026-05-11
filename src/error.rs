@@ -5,7 +5,7 @@
 //! with std-only variants (`Serialization`, `ChannelClosed`).
 
 // Re-export core error types.
-pub use irithyll_core::error::{ConfigError, FormatError};
+pub use irithyll_core::error::ConfigError;
 
 use thiserror::Error;
 
@@ -15,6 +15,7 @@ use thiserror::Error;
 /// `NotTrained`) mirror `irithyll_core::IrithyllError`. Std-only variants
 /// (`Serialization`, `ChannelClosed`) are added here.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum IrithyllError {
     /// Configuration validation failed.
     #[error("invalid configuration: {0}")]
@@ -26,7 +27,12 @@ pub enum IrithyllError {
 
     /// Feature dimension mismatch between sample and model.
     #[error("dimension mismatch: expected {expected}, got {got}")]
-    DimensionMismatch { expected: usize, got: usize },
+    DimensionMismatch {
+        /// Expected number of features.
+        expected: usize,
+        /// Actual number of features received.
+        got: usize,
+    },
 
     /// Model has not been trained yet.
     #[error("model not trained")]
@@ -41,4 +47,5 @@ pub enum IrithyllError {
     ChannelClosed,
 }
 
+/// Shorthand result type with [`IrithyllError`] as the error variant.
 pub type Result<T> = std::result::Result<T, IrithyllError>;

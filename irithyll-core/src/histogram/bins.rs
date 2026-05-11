@@ -241,6 +241,7 @@ impl FeatureHistogram {
 /// that accumulates statistics from all samples routed to that leaf.
 #[derive(Debug, Clone)]
 pub struct LeafHistograms {
+    /// Per-feature histograms (one per feature column).
     pub histograms: Vec<FeatureHistogram>,
 }
 

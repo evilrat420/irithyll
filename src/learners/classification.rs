@@ -62,6 +62,7 @@ use crate::learners::rls::RecursiveLeastSquares;
 
 /// Classification mode for a wrapped streaming learner.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum ClassificationMode {
     /// Raw regression output (default, no transformation).
     Regression,

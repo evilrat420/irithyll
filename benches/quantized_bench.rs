@@ -1,7 +1,7 @@
 //! Benchmarks for int16 quantized inference vs f32 packed inference.
 //!
 //! Measures latency, throughput, accuracy degradation, and binary size for the
-//! quantized export path introduced in v8.1.
+//! quantized export path.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use irithyll::ensemble::config::SGBTConfig;

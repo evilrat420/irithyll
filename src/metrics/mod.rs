@@ -19,6 +19,7 @@ pub mod platt_scaling;
 pub mod quantile_tracker;
 pub mod regression;
 pub mod rolling;
+pub mod streaming_metric;
 pub mod strongly_adaptive;
 pub mod temperature_scaling;
 
@@ -29,6 +30,9 @@ pub use importance::FeatureImportance;
 pub use platt_scaling::OnlinePlattScaling;
 pub use quantile_tracker::StreamingQuantileTracker;
 pub use regression::RegressionMetrics;
+pub use streaming_metric::{
+    Accuracy, LogLoss, MetricUnion, Pinball, StreamingMetric, MAE, MSE, R2, RMSE,
+};
 pub use strongly_adaptive::StronglyAdaptiveConformal;
 pub use temperature_scaling::OnlineTemperatureScaling;
 

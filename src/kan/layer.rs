@@ -39,9 +39,12 @@ pub(crate) struct KANLayer {
     /// on sparse B-spline updates.
     velocity: Vec<f64>,
     /// RMSProp accumulator: exponential moving average of squared gradients
-    /// per coefficient. Used to adaptively scale the learning rate so that
-    /// frequently-updated coefficients get smaller steps (stability) while
-    /// rarely-activated B-spline regions get larger steps (convergence).
+    /// per coefficient (β = 0.9, from Hinton's original lecture notes, 2012).
+    /// Used to adaptively scale the learning rate so that frequently-updated
+    /// coefficients get smaller steps (stability) while rarely-activated
+    /// B-spline regions get larger steps (convergence). Unlike Adagrad, the
+    /// EWMA decay prevents the denominator from growing monotonically to
+    /// infinity on long streams, preserving a non-vanishing effective LR.
     /// Same layout as `coefficients`.
     grad_sq_accum: Vec<f64>,
     /// Residual bypass weights, `[n_out * n_in]`.
@@ -93,9 +96,10 @@ impl KANLayer {
         // Velocity: zero-initialized (same layout as coefficients)
         let velocity = vec![0.0; total_coeffs];
 
-        // RMSProp accumulator: initialized to small positive value to avoid
-        // division by zero on the first step.
-        let grad_sq_accum = vec![1e-6; total_coeffs];
+        // RMSProp accumulator: initialized to 1.0 so that effective LR ≈ lr
+        // on the first step (before the EWMA has accumulated signal). The β = 0.9
+        // decay brings this toward the true squared-gradient scale within ~100 steps.
+        let grad_sq_accum = vec![1.0; total_coeffs];
 
         // Residual bypass: 1/n_in (scaled initialization)
         let w_b_val = 1.0 / n_in as f64;
@@ -180,11 +184,13 @@ impl KANLayer {
         // large-magnitude targets. 10.0 is sufficient for z-scored targets.
         // UPDATE_CLIP: safety net for w_b/w_s scale weight updates to prevent
         // positive-feedback loops. Not applied to B-spline coefficients
-        // (Adagrad handles their adaptive scaling instead).
-        // ADAGRAD_EPS: prevents division by zero in adaptive LR denominator.
+        // (RMSProp handles their adaptive scaling instead).
         const GRAD_CLIP: f64 = 10.0;
         const UPDATE_CLIP: f64 = 0.5;
-        const ADAGRAD_EPS: f64 = 1e-8;
+        // RMSProp: EWMA decay β = 0.9 (Hinton, 2012 lecture notes — principled default).
+        // EPS prevents division by zero in the adaptive LR denominator.
+        const RMSPROP_BETA: f64 = 0.9;
+        const RMSPROP_EPS: f64 = 1e-8;
 
         for (j, &delta_j_raw) in output_grad.iter().enumerate() {
             // Clip incoming gradient for stability
@@ -220,12 +226,13 @@ impl KANLayer {
 
                 // --- Update coefficients (SPARSE: only k+1 per edge) ---
                 // NaN/Inf guard: skip coefficient updates if any gradient is non-finite.
-                // Adagrad: adaptively scale each coefficient's learning rate by the
-                // inverse root of its cumulative sum of squared gradients.
-                // This is ideal for B-spline sparsity: rarely-activated coefficients
-                // accumulate smaller grad_sq_sum, getting proportionally larger
-                // effective LR when activated. Unlike RMSProp, the accumulator never
-                // decays, so the per-coefficient activation history is preserved.
+                // RMSProp (Hinton, 2012): EWMA of squared gradients scales the LR
+                // adaptively per coefficient. Rarely-activated B-spline coefficients
+                // accumulate a smaller squared-gradient EWMA, so their effective LR
+                // stays larger — preserving activation from sparse regions. Unlike
+                // Adagrad, the EWMA decay (β = 0.9) prevents the denominator growing
+                // monotonically to infinity on long streams, maintaining a non-vanishing
+                // effective LR throughout streaming training.
                 let coeff_grad_base = delta_j * self.w_s[edge];
                 if coeff_grad_base.is_finite() {
                     for (b, &basis_val) in bases.iter().enumerate() {
@@ -236,12 +243,16 @@ impl KANLayer {
                                 // dL/dc_g = delta_j * w_s * B_g(x)
                                 let vi = coeff_base + coeff_idx;
 
-                                // Adagrad: accumulate squared gradient
-                                self.grad_sq_accum[vi] += grad * grad;
+                                // RMSProp: EWMA of squared gradient (β = 0.9).
+                                // The EWMA decay ensures the effective LR stays
+                                // non-vanishing on long streams, unlike Adagrad whose
+                                // monotonically-growing denominator drives LR → 0.
+                                self.grad_sq_accum[vi] = RMSPROP_BETA * self.grad_sq_accum[vi]
+                                    + (1.0 - RMSPROP_BETA) * grad * grad;
 
                                 // Adaptive learning rate: lr / sqrt(accum + eps)
                                 let adaptive_lr =
-                                    lr / (self.grad_sq_accum[vi].sqrt() + ADAGRAD_EPS);
+                                    lr / (self.grad_sq_accum[vi].sqrt() + RMSPROP_EPS);
 
                                 // Momentum on the adapted gradient
                                 let update = self.momentum * self.velocity[vi] + adaptive_lr * grad;
@@ -291,8 +302,9 @@ impl KANLayer {
         for v in &mut self.velocity {
             *v = 0.0;
         }
+        // Re-initialize RMSProp accumulators to 1.0 (matches `new()` init).
         for a in &mut self.grad_sq_accum {
-            *a = 1e-6;
+            *a = 1.0;
         }
         let w_b_val = 1.0 / self.n_in as f64;
         for w in &mut self.w_b {
@@ -306,7 +318,7 @@ impl KANLayer {
     /// Surgically reinitialize all edges connected to a specific output node.
     ///
     /// When hidden node `j` dies (low utility), all incoming edges to node `j`
-    /// have their B-spline coefficients, velocity, Adagrad accumulators, and
+    /// have their B-spline coefficients, velocity, RMSProp accumulators, and
     /// scale weights reset to fresh values. This preserves all other nodes'
     /// learned representations.
     ///
@@ -338,10 +350,10 @@ impl KANLayer {
                 self.coefficients[coeff_base + c] = standard_normal(rng) * scale;
             }
 
-            // Zero velocity and reset Adagrad accumulator.
+            // Zero velocity and reset RMSProp accumulator to 1.0 (matches `new()` init).
             for c in 0..self.n_coeffs {
                 self.velocity[coeff_base + c] = 0.0;
-                self.grad_sq_accum[coeff_base + c] = 1e-6;
+                self.grad_sq_accum[coeff_base + c] = 1.0;
             }
 
             // Reset scale weights.
@@ -384,10 +396,10 @@ impl KANLayer {
                 self.coefficients[coeff_base + c] = standard_normal(rng) * scale;
             }
 
-            // Zero velocity and reset Adagrad accumulator.
+            // Zero velocity and reset RMSProp accumulator to 1.0 (matches `new()` init).
             for c in 0..self.n_coeffs {
                 self.velocity[coeff_base + c] = 0.0;
-                self.grad_sq_accum[coeff_base + c] = 1e-6;
+                self.grad_sq_accum[coeff_base + c] = 1.0;
             }
 
             // Reset scale weights.

@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 
 /// Quantization bit depth. Controls the quality/compression tradeoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum QuantMode {
     /// 8-bit: 256 levels, 4 values per u32. Near-lossless (~0.4% max error).
     /// ~8x compression vs f64. Simple byte packing.

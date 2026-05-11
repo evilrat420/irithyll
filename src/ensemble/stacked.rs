@@ -222,6 +222,7 @@ impl StreamingLearner for StackedEnsemble {
     }
 
     /// Aggregate diagnostics from the first base learner as representative signal.
+    #[allow(deprecated)]
     fn diagnostics_array(&self) -> [f64; 5] {
         if let Some(first) = self.base_learners.first() {
             first.diagnostics_array()
@@ -231,6 +232,7 @@ impl StreamingLearner for StackedEnsemble {
     }
 
     /// Sum of replacement counts across all base learners and the meta-learner.
+    #[allow(deprecated)]
     fn replacement_count(&self) -> u64 {
         self.base_learners
             .iter()
@@ -240,6 +242,7 @@ impl StreamingLearner for StackedEnsemble {
     }
 
     /// Forward config adjustments to all base learners and the meta-learner.
+    #[allow(deprecated)]
     fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
         for learner in &mut self.base_learners {
             learner.adjust_config(lr_multiplier, lambda_delta);

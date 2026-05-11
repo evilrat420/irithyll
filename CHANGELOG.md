@@ -5,6 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.0.0] - 2026-05-10
+
+### Added
+
+- **Log-Linear Attention** (LLA) — hierarchical Fenwick-stack state, softplus-softmax mixing, online streaming SGD with chain-rule gradients
+- **Mamba-3** — `SelectiveSSMv3Exp` (exp-trapezoidal 3-term recurrence with data-dependent λ_t) and `SelectiveSSMv3Mimo` (rank-R matrix-valued state H ∈ R^{N×P})
+- **Random Feature Network lift** for V3Exp readout (Rahimi & Recht 2008) — tanh projection of bipolar input bits, `n_lift = max(64, 32·d_in)`
+- **AutoML overhaul** — typed `ArmConfig`, `MetaLearner` trait, `AdaptationBus` enforcing Banach contraction (∏ L_i < 1), Pareto winner selection, race-drift detection, optional `distillation` feature
+- **Streaming primitives layer** — `gate_head`, `complex_diag`, `BCNorm`
+- **Principled-claim integration tests** — Bernstein-bounded baseline + Pareto-dominance + mechanism diagnostic methodology (`tests/log_linear_attention.rs`, `tests/selective_ssm_v3.rs`)
+- **4-tier examples** — `01_quickstart` → `04_advanced` (replaces flat layout)
+- **Documentation suite** — README rewrite, `MODELS.md`, `docs/USAGE.md`, expanded `BENCHMARKS.md`, `REFERENCES.md`, `scripts/plot_benchmarks.py`
+- **Bench expansion** — `delta_family_gauntlet`, `log_linear_bench`, `moa_generators_bench`, iai-callgrind 0.14 regression bench
+- **`AGENTS.md` canonical knowledge base** for sub-agent context
+- **TUI demo dashboard** — `irithyll-cli` runs all eight model families (SGBT, Mamba, TTT, KAN, ESN, NG-RC, SpikeNet, Linear) on a Friedman regression stream; sixel-rendered loss/R²/accuracy/pinball/MAE chart, family-specific Architecture and State diagnostics, per-feature importance for SGBT/KAN/Linear, "not exposed" placeholder for the five black-box families
+- **`train --tui` and `eval --tui` for all supported families** — users can run any of `sgbt`, `mamba`, `ttt`, `kan`, `esn`, `ngrc`, `spike-net` on their own CSV with the live dashboard
+- **`--bench <name>` flag** for the demo path — switches the in-tree generator (`friedman`, `lorenz`, `mackey-glass`, `periodic`, `mqar`, `needle`) so users can try any family on any benchmark with no code
+- **`--throttle-us <N>` flag** — opt-in per-sample throttle for the demo (default 0 = max throughput); reproduce the README GIF pace with `--throttle-us 500`
+- **Dataset name in TUI header** — Friedman demo shows `· friedman ·`; user CSV runs show the filename, so multiple terminals stay distinguishable
+- `StreamingKAN::input_importances()` — per-input feature importance from layer-0 B-spline coefficient magnitudes (additive public API)
+
+### Changed
+
+- `DistributionalSGBT::new()` pre-allocates `n_steps` boosting steps (previously `Vec::with_capacity` only — silent training no-op)
+- `GateHead::forward` clamps to `(GATE_EPS, 1.0 − GATE_EPS)` to honor open-interval contract under extreme inputs
+- README rewritten — hero paragraph, 4 Quick Start snippets, design principles section, inline references
+- TUI Live metrics now show only time-varying signals — config constants (n_reservoir, spectral_radius, n_layers, etc.) moved to the Diagnostics → Architecture section; placeholder zero rows (e.g. KAN's `regularization` from `coefficient_decay`, Linear's hardcoded `[0]/[1]/[2]` slots) removed
+
+### Fixed
+
+- LLA backprop monotonic loss reduction — L2-norm Jacobian for delta-family inner modes
+- V3Exp readout closure via Random Feature lift — accuracy 0.948 vs V1 0.496 (20.3× empirical Bernstein margin)
+- Pipeline target-preprocessor `inverts_on_predict` test correctness — parallel reference scaler for post-train statistics
+
+### Deprecated
+
+- `forward_readonly` on attention heads — renamed to `query_state` (alias preserved with `#[deprecated(since = "10.0.0")]`)
+
+### Removed
+
+- Flat `examples/` layout — files moved into the 4-tier structure
+
 ## [9.9.9] - 2026-04-11
 
 ### Added

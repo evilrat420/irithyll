@@ -49,7 +49,7 @@ pub mod spikenet_config;
 
 pub use spike_preprocessor::SpikePreprocessor;
 pub use spikenet::SpikeNet;
-pub use spikenet_config::{SpikeNetConfig, SpikeNetConfigBuilder};
+pub use spikenet_config::{LearningRule, SpikeNetConfig, SpikeNetConfigBuilder};
 
 /// Convenience alias for [`SpikeNet`].
 pub type StreamingSpikeNet = SpikeNet;

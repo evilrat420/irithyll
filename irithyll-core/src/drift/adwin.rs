@@ -893,10 +893,8 @@ mod tests {
         for _ in 0..2000 {
             let sig = det.update(rng.next_normal(2.0, 0.1));
             match sig {
-                DriftSignal::Warning => {
-                    if !saw_drift {
-                        _saw_warning = true;
-                    }
+                DriftSignal::Warning if !saw_drift => {
+                    _saw_warning = true;
                 }
                 DriftSignal::Drift => {
                     saw_drift = true;

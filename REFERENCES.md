@@ -38,6 +38,8 @@ Papers with a direct code counterpart in the library.
 
 - **StreamingMambaV3 / SSM duality** — Dao, T., & Gu, A. (2024). *Transformers are SSMs: Generalized models and efficient algorithms through structured state space duality.* arXiv:2405.21060. → `src/ssm/mamba_v3.rs`
 
+- **Mamba-3 SelectiveSSMv3** — Lahoti, A., Li, K. Y., Chen, B., Wang, C., Bick, A., Kolter, J. Z., Dao, T., & Gu, A. (2026). *Mamba-3: Improved sequence modeling using state space principles.* ICLR 2026. → `src/ssm/v3/` (SelectiveSSMv3Exp, SelectiveSSMv3Mimo)
+
 ### Spiking Neural Networks
 
 - **SpikeNet (e-prop)** — Bellec, G., Scherr, F., Subramoney, A., Hajek, E., Salaj, D., Legenstein, R., & Maass, W. (2020). *A solution to the learning dilemma for recurrent networks of spiking neurons.* Nature Communications, 11, 3625. → `src/snn/spikenet.rs`
@@ -61,6 +63,8 @@ Papers with a direct code counterpart in the library.
 - **GLA mode** — Yang, S., Wang, B., Shen, Y., Panda, R., & Kim, Y. (2023). *Gated linear attention transformers with hardware-efficient training.* arXiv:2312.06635. → `src/attention/` (GLA)
 
 - **DeltaNet mode** — Yang, S., et al. (2024). *Gated Delta Networks: Improving Mamba2 with Delta Rule.* arXiv:2412.06464. → `src/attention/` (DeltaNet)
+
+- **Log-Linear Attention mode** — Han, S., Lin, Y., Sun, Y., Tsvetkov, Y., Pham, H., Sankaranarayanan, A., Awadalla, H., Khabsa, M., & Yang, S. (2026). *Log-Linear Attention.* ICLR 2026. → `src/attention/` (LogLinear)
 
 - **RWKV mode** — Peng, B., et al. (2024). *Eagle and Finch: RWKV with matrix-valued states and dynamic recurrence.* arXiv:2404.05892. → `src/attention/` (RWKV)
 
@@ -100,6 +104,10 @@ Papers with a direct code counterpart in the library.
 
 - **SubspaceTracker (PAST)** — Yang, B. (1995). *Projection approximation subspace tracking.* IEEE Transactions on Signal Processing, 43(1), 95-107. → `src/projection/subspace.rs`
 
+### Mathematical Foundations
+
+- **Banach Fixed-Point Theorem** — Banach, S. (1922). *Sur les opérations dans les ensembles abstraits et leur application aux équations intégrales.* Fundamenta Mathematicae, 3, 133-181. → `src/automl/adaptation_bus.rs` (contraction inequality enforcement)
+
 ---
 
 ## Section 2: Algorithmic Foundations
@@ -117,6 +125,8 @@ Papers that inform core algorithms without mapping to a single named struct.
 - Domingos, P., & Hulten, G. (2000). *Mining high-speed data streams.* KDD 2000. → Hoeffding tree splitting criterion in `tree/`
 
 - Lunde, R., Kleppe, T. S., & Skaug, H. J. (2020). *An information criterion for automatic gradient tree boosting.* arXiv:2008.05926. → per-split information criterion in `tree/`
+
+- Rahimi, A., & Recht, B. (2007). *Random features for large-scale kernel machines.* NIPS 2007. → `src/ssm/v3/readout_lift.rs` (random feature network lift)
 
 ---
 

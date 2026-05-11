@@ -1,6 +1,6 @@
 [package]
 name = "irithyll-core"
-version = "0.9.3"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Core types, training engine, and inference for irithyll streaming ML — no_std + alloc, histogram binning, Hoeffding trees, SGBT ensembles, drift detection, f32 + int16 packed formats"
@@ -19,6 +19,9 @@ parallel = ["dep:rayon", "alloc"]
 simd = ["std"]
 simd-avx2 = ["std"]
 embedded-bench = ["dep:cortex-m-rt", "dep:cortex-m-semihosting", "dep:panic-halt"]
+# Marker feature gating the iai-callgrind regression bench source.
+# Bench compiles on all platforms; valgrind execution is Linux-only.
+iai-bench = []
 
 [dependencies]
 libm = "0.2"
@@ -27,6 +30,16 @@ serde = { version = "1.0", features = ["derive"], optional = true, default-featu
 cortex-m-rt = { version = "0.7", optional = true }
 cortex-m-semihosting = { version = "0.5", optional = true }
 panic-halt = { version = "1.0", optional = true }
+
+# iai-callgrind is a non-optional dev-dep (Cargo forbids optional dev-deps).
+# The bench source itself is gated behind `iai-bench`, so default builds
+# do not pull this into compile.
+# Target-gated to host (non-ARM) so it does NOT get pulled in on embedded
+# cross-compiles (thumbv6m/thumbv7em). serde_core 1.0.228 — pulled in via
+# iai-callgrind -> bincode/serde_json -> serde -> serde_core — fails to
+# compile on no_std targets, blocking the cortex_m_* example builds.
+[target.'cfg(not(target_arch = "arm"))'.dev-dependencies]
+iai-callgrind = "0.14"
 
 [[example]]
 name = "cortex_m_bench"
@@ -48,9 +61,14 @@ required-features = ["embedded-bench"]
 name = "cortex_m_validation"
 required-features = ["embedded-bench"]
 
+[[bench]]
+name = "packed_inference_iai"
+harness = false
+required-features = ["iai-bench"]
+
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("_serde_support", "_stacked_tests_disabled", "_packed_cache_tests_disabled"))'] }
 
 [package.metadata.docs.rs]
-features = ["alloc", "std", "serde"]
+features = ["alloc", "std", "serde", "kmeans-binning", "parallel", "simd", "simd-avx2"]
 rustdoc-args = ["--cfg", "docsrs"]

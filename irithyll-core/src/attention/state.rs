@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 /// - **Matrix**: Used by RetNet, GLA, DeltaNet, GatedDeltaNet, RWKV, mLSTM.
 ///   Shape: `d_key x d_value`, stored row-major in a flat `Vec<f64>`.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AttentionState {
     /// Vector state of dimension `d`.
     Vector(Vec<f64>),

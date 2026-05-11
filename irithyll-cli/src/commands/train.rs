@@ -7,18 +7,18 @@ use std::time::Instant;
 
 use irithyll::loss::LossType;
 use irithyll::serde_support::to_json_pretty;
-#[cfg(feature = "tui")]
-use irithyll::Loss;
 use irithyll::{DynSGBT, Sample, StreamingLearner};
 
 use crate::config::CliConfig;
 use crate::data::Dataset;
 
-#[cfg(feature = "tui")]
-use std::sync::{Arc, Mutex};
-
 /// Model type selection for the CLI.
+///
+/// Names accept either kebab-case or compact form (e.g. `mamba-3` or `mamba3`).
+/// The `auto-tune` value runs `Factory` racing with the factories listed in
+/// `--factories`.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub enum ModelType {
     /// Standard DynSGBT (default).
     #[default]
@@ -35,56 +35,131 @@ pub enum ModelType {
     Esn,
     /// Streaming Mamba (selective SSM).
     Mamba,
+    /// Streaming Mamba-3 (MIMO groups, complex states, trapezoidal discretisation).
+    Mamba3,
+    /// Streaming Mamba BD-LRU (block-diagonal linear recurrence).
+    MambaBd,
+    /// Streaming sLSTM (exponential gating with log-domain stabilisation).
+    Slstm,
+    /// Streaming mGRADE (minimal recurrent gating with delay convolutions).
+    Mgrade,
     /// Spiking Neural Network with e-prop learning.
     SpikeNet,
-    /// Gated Linear Attention (SOTA streaming attention).
+    /// Gated Linear Attention.
     Gla,
-    /// Gated DeltaNet (strongest retrieval, NVIDIA 2024).
+    /// Gated DeltaNet.
     DeltaNet,
-    /// Hawk (lightest streaming attention, vector state).
+    /// DeltaProduct attention (Householder delta rule composition).
+    DeltaProduct,
+    /// RWKV-7 attention (vector-gated delta rule, DPLR transitions).
+    Rwkv7,
+    /// HGRN2 (lower-bounded gated linear RNN with state expansion).
+    Hgrn2,
+    /// Hawk (vector state, single-head).
     Hawk,
-    /// Retentive Network (simplest, fixed decay).
+    /// Retentive Network (fixed exponential decay).
     RetNet,
+    /// Log-Linear Attention (hierarchical Fenwick state).
+    LogLinear,
     /// Streaming TTT (test-time training with fast weights).
     Ttt,
     /// Streaming KAN (B-spline edge activations).
     Kan,
-    /// Automated model selection via Factory racing (AutoTuner).
+    /// Automated model selection via `Factory` racing (`AutoTuner`).
     Factory,
 }
 
+/// Available factory keys for `--factories` and the help text on `--model-type`.
+///
+/// Keep in sync with the match arms in `factory_from_name`.
+pub(crate) const FACTORY_KEYS: &[&str] = &[
+    "sgbt",
+    "distributional",
+    "multiclass-sgbt",
+    "esn",
+    "mamba",
+    "mamba-3",
+    "mamba-bd",
+    "s-lstm",
+    "mgrade",
+    "attention",
+    "delta-product",
+    "rwkv-7",
+    "spike-net",
+    "kan",
+    "ttt",
+];
+
 impl ModelType {
+    /// Parse a model-type string. Accepts both kebab-case and compact aliases.
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "sgbt" => Ok(ModelType::Sgbt),
             "distributional" => Ok(ModelType::Distributional),
-            "multiclass" => Ok(ModelType::Multiclass),
+            "multiclass" | "multiclass-sgbt" => Ok(ModelType::Multiclass),
             "bagged" => Ok(ModelType::Bagged),
             "ngrc" => Ok(ModelType::Ngrc),
             "esn" => Ok(ModelType::Esn),
             "mamba" => Ok(ModelType::Mamba),
-            "spikenet" => Ok(ModelType::SpikeNet),
+            "mamba-3" | "mamba3" => Ok(ModelType::Mamba3),
+            "mamba-bd" | "mambabd" => Ok(ModelType::MambaBd),
+            "s-lstm" | "slstm" => Ok(ModelType::Slstm),
+            "mgrade" => Ok(ModelType::Mgrade),
+            "spike-net" | "spikenet" => Ok(ModelType::SpikeNet),
             "gla" => Ok(ModelType::Gla),
-            "deltanet" => Ok(ModelType::DeltaNet),
+            "delta-net" | "deltanet" => Ok(ModelType::DeltaNet),
+            "delta-product" | "deltaproduct" => Ok(ModelType::DeltaProduct),
+            "rwkv-7" | "rwkv7" => Ok(ModelType::Rwkv7),
+            "hgrn2" => Ok(ModelType::Hgrn2),
             "hawk" => Ok(ModelType::Hawk),
-            "retnet" => Ok(ModelType::RetNet),
+            "ret-net" | "retnet" => Ok(ModelType::RetNet),
+            "log-linear" | "loglinear" => Ok(ModelType::LogLinear),
             "ttt" => Ok(ModelType::Ttt),
             "kan" => Ok(ModelType::Kan),
-            "factory" | "autotuner" => Ok(ModelType::Factory),
+            "factory" | "auto-tune" | "autotune" | "autotuner" => Ok(ModelType::Factory),
             _ => Err(eyre!(
-                "unknown model type '{}'. supported: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet, gla, deltanet, hawk, retnet, ttt, kan, factory",
-                s
+                "unknown model type '{}'.\n  supported: {}",
+                s,
+                MODEL_TYPE_KEYS.join(", "),
             )),
         }
     }
 }
 
+/// Keys accepted by `--model-type`. Kept here as a single source of truth for
+/// help text and error messages.
+pub(crate) const MODEL_TYPE_KEYS: &[&str] = &[
+    "sgbt",
+    "distributional",
+    "multiclass",
+    "bagged",
+    "ngrc",
+    "esn",
+    "mamba",
+    "mamba-3",
+    "mamba-bd",
+    "s-lstm",
+    "mgrade",
+    "spike-net",
+    "gla",
+    "delta-net",
+    "delta-product",
+    "rwkv-7",
+    "hgrn2",
+    "hawk",
+    "ret-net",
+    "log-linear",
+    "ttt",
+    "kan",
+    "factory",
+];
+
 #[derive(Args)]
 pub struct TrainArgs {
-    /// Path to training data (CSV or Parquet)
+    /// Path to training data (CSV)
     pub data: String,
 
-    /// Path to config file (TOML)
+    /// Path to a TOML config file
     #[arg(short, long)]
     pub config: Option<String>,
 
@@ -96,36 +171,51 @@ pub struct TrainArgs {
     #[arg(short, long, default_value = "model.json")]
     pub output: String,
 
-    /// Number of boosting steps
+    /// Number of boosting steps (SGBT family)
     #[arg(long)]
     pub n_steps: Option<usize>,
 
-    /// Learning rate
+    /// Learning rate (overrides config)
     #[arg(long)]
     pub learning_rate: Option<f64>,
 
-    /// Max tree depth
+    /// Max tree depth (SGBT family)
     #[arg(long)]
     pub max_depth: Option<usize>,
 
-    /// Model type: sgbt, distributional, multiclass, bagged, ngrc, esn, mamba, spikenet, gla, deltanet, hawk, retnet, ttt, kan, factory
-    #[arg(long, default_value = "sgbt")]
+    /// Model type. See --help for the full list.
+    #[arg(long, default_value = "sgbt", value_name = "TYPE")]
     pub model_type: String,
 
     /// Number of classes (required for softmax loss and multiclass model type)
     #[arg(long)]
     pub n_classes: Option<usize>,
 
-    /// Number of bags for bagged model type (default: 10)
+    /// Number of bags for bagged model type
     #[arg(long, default_value = "10")]
     pub n_bags: usize,
 
-    /// Comma-separated list of factories to race (default: sgbt,esn,mamba).
-    /// Available: sgbt, esn, mamba, mamba3, ttt, kan, spikenet, attention, distributional
-    #[arg(long, default_value = "sgbt,esn,mamba")]
+    /// Wrap the chosen model in an AutoTuner; equivalent to --model-type factory --factories <type>
+    #[arg(long)]
+    pub auto_tune: bool,
+
+    /// Comma-separated list of factories to race when --model-type=factory
+    #[arg(long, default_value = "sgbt,esn,mamba", value_name = "LIST")]
     pub factories: String,
 
-    /// Launch TUI dashboard
+    /// Initial candidates per AutoTuner tournament
+    #[arg(long, value_name = "N")]
+    pub n_initial: Option<usize>,
+
+    /// Maximum bracket size for adaptive AutoTuner tournaments
+    #[arg(long, value_name = "N")]
+    pub max_n_initial: Option<usize>,
+
+    /// Enable drift-triggered re-racing in AutoTuner
+    #[arg(long)]
+    pub use_drift_rerace: bool,
+
+    /// Launch the TUI dashboard
     #[arg(long)]
     #[cfg(feature = "tui")]
     pub tui: bool,
@@ -157,7 +247,43 @@ pub fn run(args: TrainArgs) -> Result<()> {
     // 4. Load dataset
     let dataset = Dataset::from_csv(Path::new(&args.data), args.target.as_deref())?;
 
-    // 5. Branch on model type
+    // 5. If --auto-tune was passed, route to factory racing using the chosen
+    //    model as the seed factory. Explicit `--model-type factory` still uses
+    //    the `--factories` list.
+    if args.auto_tune && !matches!(model_type, ModelType::Factory) {
+        let seed_factory = factory_key_for_model(&model_type)?;
+        return run_factory_with_keys(&args, dataset, &[seed_factory]);
+    }
+
+    // 5b. If --tui was passed, route to the multi-family TUI dashboard for
+    //     any supported family. Each family builds a `tui::DemoModel` sized
+    //     for the loaded CSV. Unsupported model types fall through with a
+    //     clear error rather than silently ignoring `--tui`.
+    #[cfg(feature = "tui")]
+    if args.tui {
+        let family = match model_type {
+            ModelType::Sgbt => Some(crate::tui::ModelFamily::Sgbt),
+            ModelType::Mamba => Some(crate::tui::ModelFamily::Mamba),
+            ModelType::Ttt => Some(crate::tui::ModelFamily::Ttt),
+            ModelType::Kan => Some(crate::tui::ModelFamily::Kan),
+            ModelType::Esn => Some(crate::tui::ModelFamily::Esn),
+            ModelType::Ngrc => Some(crate::tui::ModelFamily::Ngrc),
+            ModelType::SpikeNet => Some(crate::tui::ModelFamily::SpikeNet),
+            _ => None,
+        };
+        if let Some(family) = family {
+            let model = crate::tui::DemoModel::build_for_dataset(family, dataset.n_features);
+            let label = crate::tui::label_from_csv_path(&args.data);
+            return crate::tui::run_with_dataset(model, dataset, &args.output, label);
+        } else {
+            return Err(eyre!(
+                "--tui not yet supported for --model-type {}. Supported: sgbt, mamba, ttt, kan, esn, ngrc, spike-net",
+                args.model_type
+            ));
+        }
+    }
+
+    // 6. Branch on model type
     match model_type {
         ModelType::Sgbt => run_sgbt(args, cli_config, loss_type, dataset),
         ModelType::Distributional => run_distributional(args, cli_config, dataset),
@@ -166,15 +292,60 @@ pub fn run(args: TrainArgs) -> Result<()> {
         ModelType::Ngrc => run_ngrc(cli_config, dataset),
         ModelType::Esn => run_esn(cli_config, dataset),
         ModelType::Mamba => run_mamba(cli_config, dataset),
+        ModelType::Mamba3 => run_mamba3(cli_config, dataset),
+        ModelType::MambaBd => run_mamba_bd(cli_config, dataset),
+        ModelType::Slstm => run_slstm(dataset),
+        ModelType::Mgrade => run_mgrade(dataset),
         ModelType::SpikeNet => run_spikenet(cli_config, dataset),
         ModelType::Gla => run_gla(&dataset, &cli_config),
         ModelType::DeltaNet => run_deltanet(&dataset, &cli_config),
+        ModelType::DeltaProduct => run_delta_product(&dataset, &cli_config),
+        ModelType::Rwkv7 => run_rwkv7(&dataset, &cli_config),
+        ModelType::Hgrn2 => run_hgrn2(&dataset, &cli_config),
         ModelType::Hawk => run_hawk(&dataset, &cli_config),
         ModelType::RetNet => run_retnet(&dataset, &cli_config),
+        ModelType::LogLinear => run_log_linear(&dataset, &cli_config),
         ModelType::Ttt => run_ttt(&cli_config, dataset),
         ModelType::Kan => run_kan(&cli_config, dataset),
         ModelType::Factory => run_factory(&args, dataset),
     }
+}
+
+/// Public re-export so `eval.rs` can share the same mapping.
+pub(crate) fn factory_key_for_model_pub(model: &ModelType) -> Result<&'static str> {
+    factory_key_for_model(model)
+}
+
+/// Map a ModelType to its `Factory::*` key so `--auto-tune` can wrap it.
+fn factory_key_for_model(model: &ModelType) -> Result<&'static str> {
+    Ok(match model {
+        ModelType::Sgbt => "sgbt",
+        ModelType::Distributional => "distributional",
+        ModelType::Multiclass => "multiclass-sgbt",
+        ModelType::Esn => "esn",
+        ModelType::Mamba => "mamba",
+        ModelType::Mamba3 => "mamba-3",
+        ModelType::MambaBd => "mamba-bd",
+        ModelType::Slstm => "s-lstm",
+        ModelType::Mgrade => "mgrade",
+        ModelType::SpikeNet => "spike-net",
+        ModelType::Gla
+        | ModelType::DeltaNet
+        | ModelType::Hawk
+        | ModelType::RetNet
+        | ModelType::Hgrn2
+        | ModelType::LogLinear => "attention",
+        ModelType::DeltaProduct => "delta-product",
+        ModelType::Rwkv7 => "rwkv-7",
+        ModelType::Ttt => "ttt",
+        ModelType::Kan => "kan",
+        ModelType::Bagged | ModelType::Ngrc | ModelType::Factory => {
+            return Err(eyre!(
+                "--auto-tune is not supported for model type '{:?}'. Use --model-type factory --factories <list> instead.",
+                model
+            ));
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -193,12 +364,8 @@ fn run_sgbt(
         .build()?;
 
     let mut model = DynSGBT::with_loss(sgbt_config, loss_type.clone().into_loss());
-
-    #[cfg(feature = "tui")]
-    if args.tui {
-        return run_with_tui(model, loss_type, dataset, &args.output);
-    }
-
+    // --tui dispatch happens in `run()` before this branch, via the
+    // multi-family `tui::run_with_dataset` path.
     run_headless(&mut model, &loss_type, &dataset, &args.output)
 }
 
@@ -248,103 +415,6 @@ fn run_headless(
     println!("  Saved to: {}", output_path);
 
     Ok(())
-}
-
-#[cfg(feature = "tui")]
-fn run_with_tui(
-    mut model: DynSGBT,
-    loss_type: LossType,
-    dataset: Dataset,
-    output_path: &str,
-) -> Result<()> {
-    use crate::tui::{AppState, SharedState};
-
-    let state: SharedState = Arc::new(Mutex::new(AppState::new(dataset.n_samples as u64)));
-    let tui_state = state.clone();
-    let output = output_path.to_string();
-
-    // Build a tokio runtime for the TUI async event loop
-    let rt = tokio::runtime::Runtime::new()?;
-
-    rt.block_on(async {
-        // Spawn training on a background thread
-        let train_state = state.clone();
-        let train_handle = tokio::task::spawn_blocking(move || {
-            let start = Instant::now();
-            let update_interval = (dataset.n_samples / 200).max(1); // ~200 UI updates
-
-            for i in 0..dataset.n_samples {
-                let sample = Sample::new(dataset.features[i].clone(), dataset.targets[i]);
-
-                // Compute loss before training for the loss chart
-                let pred = model.predict(&dataset.features[i]);
-                let loss_val = model.loss().loss(dataset.targets[i], pred);
-
-                model.train_one(&sample);
-
-                // Update shared state periodically
-                if i % update_interval == 0 || i == dataset.n_samples - 1 {
-                    let elapsed = start.elapsed().as_secs_f64();
-                    let throughput = if elapsed > 0.0 {
-                        (i + 1) as f64 / elapsed
-                    } else {
-                        0.0
-                    };
-
-                    let mut s = train_state.lock().unwrap();
-                    s.n_samples = (i + 1) as u64;
-                    s.elapsed_secs = elapsed;
-                    s.throughput = throughput;
-                    s.loss_history.push(loss_val);
-                    s.status_message = format!("Training... {:.0} samples/sec", throughput);
-                }
-            }
-
-            let elapsed = start.elapsed();
-
-            // Mark done and update final metrics + feature importances
-            {
-                let mut s = train_state.lock().unwrap();
-                s.is_training = false;
-                s.is_done = true;
-                s.n_samples = dataset.n_samples as u64;
-                s.elapsed_secs = elapsed.as_secs_f64();
-                s.throughput = dataset.n_samples as f64 / elapsed.as_secs_f64();
-                s.metrics = vec![
-                    ("Samples".to_string(), dataset.n_samples as f64),
-                    ("Steps".to_string(), model.n_steps() as f64),
-                    ("Leaves".to_string(), model.total_leaves() as f64),
-                    (
-                        "Throughput".to_string(),
-                        dataset.n_samples as f64 / elapsed.as_secs_f64(),
-                    ),
-                    ("Time (s)".to_string(), elapsed.as_secs_f64()),
-                ];
-                s.feature_importances = model
-                    .feature_importances()
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &v)| (format!("f{}", i), v))
-                    .filter(|(_, v)| *v > 0.0)
-                    .collect();
-            }
-
-            // Save model
-            let model_state = model.to_model_state_with(loss_type);
-            let json = to_json_pretty(&model_state).unwrap();
-            std::fs::write(&output, &json).unwrap();
-
-            Ok::<(), color_eyre::Report>(())
-        });
-
-        // Run TUI on the main async task
-        let tui_result = crate::tui::run_tui(tui_state).await;
-
-        // Wait for training to finish (it may already be done)
-        let _ = train_handle.await?;
-
-        tui_result
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -707,13 +777,18 @@ fn run_gla(dataset: &Dataset, config: &CliConfig) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn run_deltanet(dataset: &Dataset, config: &CliConfig) -> Result<()> {
-    use irithyll::attention::{AttentionMode, StreamingAttentionConfig, StreamingAttentionModel};
+    use irithyll::attention::{
+        AttentionMode, GatedDeltaMode, StreamingAttentionConfig, StreamingAttentionModel,
+    };
 
     let att = &config.neural.attention;
     let att_config = StreamingAttentionConfig::builder()
         .d_model(dataset.n_features)
         .n_heads(att.n_heads)
-        .mode(AttentionMode::GatedDeltaNet { beta_scale: 1.0 })
+        .mode(AttentionMode::GatedDeltaNet {
+            beta_scale: 1.0,
+            gate_mode_delta: GatedDeltaMode::Static,
+        })
         .seed(att.seed)
         .warmup(att.warmup)
         .build()
@@ -822,51 +897,187 @@ fn run_kan(cli_config: &CliConfig, dataset: Dataset) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// New v10 attention modes
+// ---------------------------------------------------------------------------
+
+fn run_delta_product(dataset: &Dataset, _config: &CliConfig) -> Result<()> {
+    let mut model = irithyll::attention::delta_product(dataset.n_features.max(2), 1, 3);
+    println!(
+        "Loaded {} samples, {} features (delta-product, n_compositions=3)",
+        dataset.n_samples, dataset.n_features,
+    );
+    run_neural_headless(&mut model, dataset, "delta-product")
+}
+
+fn run_rwkv7(dataset: &Dataset, _config: &CliConfig) -> Result<()> {
+    let mut model = irithyll::attention::rwkv7(dataset.n_features.max(2), 1);
+    println!(
+        "Loaded {} samples, {} features (rwkv-7)",
+        dataset.n_samples, dataset.n_features,
+    );
+    run_neural_headless(&mut model, dataset, "rwkv-7")
+}
+
+fn run_hgrn2(dataset: &Dataset, _config: &CliConfig) -> Result<()> {
+    let mut model = irithyll::attention::hgrn2(dataset.n_features.max(2), 1, 0.9);
+    println!(
+        "Loaded {} samples, {} features (hgrn2, lower_bound=0.9)",
+        dataset.n_samples, dataset.n_features,
+    );
+    run_neural_headless(&mut model, dataset, "hgrn2")
+}
+
+fn run_log_linear(dataset: &Dataset, _config: &CliConfig) -> Result<()> {
+    use irithyll::attention::AttentionMode;
+
+    let mut model = irithyll::log_linear(
+        dataset.n_features.max(2),
+        1,
+        AttentionMode::GLA,
+        irithyll::DEFAULT_MAX_LEVELS,
+    );
+    println!(
+        "Loaded {} samples, {} features (log-linear, inner=gla)",
+        dataset.n_samples, dataset.n_features,
+    );
+    run_neural_headless(&mut model, dataset, "log-linear")
+}
+
+// ---------------------------------------------------------------------------
+// New v10 SSM / recurrent variants
+// ---------------------------------------------------------------------------
+
+fn run_mamba3(cli_config: CliConfig, dataset: Dataset) -> Result<()> {
+    use irithyll::ssm::{MambaConfig, MambaVersion, StreamingMamba};
+
+    let mc = &cli_config.neural.mamba;
+    let config = MambaConfig::builder()
+        .d_in(dataset.n_features)
+        .n_state(mc.n_state)
+        .version(MambaVersion::V3Exp { use_bcnorm: true })
+        .seed(mc.seed)
+        .warmup(mc.warmup)
+        .build()
+        .map_err(|e| eyre!("invalid Mamba-3 config: {}", e))?;
+
+    let mut model = StreamingMamba::new(config);
+    println!(
+        "Loaded {} samples, {} features (mamba-3, n_state={})",
+        dataset.n_samples, dataset.n_features, mc.n_state,
+    );
+    run_neural_headless(&mut model, &dataset, "mamba-3")
+}
+
+fn run_mamba_bd(cli_config: CliConfig, dataset: Dataset) -> Result<()> {
+    let mc = &cli_config.neural.mamba;
+    let block_size = (dataset.n_features / 2).max(1);
+    let mut model = irithyll::mamba_bd(dataset.n_features, mc.n_state, block_size);
+    println!(
+        "Loaded {} samples, {} features (mamba-bd, block_size={})",
+        dataset.n_samples, dataset.n_features, block_size,
+    );
+    run_neural_headless(&mut model, &dataset, "mamba-bd")
+}
+
+fn run_slstm(dataset: Dataset) -> Result<()> {
+    let mut model = irithyll::streaming_slstm(dataset.n_features.max(2));
+    println!(
+        "Loaded {} samples, {} features (s-lstm)",
+        dataset.n_samples, dataset.n_features,
+    );
+    run_neural_headless(&mut model, &dataset, "s-lstm")
+}
+
+fn run_mgrade(dataset: Dataset) -> Result<()> {
+    let d_hidden = (dataset.n_features * 2).max(8);
+    let mut model = irithyll::mgrade(dataset.n_features, d_hidden);
+    println!(
+        "Loaded {} samples, {} features (mgrade, d_hidden={})",
+        dataset.n_samples, dataset.n_features, d_hidden,
+    );
+    run_neural_headless(&mut model, &dataset, "mgrade")
+}
+
+// ---------------------------------------------------------------------------
 // Factory / AutoTuner (automated model selection)
 // ---------------------------------------------------------------------------
 
 fn run_factory(args: &TrainArgs, dataset: Dataset) -> Result<()> {
-    use irithyll::automl::Factory;
+    let factory_names: Vec<&str> = args.factories.split(',').map(|s| s.trim()).collect();
+    run_factory_with_keys(args, dataset, &factory_names)
+}
+
+/// Build an `AutoTuner` from a list of factory keys and stream the dataset
+/// through it. Used by both `--model-type factory` and the `--auto-tune` shortcut.
+fn run_factory_with_keys(args: &TrainArgs, dataset: Dataset, factory_keys: &[&str]) -> Result<()> {
     use irithyll::{AutoTuner, AutoTunerBuilder};
 
     let n_features = dataset.n_features;
-    let factory_names: Vec<&str> = args.factories.split(',').map(|s| s.trim()).collect();
 
     let mut builder: Option<AutoTunerBuilder> = None;
-    for name in &factory_names {
-        let factory = match *name {
-            "sgbt" => Factory::sgbt(n_features),
-            "esn" => Factory::esn(),
-            "mamba" => Factory::mamba(n_features),
-            "mamba3" => Factory::mamba3(n_features),
-            "ttt" => Factory::ttt(n_features),
-            "kan" => Factory::kan(n_features),
-            "spikenet" => Factory::spike_net(),
-            "attention" => Factory::attention(n_features),
-            "distributional" => Factory::distributional(n_features),
-            _ => return Err(eyre!(
-                "unknown factory '{}'. available: sgbt, esn, mamba, mamba3, ttt, kan, spikenet, attention, distributional",
-                name
-            )),
-        };
+    for name in factory_keys {
+        let factory = factory_from_name(name, n_features)?;
         builder = Some(match builder {
             None => AutoTuner::builder().factory(factory),
             Some(b) => b.add_factory(factory),
         });
     }
 
+    let mut builder =
+        builder.ok_or_else(|| eyre!("--factories must specify at least one factory"))?;
+    if let Some(n) = args.n_initial {
+        builder = builder.n_initial(n);
+    }
+    if let Some(n) = args.max_n_initial {
+        builder = builder.max_n_initial(n);
+    }
+    if args.use_drift_rerace {
+        builder = builder.use_drift_rerace(true);
+    }
+
     let mut model = builder
-        .ok_or_else(|| eyre!("--factories must specify at least one factory"))?
-        .build();
+        .build()
+        .map_err(|e| eyre!("AutoTuner config error: {}", e))?;
 
     println!(
-        "Loaded {} samples, {} features (factory/autotuner, racing: {})",
+        "Loaded {} samples, {} features (auto-tune, racing: {})",
         dataset.n_samples,
         dataset.n_features,
-        factory_names.join(" + "),
+        factory_keys.join(" + "),
     );
 
-    run_neural_headless(&mut model, &dataset, "factory")
+    run_neural_headless(&mut model, &dataset, "auto-tune")
+}
+
+/// Resolve a factory key string to a concrete `Factory`. Single source of
+/// truth for the factories the CLI exposes; updates here propagate to both
+/// `--factories` and `--auto-tune`.
+pub(crate) fn factory_from_name(name: &str, n_features: usize) -> Result<irithyll::Factory> {
+    use irithyll::Factory;
+    Ok(match name {
+        "sgbt" => Factory::sgbt(n_features),
+        "distributional" => Factory::distributional(n_features),
+        "multiclass-sgbt" => Factory::multiclass_sgbt(n_features, 4),
+        "esn" => Factory::esn(),
+        "mamba" => Factory::mamba(n_features),
+        "mamba-3" | "mamba3" => Factory::mamba3(n_features),
+        "mamba-bd" | "mambabd" => Factory::mamba_bd(n_features),
+        "s-lstm" | "slstm" => Factory::slstm(n_features),
+        "mgrade" => Factory::mgrade(n_features),
+        "spike-net" | "spikenet" => Factory::spike_net(),
+        "attention" => Factory::attention(n_features),
+        "delta-product" | "deltaproduct" => Factory::delta_product(n_features),
+        "rwkv-7" | "rwkv7" => Factory::rwkv7(n_features),
+        "kan" => Factory::kan(n_features),
+        "ttt" => Factory::ttt(n_features),
+        _ => {
+            return Err(eyre!(
+                "unknown factory '{}'.\n  available: {}",
+                name,
+                FACTORY_KEYS.join(", "),
+            ));
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------

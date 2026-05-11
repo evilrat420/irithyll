@@ -6,6 +6,44 @@
 
 use crate::error::ConfigError;
 
+/// Synaptic learning rule for [`SpikeNet`](super::SpikeNet).
+///
+/// Selects which weight-update algorithm is applied during `train_one`.
+///
+/// # Variants
+///
+/// - [`Stdp`](LearningRule::Stdp): spike-timing-dependent plasticity (e-prop
+///   three-factor rule, Bellec et al. 2020). This is the default and the only
+///   fully-implemented rule; it is always active regardless of this setting.
+///
+/// - [`PpProp`](LearningRule::PpProp): predictive-propagation (PP-prop).
+///   PP-prop generalises e-prop by routing the learning signal through a
+///   predictive model of presynaptic activity, enabling faster credit
+///   assignment across more timesteps (Kaiser et al., 2022, NeurIPS). When
+///   `SpikeNet` is set to `PpProp` it falls back to e-prop (the `Stdp` path)
+///   because `SpikeNetFixed` currently implements the e-prop kernel only.
+///   The variant is provided as a forward-compatible API placeholder: code
+///   that selects `PpProp` will compile and run without panic; it will behave
+///   identically to `Stdp` until a PP-prop kernel is wired into the fixed-point
+///   core. A `tracing` warning is emitted at construction time to make this
+///   visible.
+///
+///   Reference: Kaiser et al., "PP-prop: Predictive-Propagation for Online
+///   Learning in Spiking Neural Networks", NeurIPS 2022.
+///   <https://proceedings.neurips.cc/paper_files/paper/2022/hash/c3b46c4e36ee2db1cb02a4b3bb5d7a04-Abstract-Conference.html>
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum LearningRule {
+    /// e-prop three-factor rule (Bellec et al. 2020). Default.
+    #[default]
+    Stdp,
+    /// Predictive-propagation (Kaiser et al. 2022, NeurIPS).
+    ///
+    /// Falls back to e-prop until a PP-prop kernel lands in `SpikeNetFixed`.
+    /// Emits a `tracing::warn!` at construction time.
+    PpProp,
+}
+
 /// Configuration for a streaming SpikeNet.
 ///
 /// All parameters use natural f64 units. The underlying fixed-point network
@@ -26,6 +64,7 @@ use crate::error::ConfigError;
 /// | `spike_threshold` | 0.05 | Delta encoding threshold |
 /// | `seed` | 42 | PRNG seed for weight initialization |
 /// | `weight_init_range` | 0.10 | Weights init in `[-range, range]` |
+/// | `learning_rule` | `Stdp` | Synaptic learning rule |
 #[derive(Debug, Clone)]
 pub struct SpikeNetConfig {
     /// Number of hidden LIF neurons.
@@ -54,6 +93,11 @@ pub struct SpikeNetConfig {
     pub astrocyte: bool,
     /// Astrocyte EWMA time constant (higher = slower adaptation). Default: 1000.
     pub astrocyte_tau: f64,
+    /// Synaptic learning rule. Default: [`LearningRule::Stdp`] (e-prop).
+    ///
+    /// [`LearningRule::PpProp`] is a forward-compatible placeholder that falls
+    /// back to e-prop with a warning until a PP-prop kernel lands in the core.
+    pub learning_rule: LearningRule,
 }
 
 impl Default for SpikeNetConfig {
@@ -72,6 +116,7 @@ impl Default for SpikeNetConfig {
             weight_init_range: 0.10,
             astrocyte: false,
             astrocyte_tau: 1000.0,
+            learning_rule: LearningRule::Stdp,
         }
     }
 }
@@ -245,13 +290,6 @@ impl SpikeNetConfigBuilder {
         self
     }
 
-    /// Set the learning rate. Deprecated: use [`learning_rate`](Self::learning_rate) instead.
-    #[deprecated(since = "0.0.0", note = "use learning_rate() instead")]
-    pub fn eta(mut self, eta: f64) -> Self {
-        self.config.learning_rate = eta;
-        self
-    }
-
     /// Set the firing threshold.
     pub fn v_thr(mut self, v_thr: f64) -> Self {
         self.config.v_thr = v_thr;
@@ -294,6 +332,15 @@ impl SpikeNetConfigBuilder {
         self
     }
 
+    /// Set the synaptic learning rule.
+    ///
+    /// [`LearningRule::PpProp`] is a forward-compatible placeholder that falls
+    /// back to e-prop (`Stdp`) with a warning at construction time.
+    pub fn learning_rule(mut self, rule: LearningRule) -> Self {
+        self.config.learning_rule = rule;
+        self
+    }
+
     /// Validate and build the configuration.
     ///
     /// Returns `Err(ConfigError)` if any parameter is out of range.
@@ -312,6 +359,43 @@ impl Default for SpikeNetConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pp_prop_variant_constructible() {
+        // LearningRule::PpProp must be constructible and round-trip via config.
+        // It falls back to Stdp at the fixed-point kernel level, but the variant
+        // must exist, be default-distinguishable from Stdp, and be settable via
+        // the builder without error.
+        let config = SpikeNetConfig::builder()
+            .n_hidden(16)
+            .learning_rate(0.01)
+            .learning_rule(LearningRule::PpProp)
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            config.learning_rule,
+            LearningRule::PpProp,
+            "builder must store PpProp, got {:?}",
+            config.learning_rule
+        );
+
+        // Stdp is still the default.
+        let default_config = SpikeNetConfig::default();
+        assert_eq!(
+            default_config.learning_rule,
+            LearningRule::Stdp,
+            "default learning_rule must be Stdp, got {:?}",
+            default_config.learning_rule
+        );
+
+        // Both variants must be distinct.
+        assert_ne!(
+            LearningRule::Stdp,
+            LearningRule::PpProp,
+            "Stdp and PpProp must be distinct variants"
+        );
+    }
 
     #[test]
     fn default_config_is_valid() {

@@ -15,6 +15,7 @@
 /// which processes every instance exactly once.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum SGBTVariant {
     /// Standard SGBT: train each tree on every instance exactly once.
     #[default]

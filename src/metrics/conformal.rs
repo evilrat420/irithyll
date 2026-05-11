@@ -16,6 +16,7 @@
 ///
 /// Controls how the adaptation step size `gamma` evolves over time.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub enum StepSchedule {
     /// Fixed step size (original ACI from Gibbs & Candes 2021).
     #[default]

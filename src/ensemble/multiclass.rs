@@ -199,7 +199,23 @@ impl StreamingLearner for MulticlassSGBT {
         MulticlassSGBT::reset(self);
     }
 
-    /// Diagnostic array aggregated from the first committee's signals.
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        <Self as crate::learner::Tunable>::adjust_config(self, lr_multiplier, lambda_delta);
+    }
+
+    #[allow(deprecated)]
+    fn replacement_count(&self) -> u64 {
+        <Self as crate::learner::Structural>::replacement_count(self)
+    }
+}
+
+impl crate::learner::Tunable for MulticlassSGBT {
     fn diagnostics_array(&self) -> [f64; 5] {
         use crate::automl::DiagnosticSource;
         if let Some(first) = self.committees.first() {
@@ -220,7 +236,6 @@ impl StreamingLearner for MulticlassSGBT {
         }
     }
 
-    /// Forward learning rate / lambda adjustments to all committees.
     fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
         for committee in &mut self.committees {
             let new_lr = committee.config().learning_rate * lr_multiplier;
@@ -229,8 +244,13 @@ impl StreamingLearner for MulticlassSGBT {
             committee.set_lambda(new_lambda);
         }
     }
+}
 
-    /// Sum of replacement counts across all committees.
+impl crate::learner::Structural for MulticlassSGBT {
+    fn apply_structural_change(&mut self, _depth_delta: i32, _steps_delta: i32) {
+        // MulticlassSGBT does not support structural changes mid-stream.
+    }
+
     fn replacement_count(&self) -> u64 {
         self.committees.iter().map(|c| c.total_replacements()).sum()
     }

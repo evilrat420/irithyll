@@ -215,11 +215,12 @@ impl CluStreamConfigBuilder {
     /// Build the configuration, validating all parameters.
     ///
     /// Returns an error if `max_micro_clusters < 2`.
-    pub fn build(self) -> Result<CluStreamConfig, String> {
+    pub fn build(self) -> Result<CluStreamConfig, irithyll_core::error::ConfigError> {
         if self.max_micro_clusters < 2 {
-            return Err(format!(
-                "max_micro_clusters must be >= 2, got {}",
-                self.max_micro_clusters
+            return Err(irithyll_core::error::ConfigError::out_of_range(
+                "max_micro_clusters",
+                "must be >= 2",
+                self.max_micro_clusters,
             ));
         }
         Ok(CluStreamConfig {
@@ -773,10 +774,15 @@ mod tests {
 
     #[test]
     fn config_builder_validates() {
-        // max_micro_clusters < 2 should fail.
+        use irithyll_core::error::ConfigError;
+
+        // max_micro_clusters < 2 should fail with OutOfRange.
         let result = CluStreamConfig::builder(1).build();
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("must be >= 2"));
+        assert!(
+            matches!(&result.unwrap_err(), ConfigError::OutOfRange { param, .. } if *param == "max_micro_clusters"),
+            "expected OutOfRange for max_micro_clusters"
+        );
 
         let result = CluStreamConfig::builder(0).build();
         assert!(result.is_err());

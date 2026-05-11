@@ -113,10 +113,16 @@ pub fn lstm_gates(w_f: &[f64], w_i: &[f64], x: &[f64]) -> (f64, f64) {
 /// Per-dimension vector decay (RWKV-7).
 ///
 /// Computes bounded decay per dimension:
-/// `w[i] = exp(-exp(-0.5) * sigmoid(dot_i))` where `dot_i = w_decay_row_i . x`.
+/// `w[i] = exp(-ln(1/0.6) * sigmoid(dot_i))` where `dot_i = w_decay_row_i . x`.
 ///
-/// Each element of the output is in (exp(-exp(-0.5)), 1) ≈ (0.545, 1.0),
-/// ensuring stable but non-trivial decay per dimension.
+/// Each element of the output is in (0.6, 1.0), matching the lower bound
+/// specified in Peng et al. 2025 (arXiv:2503.14456) Eq. 8. The scale
+/// `ln(1/0.6) = -ln(0.6) ≈ 0.5108` is derived so that when `sigmoid → 1`,
+/// `exp(-0.5108 * 1) = 0.6` exactly — paper-principled, not empirically tuned.
+///
+/// Previous versions used `exp(-0.5) ≈ 0.6065` as the scale, yielding a
+/// lower bound of `exp(-0.6065) ≈ 0.545`, which is unprincipled. Changed
+/// to `−ln(0.6)` (Peng et al. 2025, Eq. 8) to match the paper specification.
 ///
 /// # Arguments
 ///
@@ -126,7 +132,7 @@ pub fn lstm_gates(w_f: &[f64], w_i: &[f64], x: &[f64]) -> (f64, f64) {
 ///
 /// # Returns
 ///
-/// Vector of length `d_key` with decay factors in (0.545, 1.0).
+/// Vector of length `d_key` with decay factors in (0.6, 1.0).
 pub fn vector_decay(w_decay: &[f64], x: &[f64], d_key: usize) -> Vec<f64> {
     let d_model = x.len();
     debug_assert_eq!(
@@ -134,7 +140,10 @@ pub fn vector_decay(w_decay: &[f64], x: &[f64], d_key: usize) -> Vec<f64> {
         d_key * d_model,
         "w_decay must be d_key * d_model"
     );
-    let scale = math::exp(-0.5); // ~0.6065
+    // scale = -ln(0.6) ≈ 0.5108.
+    // Derivation: exp(-scale * sigmoid(raw)) has minimum exp(-scale * 1) = exp(ln(0.6)) = 0.6.
+    // Source: Peng et al. 2025 (arXiv:2503.14456) Eq. 8 specifies w_t ≥ 0.6.
+    let scale = -math::ln(0.6); // ≈ 0.5108
     let mut w = Vec::with_capacity(d_key);
     for i in 0..d_key {
         let row = &w_decay[i * d_model..(i + 1) * d_model];
@@ -375,8 +384,33 @@ mod tests {
         assert_eq!(decay.len(), 2, "should produce 2 decay values");
         for (i, &d) in decay.iter().enumerate() {
             assert!(
-                d > 0.54 && d < 1.0,
-                "decay[{}] should be in (0.54, 1.0), got {}",
+                d > 0.6 && d < 1.0,
+                "decay[{}] should be in (0.6, 1.0) per Peng et al. 2025 Eq. 8, got {}",
+                i,
+                d
+            );
+        }
+    }
+
+    #[test]
+    fn rwkv7_w_t_lower_bound_is_paper_spec() {
+        // Peng et al. 2025 (arXiv:2503.14456) Eq. 8 specifies w_t ≥ 0.6.
+        // The minimum of exp(-scale * sigmoid(raw)) is exp(-scale * 1) = 0.6
+        // when sigmoid(raw) → 1 (large positive input).
+        // This verifies the lower bound from the paper is enforced, not the
+        // unprincipled 0.545 from the prior exp(-0.5) scale choice.
+        let d_key = 4;
+        let d_model = 4;
+        // Weight rows all very large positive => sigmoid(dot) → 1 for positive x
+        let w = vec![100.0f64; d_key * d_model];
+        let x = vec![1.0f64; d_model];
+        let decay = vector_decay(&w, &x, d_key);
+        assert_eq!(decay.len(), d_key, "should produce d_key decay values");
+        for (i, &d) in decay.iter().enumerate() {
+            // With sigmoid → 1, decay → exp(-(-ln(0.6))) = 0.6 exactly.
+            assert!(
+                (d - 0.6_f64).abs() < 1e-9,
+                "w_t lower bound must be 0.6 per Peng et al. 2025 Eq. 8, got decay[{}]={}",
                 i,
                 d
             );

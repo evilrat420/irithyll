@@ -75,6 +75,7 @@ use crate::sample::{Observation, SampleRef};
 /// - [`Hard`](GatingMode::Hard): only the `top_k` experts with highest gating
 ///   probability receive the sample. Reduces cost when K is large.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum GatingMode {
     /// All experts receive every sample, weighted by gating probability.
     Soft,
@@ -497,7 +498,23 @@ impl<L: Loss + Clone> StreamingLearner for MoESGBT<L> {
         MoESGBT::reset(self);
     }
 
-    /// Aggregate diagnostics from the first expert as representative signal.
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn replacement_count(&self) -> u64 {
+        <Self as crate::learner::Structural>::replacement_count(self)
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        <Self as crate::learner::Tunable>::adjust_config(self, lr_multiplier, lambda_delta);
+    }
+}
+
+impl<L: Loss + Clone> crate::learner::Tunable for MoESGBT<L> {
     fn diagnostics_array(&self) -> [f64; 5] {
         use crate::automl::DiagnosticSource;
         if let Some(first) = self.experts.first() {
@@ -518,12 +535,6 @@ impl<L: Loss + Clone> StreamingLearner for MoESGBT<L> {
         }
     }
 
-    /// Sum of replacement counts across all experts.
-    fn replacement_count(&self) -> u64 {
-        self.experts.iter().map(|e| e.total_replacements()).sum()
-    }
-
-    /// Forward learning rate / lambda adjustments to all experts.
     fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
         for expert in &mut self.experts {
             let new_lr = expert.config().learning_rate * lr_multiplier;
@@ -531,6 +542,16 @@ impl<L: Loss + Clone> StreamingLearner for MoESGBT<L> {
             let new_lambda = expert.config().lambda + lambda_delta;
             expert.set_lambda(new_lambda);
         }
+    }
+}
+
+impl<L: Loss + Clone> crate::learner::Structural for MoESGBT<L> {
+    fn apply_structural_change(&mut self, _depth_delta: i32, _steps_delta: i32) {
+        // MoESGBT does not support per-expert structural changes mid-stream.
+    }
+
+    fn replacement_count(&self) -> u64 {
+        self.experts.iter().map(|e| e.total_replacements()).sum()
     }
 }
 

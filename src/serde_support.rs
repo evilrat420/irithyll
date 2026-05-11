@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Returns [`IrithyllError::Serialization`] if serialization fails.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn to_json<T: serde::Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value).map_err(|e| IrithyllError::Serialization(e.to_string()))
 }
@@ -27,6 +28,7 @@ pub fn to_json<T: serde::Serialize>(value: &T) -> Result<String> {
 ///
 /// Returns [`IrithyllError::Serialization`] if serialization fails.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn to_json_pretty<T: serde::Serialize>(value: &T) -> Result<String> {
     serde_json::to_string_pretty(value).map_err(|e| IrithyllError::Serialization(e.to_string()))
 }
@@ -39,6 +41,7 @@ pub fn to_json_pretty<T: serde::Serialize>(value: &T) -> Result<String> {
 ///
 /// Returns [`IrithyllError::Serialization`] if deserialization fails.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn from_json<T: serde::de::DeserializeOwned>(json: &str) -> Result<T> {
     serde_json::from_str(json).map_err(|e| IrithyllError::Serialization(e.to_string()))
 }
@@ -51,6 +54,7 @@ pub fn from_json<T: serde::de::DeserializeOwned>(json: &str) -> Result<T> {
 ///
 /// Returns [`IrithyllError::Serialization`] if serialization fails.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn to_json_bytes<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|e| IrithyllError::Serialization(e.to_string()))
 }
@@ -63,6 +67,7 @@ pub fn to_json_bytes<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
 ///
 /// Returns [`IrithyllError::Serialization`] if deserialization fails.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn from_json_bytes<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     serde_json::from_slice(bytes).map_err(|e| IrithyllError::Serialization(e.to_string()))
 }
@@ -87,7 +92,13 @@ pub use crate::loss::LossType;
 /// Captures the minimal state needed to reconstruct a tree for prediction:
 /// node topology, split decisions, and leaf values. Histogram accumulators
 /// are NOT serialized -- they rebuild naturally from continued training.
+///
+/// Requires the `serde-json` or `serde-bincode` feature.
 #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "serde-json", feature = "serde-bincode")))
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeSnapshot {
     /// Feature index chosen at each internal node (parallel to node arena).
@@ -118,10 +129,18 @@ pub struct TreeSnapshot {
 }
 
 /// Serializable snapshot of a single boosting step.
+///
+/// Requires the `serde-json` or `serde-bincode` feature.
 #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "serde-json", feature = "serde-bincode")))
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepSnapshot {
+    /// Primary tree for this boosting step.
     pub tree: TreeSnapshot,
+    /// Alternate tree being trained in parallel (present during drift warning period).
     pub alternate_tree: Option<TreeSnapshot>,
     /// Drift detector accumulated state (preserves warmup across save/load).
     #[serde(default)]
@@ -135,17 +154,32 @@ pub struct StepSnapshot {
 ///
 /// Captures everything needed to reconstruct a trained model for prediction
 /// and continued training. The loss function is stored as a [`LossType`] tag.
+///
+/// Requires the `serde-json` or `serde-bincode` feature.
 #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "serde-json", feature = "serde-bincode")))
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelState {
+    /// Model configuration used to construct the ensemble.
     pub config: SGBTConfig,
+    /// Loss function tag for runtime dispatch during restore.
     pub loss_type: LossType,
+    /// Ensemble base prediction (warm-start bias).
     pub base_prediction: f64,
+    /// Whether the base prediction has been initialized from data.
     pub base_initialized: bool,
+    /// Targets buffered before the base prediction is fixed.
     pub initial_targets: Vec<f64>,
+    /// Number of buffered targets used during initialization.
     pub initial_target_count: usize,
+    /// Total training samples seen by the model.
     pub samples_seen: u64,
+    /// RNG state at snapshot time (for deterministic replay).
     pub rng_state: u64,
+    /// Per-step snapshots (one per boosting stage).
     pub steps: Vec<StepSnapshot>,
     /// Rolling mean absolute error for error-weighted sample importance.
     #[serde(default)]
@@ -172,6 +206,7 @@ pub struct ModelState {
 /// Returns [`IrithyllError::Serialization`] if the loss type cannot be
 /// auto-detected or if serialization fails.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn save_model<L: Loss>(model: &SGBT<L>) -> Result<String> {
     let state = model.to_model_state()?;
     to_json_pretty(&state)
@@ -181,6 +216,7 @@ pub fn save_model<L: Loss>(model: &SGBT<L>) -> Result<String> {
 ///
 /// Use this for custom loss functions that don't implement `loss_type()`.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn save_model_with<L: Loss>(model: &SGBT<L>, loss_type: LossType) -> Result<String> {
     let state = model.to_model_state_with(loss_type);
     to_json_pretty(&state)
@@ -196,6 +232,7 @@ pub fn save_model_with<L: Loss>(model: &SGBT<L>, loss_type: LossType) -> Result<
 ///
 /// Returns [`IrithyllError::Serialization`] if deserialization fails.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn load_model(json: &str) -> Result<crate::ensemble::DynSGBT> {
     let state: ModelState = from_json(json)?;
     Ok(SGBT::from_model_state(state))
@@ -209,34 +246,47 @@ pub fn load_model(json: &str) -> Result<crate::ensemble::DynSGBT> {
 ///
 /// Each class committee is stored as a full [`ModelState`] since each committee
 /// is an independent `SGBT<SoftmaxLoss>`.
+///
+/// Requires the `serde-json` or `serde-bincode` feature.
 #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "serde-json", feature = "serde-bincode")))
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MulticlassModelState {
+    /// Number of target classes.
     pub n_classes: usize,
+    /// One [`ModelState`] per class committee.
     pub committees: Vec<ModelState>,
+    /// Total training samples seen.
     pub samples_seen: u64,
 }
 
 /// Serialize a [`MulticlassModelState`] to JSON.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn save_multiclass_model(state: &MulticlassModelState) -> Result<String> {
     to_json_pretty(state)
 }
 
 /// Deserialize a [`MulticlassModelState`] from JSON.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn load_multiclass_model(json: &str) -> Result<MulticlassModelState> {
     from_json(json)
 }
 
 /// Serialize a [`MulticlassModelState`] to bincode bytes.
 #[cfg(feature = "serde-bincode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-bincode")))]
 pub fn save_multiclass_model_bincode(state: &MulticlassModelState) -> Result<Vec<u8>> {
     to_bincode(state)
 }
 
 /// Deserialize a [`MulticlassModelState`] from bincode bytes.
 #[cfg(feature = "serde-bincode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-bincode")))]
 pub fn load_multiclass_model_bincode(bytes: &[u8]) -> Result<MulticlassModelState> {
     from_bincode(bytes)
 }
@@ -249,36 +299,51 @@ pub fn load_multiclass_model_bincode(bytes: &[u8]) -> Result<MulticlassModelStat
 ///
 /// Each bag is stored as a full [`ModelState`] since each bag is an
 /// independent `SGBT<L>`.
+///
+/// Requires the `serde-json` or `serde-bincode` feature.
 #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "serde-json", feature = "serde-bincode")))
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaggedModelState {
+    /// Number of bootstrap bags.
     pub n_bags: usize,
+    /// One [`ModelState`] per bag.
     pub bags: Vec<ModelState>,
+    /// Total training samples seen.
     pub samples_seen: u64,
+    /// RNG state at snapshot time.
     pub rng_state: u64,
+    /// Original seed used to construct the bag sampler.
     pub seed: u64,
 }
 
 /// Serialize a [`BaggedModelState`] to JSON.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn save_bagged_model(state: &BaggedModelState) -> Result<String> {
     to_json_pretty(state)
 }
 
 /// Deserialize a [`BaggedModelState`] from JSON.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn load_bagged_model(json: &str) -> Result<BaggedModelState> {
     from_json(json)
 }
 
 /// Serialize a [`BaggedModelState`] to bincode bytes.
 #[cfg(feature = "serde-bincode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-bincode")))]
 pub fn save_bagged_model_bincode(state: &BaggedModelState) -> Result<Vec<u8>> {
     to_bincode(state)
 }
 
 /// Deserialize a [`BaggedModelState`] from bincode bytes.
 #[cfg(feature = "serde-bincode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-bincode")))]
 pub fn load_bagged_model_bincode(bytes: &[u8]) -> Result<BaggedModelState> {
     from_bincode(bytes)
 }
@@ -295,6 +360,7 @@ pub fn load_bagged_model_bincode(bytes: &[u8]) -> Result<BaggedModelState> {
 ///
 /// Returns [`IrithyllError::Serialization`] if serialization fails.
 #[cfg(feature = "serde-bincode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-bincode")))]
 pub fn to_bincode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
     bincode::serde::encode_to_vec(value, bincode::config::standard())
         .map_err(|e| IrithyllError::Serialization(e.to_string()))
@@ -308,6 +374,7 @@ pub fn to_bincode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
 ///
 /// Returns [`IrithyllError::Serialization`] if deserialization fails.
 #[cfg(feature = "serde-bincode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-bincode")))]
 pub fn from_bincode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
     let (val, _) = bincode::serde::decode_from_slice(bytes, bincode::config::standard())
         .map_err(|e| IrithyllError::Serialization(e.to_string()))?;
@@ -323,6 +390,7 @@ pub fn from_bincode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 /// Returns [`IrithyllError::Serialization`] if the loss type cannot be
 /// auto-detected or if serialization fails.
 #[cfg(feature = "serde-bincode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-bincode")))]
 pub fn save_model_bincode<L: Loss>(model: &SGBT<L>) -> Result<Vec<u8>> {
     let state = model.to_model_state()?;
     to_bincode(&state)
@@ -337,6 +405,7 @@ pub fn save_model_bincode<L: Loss>(model: &SGBT<L>) -> Result<Vec<u8>> {
 ///
 /// Returns [`IrithyllError::Serialization`] if deserialization fails.
 #[cfg(feature = "serde-bincode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-bincode")))]
 pub fn load_model_bincode(bytes: &[u8]) -> Result<crate::ensemble::DynSGBT> {
     let state: ModelState = from_bincode(bytes)?;
     Ok(SGBT::from_model_state(state))
@@ -347,20 +416,38 @@ pub fn load_model_bincode(bytes: &[u8]) -> Result<crate::ensemble::DynSGBT> {
 // ---------------------------------------------------------------------------
 
 /// Serializable state for [`DistributionalSGBT`](crate::ensemble::distributional::DistributionalSGBT).
+///
+/// Requires the `serde-json` or `serde-bincode` feature.
 #[cfg(any(feature = "serde-json", feature = "serde-bincode"))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "serde-json", feature = "serde-bincode")))
+)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributionalModelState {
+    /// Model configuration shared by both location and scale ensembles.
     pub config: SGBTConfig,
+    /// Boosting steps for the location (mean) ensemble.
     pub location_steps: Vec<StepSnapshot>,
+    /// Boosting steps for the scale (uncertainty) ensemble.
     pub scale_steps: Vec<StepSnapshot>,
+    /// Base prediction for the location ensemble.
     pub location_base: f64,
+    /// Base prediction for the scale ensemble.
     pub scale_base: f64,
+    /// Whether the base predictions have been initialized from data.
     pub base_initialized: bool,
+    /// Targets buffered before base initialization is fixed.
     pub initial_targets: Vec<f64>,
+    /// Number of buffered targets used during initialization.
     pub initial_target_count: usize,
+    /// Total training samples seen.
     pub samples_seen: u64,
+    /// RNG state at snapshot time.
     pub rng_state: u64,
+    /// Whether uncertainty-modulated learning rate is active.
     pub uncertainty_modulated_lr: bool,
+    /// Rolling mean of the scale (sigma) predictions.
     pub rolling_sigma_mean: f64,
     /// EWMA of squared prediction errors (for empirical σ mode).
     #[serde(default = "default_ewma_sq_err")]
@@ -376,24 +463,28 @@ fn default_ewma_sq_err() -> f64 {
 
 /// Serialize a [`DistributionalModelState`] to JSON.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn save_distributional_model(state: &DistributionalModelState) -> Result<String> {
     to_json_pretty(state)
 }
 
 /// Deserialize a [`DistributionalModelState`] from JSON.
 #[cfg(feature = "serde-json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-json")))]
 pub fn load_distributional_model(json: &str) -> Result<DistributionalModelState> {
     from_json(json)
 }
 
 /// Serialize a [`DistributionalModelState`] to bincode bytes.
 #[cfg(feature = "serde-bincode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-bincode")))]
 pub fn save_distributional_model_bincode(state: &DistributionalModelState) -> Result<Vec<u8>> {
     to_bincode(state)
 }
 
 /// Deserialize a [`DistributionalModelState`] from bincode bytes.
 #[cfg(feature = "serde-bincode")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde-bincode")))]
 pub fn load_distributional_model_bincode(bytes: &[u8]) -> Result<DistributionalModelState> {
     from_bincode(bytes)
 }

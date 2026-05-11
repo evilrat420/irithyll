@@ -52,30 +52,47 @@ impl core::fmt::Display for DriftSignal {
 #[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum DriftDetectorState {
     /// Page-Hinkley Test accumulated state.
     PageHinkley {
+        /// Running mean of the observed stream.
         running_mean: f64,
+        /// Cumulative upward deviation sum.
         sum_up: f64,
+        /// Minimum upward deviation sum seen so far.
         min_sum_up: f64,
+        /// Cumulative downward deviation sum.
         sum_down: f64,
+        /// Minimum downward deviation sum seen so far.
         min_sum_down: f64,
+        /// Number of samples observed.
         count: u64,
     },
     /// ADWIN exponential histogram state.
     Adwin {
+        /// Exponential histogram rows (each row contains buckets of equal width).
         rows: alloc::vec::Vec<alloc::vec::Vec<AdwinBucketState>>,
+        /// Running total of all values in the window.
         total: f64,
+        /// Running variance estimate.
         variance: f64,
+        /// Total count of values in the window.
         count: u64,
+        /// Current adaptive window width.
         width: u64,
     },
     /// DDM Welford running statistics state.
     Ddm {
+        /// Online mean of the error stream (Welford).
         mean: f64,
+        /// Sum of squared deviations from the mean (Welford M2).
         m2: f64,
+        /// Number of samples observed.
         count: u64,
+        /// Minimum observed `p + s` (mean + std dev), used for drift threshold.
         min_p_plus_s: f64,
+        /// Minimum observed standard deviation.
         min_s: f64,
     },
 }
@@ -85,8 +102,11 @@ pub enum DriftDetectorState {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AdwinBucketState {
+    /// Sum of values in this bucket.
     pub total: f64,
+    /// Variance estimate for values in this bucket.
     pub variance: f64,
+    /// Number of values in this bucket.
     pub count: u64,
 }
 

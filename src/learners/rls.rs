@@ -471,8 +471,34 @@ impl StreamingLearner for RecursiveLeastSquares {
         self.effective_forgetting_factor = self.forgetting_factor;
     }
 
+    #[allow(deprecated)]
     fn diagnostics_array(&self) -> [f64; 5] {
-        // RLS saturation: 1.0 - trace(P) / (delta * d).
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        <Self as crate::learner::Tunable>::adjust_config(self, lr_multiplier, lambda_delta);
+    }
+
+    #[allow(deprecated)]
+    fn readout_weights(&self) -> Option<&[f64]> {
+        let w = <Self as crate::learner::HasReadout>::readout_weights(self);
+        if w.is_empty() {
+            None
+        } else {
+            Some(w)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capability trait impls
+// ---------------------------------------------------------------------------
+
+impl crate::learner::Tunable for RecursiveLeastSquares {
+    #[inline]
+    fn diagnostics_array(&self) -> [f64; 5] {
         let d = self.weights.len();
         let depth_sufficiency = if d > 0 && self.delta > 0.0 {
             let trace: f64 = (0..d).map(|i| self.p_matrix[i * d + i]).sum();
@@ -480,35 +506,31 @@ impl StreamingLearner for RecursiveLeastSquares {
         } else {
             0.0
         };
-
-        // Weight magnitude: ||w||_2 / sqrt(d).
         let effective_dof = if !self.weights.is_empty() {
             let sq_sum: f64 = self.weights.iter().map(|w| w * w).sum();
             sq_sum.sqrt() / (d as f64).sqrt()
         } else {
             0.0
         };
-
         [
-            0.0,                          // residual_alignment
-            1.0 - self.forgetting_factor, // reg_sensitivity
+            0.0,
+            1.0 - self.forgetting_factor,
             depth_sufficiency,
             effective_dof,
-            self.running_mse.sqrt(), // uncertainty
+            self.running_mse.sqrt(),
         ]
     }
 
+    #[inline]
     fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
-        // Scale the forgetting factor. Clamp to (0, 1].
         self.forgetting_factor = (self.forgetting_factor * lr_multiplier).clamp(1e-6, 1.0);
     }
+}
 
-    fn readout_weights(&self) -> Option<&[f64]> {
-        if self.weights.is_empty() {
-            None
-        } else {
-            Some(&self.weights)
-        }
+impl crate::learner::HasReadout for RecursiveLeastSquares {
+    #[inline]
+    fn readout_weights(&self) -> &[f64] {
+        &self.weights
     }
 }
 

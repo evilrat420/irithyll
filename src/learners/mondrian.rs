@@ -37,6 +37,7 @@ use std::fmt;
 
 use crate::learner::StreamingLearner;
 
+use irithyll_core::error::ConfigError;
 use irithyll_core::rng::xorshift64;
 
 // ---------------------------------------------------------------------------
@@ -148,15 +149,42 @@ impl MondrianForestConfigBuilder {
         self
     }
 
-    /// Consume the builder and produce a [`MondrianForestConfig`].
-    #[inline]
-    pub fn build(self) -> MondrianForestConfig {
-        MondrianForestConfig {
+    /// Validate and build the configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if:
+    /// - `n_trees == 0`
+    /// - `max_depth == 0`
+    /// - `lifetime <= 0`
+    pub fn build(self) -> Result<MondrianForestConfig, ConfigError> {
+        if self.n_trees == 0 {
+            return Err(ConfigError::out_of_range(
+                "n_trees",
+                "must be >= 1",
+                self.n_trees,
+            ));
+        }
+        if self.max_depth == 0 {
+            return Err(ConfigError::out_of_range(
+                "max_depth",
+                "must be >= 1",
+                self.max_depth,
+            ));
+        }
+        if self.lifetime <= 0.0 {
+            return Err(ConfigError::out_of_range(
+                "lifetime",
+                "must be > 0",
+                self.lifetime,
+            ));
+        }
+        Ok(MondrianForestConfig {
             n_trees: self.n_trees,
             max_depth: self.max_depth,
             lifetime: self.lifetime,
             seed: self.seed,
-        }
+        })
     }
 }
 
@@ -555,18 +583,29 @@ impl StreamingLearner for MondrianForest {
         self.samples_seen = 0;
     }
 
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        <Self as crate::learner::Tunable>::adjust_config(self, lr_multiplier, lambda_delta);
+    }
+}
+
+impl crate::learner::Tunable for MondrianForest {
     fn diagnostics_array(&self) -> [f64; 5] {
         [
-            0.0,                                    // residual_alignment
-            0.0,                                    // reg_sensitivity
-            0.0,                                    // depth_sufficiency
-            self.trees.len() as f64,                // effective_dof
-            1.0 / (1.0 + self.samples_seen as f64), // uncertainty
+            0.0,
+            0.0,
+            0.0,
+            self.trees.len() as f64,
+            1.0 / (1.0 + self.samples_seen as f64),
         ]
     }
 
     fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
-        // Scale the lifetime (lambda) parameter. Clamp to a reasonable floor.
         self.config.lifetime = (self.config.lifetime * lr_multiplier).max(1e-6);
     }
 }
@@ -616,7 +655,8 @@ mod tests {
             .max_depth(8)
             .lifetime(5.0)
             .seed(42)
-            .build();
+            .build()
+            .expect("valid config");
         MondrianForest::new(config)
     }
 
@@ -629,7 +669,8 @@ mod tests {
             .max_depth(6)
             .lifetime(3.0)
             .seed(99)
-            .build();
+            .build()
+            .expect("valid config");
 
         let forest = MondrianForest::new(config);
         assert_eq!(forest.n_samples_seen(), 0);
@@ -879,7 +920,8 @@ mod tests {
                 .n_trees(50)
                 .max_depth(8)
                 .seed(42)
-                .build(),
+                .build()
+                .expect("valid config"),
         );
 
         // Generate noisy data: y = x + noise

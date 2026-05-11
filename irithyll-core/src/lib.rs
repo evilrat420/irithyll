@@ -1,30 +1,49 @@
-//! Core types and inference engine for irithyll streaming ML models.
+//! Core types and inference engine for irithyll streaming ML.
 //!
-//! `irithyll-core` provides loss functions, observation traits, a compact binary
-//! format, and branch-free traversal for deploying trained SGBT models on
-//! embedded targets (Cortex-M0+, 32KB flash).
+//! `irithyll-core` is the `#![no_std]` foundation shared by the full irithyll
+//! crate and embedded targets. It provides loss functions, the streaming
+//! [`Observation`] trait, a compact 12-byte packed node format, and branch-free
+//! ensemble traversal for deploying trained models on bare metal
+//! (Cortex-M0+, 32 KB flash).
 //!
-//! # Features
+//! The crate has a hard dependency boundary: only `libm` is mandatory. All
+//! dynamic-allocation paths (histogram binning, tree construction, drift
+//! detectors, neural architectures) gate on the `alloc` feature.
 //!
-//! - **Loss functions** — squared, logistic, Huber, softmax, expectile, quantile
-//! - **Observation trait** — zero-copy training interface with `SampleRef`
-//! - **12-byte packed nodes** — 5 nodes per 64-byte cache line
-//! - **Zero-copy `EnsembleView`** — constructed from `&[u8]`, no allocation after validation
-//! - **Branch-free traversal** — `cmov`/`csel` child selection, no pipeline stalls
-//! - **`#![no_std]`** — zero mandatory dependencies, runs on bare metal
+//! # Feature Flags
 //!
-//! # Usage
+//! | Feature | Description |
+//! |---------|-------------|
+//! | `alloc` | Enables dynamic-allocation types: trees, ensembles, drift, neural |
+//! | `std` | Enables `alloc` plus standard I/O (required for full `irithyll` crate) |
+//! | `serde` | Derives `Serialize`/`Deserialize` on config and snapshot types |
+//! | `kmeans-binning` | K-means histogram binning strategy (requires `alloc`) |
+//! | `parallel` | Rayon-parallel tree training (requires `alloc`) |
+//! | `simd` | AVX2 histogram accumulation acceleration (requires `std`) |
+//! | `simd-avx2` | Explicit AVX2 SIMD intrinsics (requires `std`) |
+//! | `embedded-bench` | Cortex-M semihosting bench helpers |
+//! | `iai-bench` | iai-callgrind regression bench source |
+//!
+//! # Embedded Inference
+//!
+//! Train a model with the full `irithyll` crate, then export:
 //!
 //! ```ignore
 //! use irithyll_core::{EnsembleView, FormatError};
 //!
-//! // Load packed binary (e.g. from flash, file, or network)
-//! let packed_bytes: &[u8] = &[/* exported via irithyll::export_embedded() */];
+//! // packed_bytes is a &[u8] from irithyll::export_embedded()
+//! let packed_bytes: &[u8] = &[];
 //! let view = EnsembleView::from_bytes(packed_bytes)?;
 //! let prediction = view.predict(&[1.0f32, 2.0, 3.0]);
+//! # Ok::<(), FormatError>(())
 //! ```
+//!
+//! The packed format stores each node in 12 bytes (5 nodes per cache line).
+//! Traversal is branch-free: child selection uses `cmov`/`csel`-equivalent
+//! conditionals that avoid pipeline stalls on Cortex-M.
 
 #![no_std]
+#![warn(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Note: irithyll-core contains legitimate `unsafe impl Send/Sync` for tree types
@@ -49,6 +68,7 @@ pub mod quantize;
 pub mod rng;
 pub mod sample;
 pub mod simd;
+pub mod streaming_primitives;
 pub mod traverse;
 pub mod traverse_i16;
 pub mod view;
@@ -116,14 +136,17 @@ pub use view_i16::QuantizedEnsembleView;
 // Convenience re-exports -- training core types
 pub use loss::{Loss, LossType};
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub use sample::Sample;
 pub use sample::{Observation, SampleRef};
 
 // Convenience re-exports -- drift detection
 pub use drift::DriftSignal;
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub use drift::{DriftDetector, DriftDetectorState};
 
 // Convenience re-exports -- config/error (requires alloc)
 #[cfg(feature = "alloc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "alloc")))]
 pub use error::{ConfigError, IrithyllError, Result};

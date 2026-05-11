@@ -773,6 +773,32 @@ impl StreamingLearner for MoEDistributionalSGBT {
         MoEDistributionalSGBT::reset(self);
     }
 
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        <Self as crate::learner::Tunable>::adjust_config(self, lr_multiplier, lambda_delta);
+    }
+
+    #[allow(deprecated)]
+    fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
+        <Self as crate::learner::Structural>::apply_structural_change(
+            self,
+            depth_delta,
+            steps_delta,
+        );
+    }
+
+    #[allow(deprecated)]
+    fn replacement_count(&self) -> u64 {
+        <Self as crate::learner::Structural>::replacement_count(self)
+    }
+}
+
+impl crate::learner::Tunable for MoEDistributionalSGBT {
     fn diagnostics_array(&self) -> [f64; 5] {
         use crate::automl::DiagnosticSource;
         match self.config_diagnostics() {
@@ -801,7 +827,9 @@ impl StreamingLearner for MoEDistributionalSGBT {
             shadow.set_lambda(current_lambda + lambda_delta);
         }
     }
+}
 
+impl crate::learner::Structural for MoEDistributionalSGBT {
     fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
         if depth_delta != 0 {
             for expert in &mut self.experts {

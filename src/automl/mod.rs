@@ -18,25 +18,58 @@
 //! - Qi et al. (2023) "Discounted Thompson Sampling" -- non-stationary bandit selection
 //! - Wilson et al. (2026) "SUHEN" IEEE TAI -- successive halving for streaming
 
+pub mod adaptation_bus;
 pub mod auto_builder;
-mod auto_tuner;
+pub mod auto_tuner;
+pub mod budget;
+pub mod cohort;
 mod config_space;
 mod factories;
+mod lipschitz_verification;
+pub mod meta_learner;
+pub mod racing;
 mod reward;
+pub mod space;
 
+pub use adaptation_bus::{
+    AdaptContext, AdaptationBus, BusError, CriticalGuard, DriftRateAdapter, MetaAdapter,
+    NoOpAdapter, PlasticityAdapter, ThetaDelta,
+};
 pub use auto_builder::{
     ConfigBounds, ConfigDiagnostics, DiagnosticAdaptor, DiagnosticLearner, FeasibleRegion,
-    MetaObjective, RaceResults, SmoothAdjustments, StructuralChange, WelfordRace, WelfordStats,
+    MetaObjective, RaceResults, SmoothAdjustments, StructuralChange, TerminateAfter, WelfordRace,
+    WelfordStats,
 };
+#[cfg(feature = "distill")]
+#[cfg_attr(docsrs, doc(cfg(feature = "distill")))]
+pub use auto_builder::{DistillationConfig, DistillationStats};
 pub use auto_tuner::{
     AutoTuner, AutoTunerBuilder, AutoTunerConfig, AutoTunerSnapshot, CandidateSnapshot,
 };
+pub use budget::{ArmBudget, BudgetLedger, BudgetStatus};
+pub use cohort::{ChampionCohort, CohortMember, CohortMemberSnapshot, CohortWeight, COHORT_K};
+#[allow(deprecated)]
 pub use config_space::{ConfigSampler, ConfigSpace, HyperConfig, HyperParam};
-pub use factories::{Algorithm, Factory};
+pub use factories::{Algorithm, Factory, FactoryError};
+pub use meta_learner::{
+    ComplexityClass, FactoryMetaLearner, MetaLearner, MetaScore, MetaSearch, NoOpMetaLearner,
+    Objective, SgbtClassificationMetaLearner, SgbtMetaLearner,
+};
+pub use racing::{
+    bernstein_compare, bernstein_halfwidth, bernstein_promotion_test, empirical_bernstein_ci,
+    ewma_bernstein_ci, ArmStats, EwmaWelfordTracker, PromotionVerdict, WelfordTracker,
+    BERNSTEIN_DELTA, MIN_SAMPLES_FOR_BERNSTEIN,
+};
 pub use reward::RewardNormalizer;
+pub use space::{
+    categorical, int_range, linear_range, log_range, when, Category, Condition, ConditionBuilder,
+    Constraint, ParamDef, ParamMap, ParamValue, SamplerError, Scale, SearchSpace,
+    SearchSpaceBuilder, SpaceError,
+};
 
 /// Metric to optimize during auto-tuning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AutoMetric {
     /// Mean Absolute Error (lower is better).
     MAE,
@@ -58,16 +91,36 @@ pub trait DiagnosticSource {
 
 /// Factory for creating streaming learner instances from hyperparameter configurations.
 ///
-/// Implementations define the hyperparameter search space and how to construct
-/// a model from a given configuration point.
+/// Implementations define the hyperparameter search space (a typed
+/// [`SearchSpace`]) and how to construct a model from a sampled
+/// [`ParamMap`].
+///
+/// # Migration from positional `HyperConfig`
+///
+/// Pre-v10 factories returned a [`ConfigSpace`] of positional `HyperParam`
+/// entries and consumed a [`HyperConfig`] (a `Vec<f64>` indexed by position).
+/// That API is deprecated in favor of typed, named-access [`SearchSpace`] /
+/// [`ParamMap`]. The legacy types remain for one release cycle behind
+/// `#[deprecated]` to give downstream crates time to migrate.
 pub trait ModelFactory: Send + Sync {
     /// The hyperparameter search space for this model type.
-    fn config_space(&self) -> ConfigSpace;
+    fn config_space(&self) -> SearchSpace;
 
-    /// Create a new model instance from a hyperparameter configuration.
+    /// Create a new model instance from a sampled parameter map.
     ///
-    /// The `config` values correspond to the parameters in `config_space()`.
-    fn create(&self, config: &HyperConfig) -> Box<dyn irithyll_core::learner::StreamingLearner>;
+    /// The `params` are values drawn from [`Self::config_space`]. Factories
+    /// access them by name via [`ParamMap::float`] / [`ParamMap::int`] /
+    /// [`ParamMap::category`]. Conditional parameters whose gate did not fire
+    /// are absent from the map; factories must use the `_optional` variants
+    /// for those reads.
+    ///
+    /// Returns `Err(FactoryError)` when the sampled hyperparameter combination
+    /// is structurally invalid. The AutoML racing layer catches this error,
+    /// logs a warning, and skips the offending arm rather than panicking.
+    fn create(
+        &self,
+        params: &ParamMap,
+    ) -> Result<Box<dyn irithyll_core::learner::StreamingLearner>, FactoryError>;
 
     /// Human-readable name for this model type (e.g., "SGBT", "ESN").
     fn name(&self) -> &str;
@@ -105,5 +158,15 @@ pub trait ModelFactory: Send + Sync {
     /// The default is 1 (conservative estimate).
     fn n_features_hint(&self) -> usize {
         1
+    }
+
+    /// Return `true` if the SPSA auto-builder (`FeasibleRegion` + `DiagnosticLearner`)
+    /// is meaningful for this factory.
+    ///
+    /// The auto-builder is designed for the SGBT family. Non-SGBT factories
+    /// should return `false` (the default) so that the `AutoTuner` can log a
+    /// warning and skip activating the adaptor rather than silently no-oping.
+    fn supports_auto_builder(&self) -> bool {
+        false
     }
 }

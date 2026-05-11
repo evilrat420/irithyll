@@ -72,20 +72,27 @@ impl DecompositionConfigBuilder {
     /// Validate and build the configuration.
     ///
     /// Returns an error if `period < 2` or either alpha is outside (0, 1).
-    pub fn build(self) -> Result<DecompositionConfig, String> {
+    pub fn build(self) -> Result<DecompositionConfig, irithyll_core::error::ConfigError> {
+        use irithyll_core::error::ConfigError;
         if self.period < 2 {
-            return Err(format!("period must be >= 2, got {}", self.period));
+            return Err(ConfigError::out_of_range(
+                "period",
+                "must be >= 2",
+                self.period,
+            ));
         }
         if self.trend_alpha <= 0.0 || self.trend_alpha >= 1.0 {
-            return Err(format!(
-                "trend_alpha must be in (0, 1), got {}",
-                self.trend_alpha
+            return Err(ConfigError::out_of_range(
+                "trend_alpha",
+                "must be in (0, 1)",
+                self.trend_alpha,
             ));
         }
         if self.seasonal_alpha <= 0.0 || self.seasonal_alpha >= 1.0 {
-            return Err(format!(
-                "seasonal_alpha must be in (0, 1), got {}",
-                self.seasonal_alpha
+            return Err(ConfigError::out_of_range(
+                "seasonal_alpha",
+                "must be in (0, 1)",
+                self.seasonal_alpha,
             ));
         }
         Ok(DecompositionConfig {
@@ -472,12 +479,14 @@ mod tests {
 
     #[test]
     fn config_validates() {
+        use irithyll_core::error::ConfigError;
+
         // period < 2
         let err = DecompositionConfig::builder(1).build();
         assert!(err.is_err(), "period=1 should be rejected");
         assert!(
-            err.unwrap_err().contains("period"),
-            "error should mention period"
+            matches!(&err.err().unwrap(), ConfigError::OutOfRange { param, .. } if *param == "period"),
+            "error should be OutOfRange for period"
         );
 
         // period = 0

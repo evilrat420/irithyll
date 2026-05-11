@@ -17,15 +17,79 @@
 
 use std::fmt;
 
+use crate::common::PlasticityConfig;
 use crate::error::ConfigError;
 
 /// Mamba architecture version.
+///
+/// ## Version progression
+///
+/// | Variant | Discretization | State type | Input mixing | Paper |
+/// |---|---|---|---|---|
+/// | `V1` | ZOH | Real scalar | Per-channel | Gu & Dao, 2023 |
+/// | `V3` | Tustin (bilinear) | Complex diagonal | Grouped avg (MIMO-lite) | Mamba-3 precursor |
+/// | `V3Exp` | Exp-trapezoidal (3-term, λ_t) | Complex diagonal | Grouped avg | Lahoti et al., ICLR 2026 |
+/// | `V3Mimo` | Exp-trapezoidal (3-term, λ_t) | Complex matrix H ∈ R^{N×P} | True rank-R outer product | Lahoti et al., ICLR 2026 §3.3 |
+/// | `BlockDiagonal` | Euler | Real block-diagonal | Dense per-block | Dubinin et al., 2026 |
+///
+/// ## Deprecation path
+///
+/// `V3` (Tustin MIMO-lite) is preserved for backward compatibility.
+/// New code should prefer `V3Exp` (paper-spec discretization) or
+/// `V3Mimo { rank }` (paper-spec MIMO). `V3` will be marked deprecated in v10.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MambaVersion {
     /// Mamba-1: per-channel scalar processing, real states, ZOH discretization.
     V1,
-    /// Mamba-3: MIMO groups, complex states, trapezoidal discretization.
+    /// Mamba-3 MIMO-lite: grouped channels, complex states, Tustin (bilinear) discretization.
+    ///
+    /// This is the **original** irithyll V3 cell — preserved for backward compatibility.
+    /// It is **not** paper-spec Mamba-3: it uses Tustin bilinear (2-term) rather than
+    /// exponential-trapezoidal (3-term) and averages group input rather than true MIMO.
+    ///
+    /// Prefer `V3Exp` or `V3Mimo` for new code.
     V3,
+    /// Mamba-3 paper-spec: exp-trapezoidal 3-term recurrence + data-dependent λ_t.
+    ///
+    /// Implements §3.1 of Lahoti et al. (arXiv:2603.15569, ICLR 2026).
+    /// Uses `exp_trapezoidal_complex` discretization (distinct from Tustin):
+    ///
+    /// ```text
+    /// h_t = α_t · h_{t-1} + β_t · B_{t-1}·x_{t-1} + γ_t · B_t·x_t
+    /// λ_t = sigmoid(W_λ · x_t + b_λ)   // data-dependent convex weight
+    /// ```
+    ///
+    /// Optional BCNorm (§3.2) enabled when `use_bcnorm: true`.
+    /// Stability: |α| = exp(Δ·Re(A)) < 1 for Re(A)<0, any positive Δ.
+    V3Exp {
+        /// Enable BCNorm on B_t and C_t projections (Lahoti et al. §3.2).
+        ///
+        /// Recommended for large-magnitude inputs. Paper default: enabled.
+        use_bcnorm: bool,
+    },
+    /// Mamba-3 true rank-R MIMO: matrix-valued state H ∈ R^{N×P}.
+    ///
+    /// Implements §3.3 of Lahoti et al. (arXiv:2603.15569, ICLR 2026).
+    /// Unlike `V3` (which averages group input), this variant maintains a
+    /// per-channel matrix state updated via rank-R outer product:
+    ///
+    /// ```text
+    /// H_t = α_t · H_{t-1} + β_t · prev_BX + γ_t · B_t · x_t^T
+    /// y_t = C_t^T · H_t   (per-channel output, shape P)
+    /// ```
+    ///
+    /// Rank R is an inference efficiency parameter (§3.3): R=1 is standard
+    /// outer product; R=2/4 increases arithmetic intensity for memory-bound
+    /// hardware. For CPU streaming, R=1 is recommended.
+    ///
+    /// Also uses exp-trapezoidal 3-term discretization and optional BCNorm.
+    V3Mimo {
+        /// MIMO rank (1 = outer product, 2/4 for richer mixing, paper typical: 1-4).
+        rank: usize,
+        /// Enable BCNorm on B_t and C_t projections.
+        use_bcnorm: bool,
+    },
     /// BD-LRU: Block-diagonal linear recurrence with dense m×m blocks.
     ///
     /// Groups `d_in` channels into `d_in / block_size` blocks, each with a
@@ -69,23 +133,24 @@ pub struct MambaConfig {
     pub warmup: usize,
     /// Mamba architecture version (default: V1).
     pub version: MambaVersion,
-    /// Number of MIMO groups (default: 1, only used for V3).
+    /// Number of MIMO groups (default: 1, used for V3/V3Exp/V3Mimo).
     ///
-    /// When `version` is V3 and `n_groups` was set to 0 at build time,
-    /// it is auto-derived as `d_in / 4` clamped to `[1, d_in]`.
+    /// When `version` is V3/V3Exp/V3Mimo and `n_groups` was set to 0 at build
+    /// time, it is auto-derived as `d_in / 4` clamped to `[1, d_in]`.
     /// When `version` is V1 or BlockDiagonal, this field is ignored.
     pub n_groups: usize,
     /// Block size for BlockDiagonal version (default: 4, only used for BlockDiagonal).
     ///
     /// Must divide `d_in` evenly. Typical values: 2, 4, 8.
-    /// When `version` is V1 or V3, this field is ignored (stored as 1).
+    /// When `version` is V1/V3/V3Exp/V3Mimo, this field is ignored (stored as 1).
     pub block_size: usize,
-    /// Enable plasticity maintenance via neuron regeneration (default: false).
+    /// Optional plasticity configuration for neuron regeneration (default: None).
     ///
-    /// When enabled, tracks per-channel SSM state energy and periodically
+    /// When `Some`, tracks per-channel SSM state energy and periodically
     /// reinitializes dead channels to maintain learning capacity over long
-    /// streams (Dohare et al., Nature 2024).
-    pub plasticity: bool,
+    /// streams (Dohare et al., Nature 2024). Use [`PlasticityConfig::default()`]
+    /// for paper-recommended defaults.
+    pub plasticity: Option<PlasticityConfig>,
 }
 
 impl MambaConfig {
@@ -111,6 +176,18 @@ impl fmt::Display for MambaConfig {
                 "MambaConfig(v3, d_in={}, n_state={}, n_groups={}, ff={}, delta={}, seed={}, warmup={})",
                 self.d_in, self.n_state, self.n_groups, self.forgetting_factor, self.delta_rls,
                 self.seed, self.warmup
+            ),
+            MambaVersion::V3Exp { use_bcnorm } => write!(
+                f,
+                "MambaConfig(v3exp, d_in={}, n_state={}, n_groups={}, bcnorm={}, ff={}, delta={}, seed={}, warmup={})",
+                self.d_in, self.n_state, self.n_groups, use_bcnorm,
+                self.forgetting_factor, self.delta_rls, self.seed, self.warmup
+            ),
+            MambaVersion::V3Mimo { rank, use_bcnorm } => write!(
+                f,
+                "MambaConfig(v3mimo, d_in={}, n_state={}, n_groups={}, rank={}, bcnorm={}, ff={}, delta={}, seed={}, warmup={})",
+                self.d_in, self.n_state, self.n_groups, rank, use_bcnorm,
+                self.forgetting_factor, self.delta_rls, self.seed, self.warmup
             ),
             MambaVersion::BlockDiagonal { block_size } => write!(
                 f,
@@ -154,7 +231,8 @@ pub struct MambaConfigBuilder {
     version: MambaVersion,
     n_groups: usize,
     block_size: usize,
-    plasticity: bool,
+    rank: usize,
+    plasticity: Option<PlasticityConfig>,
 }
 
 impl Default for MambaConfigBuilder {
@@ -169,7 +247,8 @@ impl Default for MambaConfigBuilder {
             version: MambaVersion::V1,
             n_groups: 1,
             block_size: 4,
-            plasticity: false,
+            rank: 1,
+            plasticity: None,
         }
     }
 }
@@ -238,12 +317,29 @@ impl MambaConfigBuilder {
         self
     }
 
-    /// Enable or disable plasticity maintenance (default: false).
+    /// Set the MIMO rank for `V3Mimo` variant (default: 1).
     ///
-    /// When enabled, tracks per-channel SSM state energy and periodically
+    /// - `rank=1`: standard rank-1 outer product `B_t · x_t^T`. Recommended for CPU.
+    /// - `rank=2/4`: richer per-channel mixing. Increases parameter count by R.
+    ///
+    /// Only used when `version` is `V3Mimo { rank, .. }`. Ignored for other variants.
+    /// Must be >= 1.
+    ///
+    /// # References
+    ///
+    /// Lahoti et al. arXiv:2603.15569, ICLR 2026, §3.3.
+    pub fn rank(mut self, rank: usize) -> Self {
+        self.rank = rank;
+        self
+    }
+
+    /// Set the plasticity configuration (default: None = disabled).
+    ///
+    /// When `Some`, tracks per-channel SSM state energy and periodically
     /// reinitializes dead channels to maintain learning capacity over long
-    /// streams (Dohare et al., Nature 2024).
-    pub fn plasticity(mut self, p: bool) -> Self {
+    /// streams (Dohare et al., Nature 2024). Use [`PlasticityConfig::default()`]
+    /// for paper-recommended defaults.
+    pub fn plasticity(mut self, p: Option<PlasticityConfig>) -> Self {
         self.plasticity = p;
         self
     }
@@ -286,35 +382,72 @@ impl MambaConfigBuilder {
             ));
         }
 
-        // Version-specific validation for n_groups and block_size.
-        let (n_groups, block_size) = match self.version {
-            MambaVersion::V1 => {
-                // V1 ignores n_groups and block_size; store 1 for consistency.
-                (1, 1)
-            }
-            MambaVersion::V3 => {
-                let g = if self.n_groups == 0 {
-                    // Auto-derive: largest divisor of d_in that's <= d_in/4.
-                    // Falls back to 1 if no better divisor exists (e.g., prime d_in).
+        // Helper: auto-derive n_groups (shared logic for V3/V3Exp/V3Mimo)
+        let derive_n_groups =
+            |requested: usize, version_name: &'static str| -> Result<usize, ConfigError> {
+                let g = if requested == 0 {
                     let target = (d_in / 4).max(1);
                     (1..=target).rev().find(|&g| d_in % g == 0).unwrap_or(1)
                 } else {
-                    self.n_groups
+                    requested
                 };
                 if g < 1 {
-                    return Err(ConfigError::out_of_range(
-                        "n_groups",
-                        "must be >= 1 for V3",
-                        g,
-                    ));
+                    return Err(ConfigError::out_of_range("n_groups", version_name, g));
                 }
                 if d_in % g != 0 {
                     return Err(ConfigError::invalid(
                         "n_groups",
-                        format!("n_groups ({}) must divide d_in ({}) evenly for V3", g, d_in),
+                        format!(
+                            "n_groups ({}) must divide d_in ({}) evenly for {}",
+                            g, d_in, version_name
+                        ),
                     ));
                 }
-                (g, 1)
+                Ok(g)
+            };
+
+        // Version-specific validation for n_groups and block_size.
+        let (n_groups, block_size, version) = match self.version {
+            MambaVersion::V1 => {
+                // V1 ignores n_groups and block_size; store 1 for consistency.
+                (1, 1, MambaVersion::V1)
+            }
+            MambaVersion::V3 => {
+                let g = derive_n_groups(self.n_groups, "V3")?;
+                (g, 1, MambaVersion::V3)
+            }
+            MambaVersion::V3Exp { use_bcnorm } => {
+                let g = derive_n_groups(self.n_groups, "V3Exp")?;
+                (g, 1, MambaVersion::V3Exp { use_bcnorm })
+            }
+            MambaVersion::V3Mimo {
+                rank: _,
+                use_bcnorm,
+            } => {
+                let g = derive_n_groups(self.n_groups, "V3Mimo")?;
+                let r = self.rank;
+                if r < 1 {
+                    return Err(ConfigError::out_of_range(
+                        "rank",
+                        "must be >= 1 for V3Mimo (rank=1 is standard outer product)",
+                        r,
+                    ));
+                }
+                if r > 16 {
+                    return Err(ConfigError::out_of_range(
+                        "rank",
+                        "must be <= 16 for V3Mimo (parameter count scales with rank)",
+                        r,
+                    ));
+                }
+                (
+                    g,
+                    1,
+                    MambaVersion::V3Mimo {
+                        rank: r,
+                        use_bcnorm,
+                    },
+                )
             }
             MambaVersion::BlockDiagonal { block_size: _ } => {
                 let bs = self.block_size;
@@ -341,14 +474,8 @@ impl MambaConfigBuilder {
                         ),
                     ));
                 }
-                (1, bs)
+                (1, bs, MambaVersion::BlockDiagonal { block_size: bs })
             }
-        };
-
-        // Reconstruct the version with validated block_size.
-        let version = match self.version {
-            MambaVersion::BlockDiagonal { .. } => MambaVersion::BlockDiagonal { block_size },
-            other => other,
         };
 
         Ok(MambaConfig {
@@ -361,7 +488,7 @@ impl MambaConfigBuilder {
             version,
             n_groups,
             block_size,
-            plasticity: self.plasticity,
+            plasticity: self.plasticity.clone(),
         })
     }
 }
@@ -646,5 +773,231 @@ mod tests {
                 .unwrap();
             assert_eq!(config.block_size, bs, "block_size should be {}", bs);
         }
+    }
+
+    // ---- V3Exp tests ----
+
+    #[test]
+    fn v3exp_basic_config() {
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .n_state(16)
+            .version(MambaVersion::V3Exp { use_bcnorm: false })
+            .n_groups(2)
+            .build()
+            .unwrap();
+        assert_eq!(config.version, MambaVersion::V3Exp { use_bcnorm: false });
+        assert_eq!(config.n_groups, 2);
+        assert_eq!(config.d_in, 8);
+    }
+
+    #[test]
+    fn v3exp_with_bcnorm() {
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::V3Exp { use_bcnorm: true })
+            .n_groups(2)
+            .build()
+            .unwrap();
+        assert_eq!(config.version, MambaVersion::V3Exp { use_bcnorm: true });
+    }
+
+    #[test]
+    fn v3exp_auto_derive_n_groups() {
+        let config = MambaConfig::builder()
+            .d_in(16)
+            .version(MambaVersion::V3Exp { use_bcnorm: false })
+            .n_groups(0)
+            .build()
+            .unwrap();
+        assert_eq!(config.n_groups, 4, "auto-derived n_groups=d_in/4=4");
+    }
+
+    #[test]
+    fn v3exp_n_groups_must_divide_d_in() {
+        let result = MambaConfig::builder()
+            .d_in(7)
+            .version(MambaVersion::V3Exp { use_bcnorm: false })
+            .n_groups(3)
+            .build();
+        assert!(
+            result.is_err(),
+            "n_groups=3 must not divide d_in=7 for V3Exp"
+        );
+    }
+
+    #[test]
+    fn v3exp_display_format() {
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::V3Exp { use_bcnorm: false })
+            .n_groups(2)
+            .build()
+            .unwrap();
+        let s = format!("{}", config);
+        assert!(s.contains("v3exp"), "V3Exp display should contain 'v3exp'");
+        assert!(
+            s.contains("n_groups=2"),
+            "V3Exp display should contain n_groups"
+        );
+        assert!(
+            s.contains("bcnorm="),
+            "V3Exp display should contain bcnorm flag"
+        );
+    }
+
+    // ---- V3Mimo tests ----
+
+    #[test]
+    fn v3mimo_basic_config() {
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .n_state(16)
+            .version(MambaVersion::V3Mimo {
+                rank: 1,
+                use_bcnorm: false,
+            })
+            .n_groups(2)
+            .rank(1)
+            .build()
+            .unwrap();
+        assert_eq!(
+            config.version,
+            MambaVersion::V3Mimo {
+                rank: 1,
+                use_bcnorm: false
+            }
+        );
+        assert_eq!(config.n_groups, 2);
+    }
+
+    #[test]
+    fn v3mimo_rank_4() {
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::V3Mimo {
+                rank: 4,
+                use_bcnorm: true,
+            })
+            .n_groups(2)
+            .rank(4)
+            .build()
+            .unwrap();
+        assert_eq!(
+            config.version,
+            MambaVersion::V3Mimo {
+                rank: 4,
+                use_bcnorm: true
+            }
+        );
+    }
+
+    #[test]
+    fn v3mimo_rank_too_large() {
+        let result = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::V3Mimo {
+                rank: 1,
+                use_bcnorm: false,
+            })
+            .rank(32) // > 16
+            .n_groups(2)
+            .build();
+        assert!(result.is_err(), "rank=32 should be invalid (> 16)");
+    }
+
+    #[test]
+    fn v3mimo_rank_zero_invalid() {
+        let result = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::V3Mimo {
+                rank: 1,
+                use_bcnorm: false,
+            })
+            .rank(0)
+            .n_groups(2)
+            .build();
+        assert!(result.is_err(), "rank=0 should be invalid");
+    }
+
+    #[test]
+    fn v3mimo_display_format() {
+        let config = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::V3Mimo {
+                rank: 2,
+                use_bcnorm: false,
+            })
+            .n_groups(2)
+            .rank(2)
+            .build()
+            .unwrap();
+        let s = format!("{}", config);
+        assert!(
+            s.contains("v3mimo"),
+            "V3Mimo display should contain 'v3mimo'"
+        );
+        assert!(s.contains("rank=2"), "V3Mimo display should contain rank");
+        assert!(
+            s.contains("n_groups=2"),
+            "V3Mimo display should contain n_groups"
+        );
+    }
+
+    #[test]
+    fn v3mimo_readout_dim_smaller_than_v3exp() {
+        // V3Mimo uses the simpler `d_in + n_groups` readout (gated output +
+        // per-group Frobenius energy). V3Exp surfaces additional features
+        // unique to its complex-diagonal cell:
+        //   1. Per-component `Re(h)`, `Im(h)`, `|h|`, `|h|^2` — the
+        //      load-bearing complex-state surface for parity-class tasks
+        //      (the `|h|^2` feature carries up-to-degree-4 in input bits).
+        //   2. A tanh random-feature lift over raw input bits — a Random
+        //      Feature Network that approximates kernel ridge regression
+        //      with Gaussian RBF in the limit (Rahimi & Recht 2008), giving
+        //      the linear RLS readout universal-approximation capability
+        //      for high-degree polynomial targets like multi-bit XOR parity.
+        //
+        // V3Mimo readout stays linear because V3Mimo's true rank-R matrix
+        // state already provides quadratic cross-channel information
+        // through its outer-product update; a separate lift is not the
+        // architectural claim being defended.
+        //
+        // This test asserts the dimensional asymmetry, not equality. If a
+        // future change wants V3Mimo to receive the same lift, update the
+        // matcher accordingly.
+        use crate::StreamingMamba;
+        let config_exp = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::V3Exp { use_bcnorm: false })
+            .n_groups(2)
+            .build()
+            .unwrap();
+        let config_mimo = MambaConfig::builder()
+            .d_in(8)
+            .version(MambaVersion::V3Mimo {
+                rank: 1,
+                use_bcnorm: false,
+            })
+            .n_groups(2)
+            .rank(1)
+            .build()
+            .unwrap();
+        let m_exp = StreamingMamba::new(config_exp);
+        let m_mimo = StreamingMamba::new(config_mimo);
+        assert!(
+            m_exp.last_features().len() > m_mimo.last_features().len(),
+            "V3Exp readout dim ({}) should exceed V3Mimo readout dim ({}) — \
+             V3Exp surfaces complex-state features and a random tanh lift \
+             that V3Mimo does not.",
+            m_exp.last_features().len(),
+            m_mimo.last_features().len()
+        );
+        // V3Mimo dim must equal d_in + n_groups (gated + per-group Frobenius).
+        assert_eq!(
+            m_mimo.last_features().len(),
+            10,
+            "V3Mimo readout dim should be d_in+n_groups = 10"
+        );
     }
 }

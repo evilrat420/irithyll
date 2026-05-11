@@ -1,4 +1,4 @@
-//! Expanded streaming ML benchmark suite for irithyll v9.8.5.
+//! Expanded streaming ML benchmark suite for irithyll.
 //!
 //! Evaluates 8 streaming algorithms across 25 synthetic datasets using the
 //! prequential (test-then-train) protocol. Datasets use the `irithyll::generators`
@@ -40,7 +40,7 @@
 //! **Algorithms:**
 //! - SGBT, Dist-SGBT (tree ensembles)
 //! - ESN, Mamba (V1), KAN, TTT, RLS, MoE (neural/linear models)
-//! - sLSTM, mGRADE, MambaV3, MambaBD, GLA (new v9.9.x+ models)
+//! - sLSTM, mGRADE, MambaV3, MambaBD, GLA (neural streaming models)
 //! - SpikeNet (spiking neural network)
 //! - ProjectedLearner+Mamba (projection wrapper combo)
 //! - NeuralMoE (3-expert neural ensemble)
@@ -420,7 +420,7 @@ impl BenchmarkDataset for LorenzBenchmark {
 }
 
 // ===========================================================================
-// Inline datasets (kept from v9.0 bench)
+// Inline datasets
 // ===========================================================================
 
 // ---------------------------------------------------------------------------
@@ -1604,10 +1604,11 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
             .expert(rls(0.999))
             .top_k(2)
             .build()
+            .expect("valid NeuralMoE config")
     };
 
     // ---------------------------------------------------------------------------
-    // NEW MODELS (v9.9.x+)
+    // Neural streaming models
     // ---------------------------------------------------------------------------
 
     // sLSTM: d_model=32, exponential gating, RLS readout
@@ -1624,7 +1625,7 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
     // mGRADE: d_in=n_features, d_hidden=32, kernel_size=4
     let make_mgrade = || {
         StreamingMGrade::new(
-            mGRADEConfig::builder()
+            MGradeConfig::builder()
                 .d_in(n_features)
                 .d_hidden(32)
                 .kernel_size(4)
@@ -1644,6 +1645,40 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
                 .forgetting_factor(0.998)
                 .build()
                 .expect("mamba_v3 config"),
+        )
+    };
+
+    // Mamba V3Exp: exp-trapezoidal 3-term recurrence + data-dependent λ_t (paper spec)
+    // (Lahoti et al., arXiv:2603.15569, ICLR 2026, §3.1)
+    let make_mamba_v3exp = || {
+        irithyll::ssm::StreamingMamba::new(
+            irithyll::ssm::MambaConfig::builder()
+                .d_in(n_features)
+                .n_state(32)
+                .version(MambaVersion::V3Exp { use_bcnorm: false })
+                .n_groups(0) // auto-derive
+                .forgetting_factor(0.998)
+                .build()
+                .expect("mamba_v3exp config"),
+        )
+    };
+
+    // Mamba V3Mimo: true rank-R MIMO with matrix-valued state H ∈ R^{N×P}
+    // (Lahoti et al., arXiv:2603.15569, ICLR 2026, §3.3)
+    let make_mamba_v3mimo = || {
+        irithyll::ssm::StreamingMamba::new(
+            irithyll::ssm::MambaConfig::builder()
+                .d_in(n_features)
+                .n_state(16) // N/2 complex ≈ N real state (§3.3 state-dim halving)
+                .version(MambaVersion::V3Mimo {
+                    rank: 2,
+                    use_bcnorm: false,
+                })
+                .n_groups(0) // auto-derive
+                .rank(2)
+                .forgetting_factor(0.998)
+                .build()
+                .expect("mamba_v3mimo config"),
         )
     };
 
@@ -1741,6 +1776,7 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
             .expert_with_warmup(esn(50, 0.95), 20)
             .top_k(2)
             .build()
+            .expect("valid NeuralMoE config")
     };
 
     match task {
@@ -1769,7 +1805,7 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
                 name: "MoE (3 experts)",
                 model: Box::new(make_moe()),
             });
-            // --- New models (v9.9.x+) ---
+            // --- Neural streaming models ---
             algos.push(NamedModel {
                 name: "sLSTM (d=32)",
                 model: Box::new(make_slstm()),
@@ -1781,6 +1817,14 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
             algos.push(NamedModel {
                 name: "MambaV3 (s=32)",
                 model: Box::new(make_mamba_v3()),
+            });
+            algos.push(NamedModel {
+                name: "MambaV3Exp (s=32)",
+                model: Box::new(make_mamba_v3exp()),
+            });
+            algos.push(NamedModel {
+                name: "MambaV3Mimo (s=16,r=2)",
+                model: Box::new(make_mamba_v3mimo()),
             });
             algos.push(NamedModel {
                 name: "MambaBD (s=32)",
@@ -1828,7 +1872,7 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
                 name: "MoE-bin (3 exp)",
                 model: Box::new(binary_classifier(make_moe())),
             });
-            // --- New models (v9.9.x+) ---
+            // --- Neural streaming models ---
             algos.push(NamedModel {
                 name: "sLSTM-bin (d=32)",
                 model: Box::new(binary_classifier(make_slstm())),
@@ -1840,6 +1884,14 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
             algos.push(NamedModel {
                 name: "MambaV3-bin",
                 model: Box::new(binary_classifier(make_mamba_v3())),
+            });
+            algos.push(NamedModel {
+                name: "MambaV3Exp-bin",
+                model: Box::new(binary_classifier(make_mamba_v3exp())),
+            });
+            algos.push(NamedModel {
+                name: "MambaV3Mimo-bin",
+                model: Box::new(binary_classifier(make_mamba_v3mimo())),
             });
             algos.push(NamedModel {
                 name: "MambaBD-bin",
@@ -1880,7 +1932,7 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
                 name: "MoE-mc (3 exp)",
                 model: Box::new(multiclass_classifier(make_moe(), nc)),
             });
-            // --- New models (v9.9.x+) ---
+            // --- Neural streaming models ---
             algos.push(NamedModel {
                 name: "sLSTM-mc (d=32)",
                 model: Box::new(multiclass_classifier(make_slstm(), nc)),
@@ -1892,6 +1944,14 @@ fn build_algorithms(n_features: usize, task: &Task) -> Vec<NamedModel> {
             algos.push(NamedModel {
                 name: "MambaV3-mc",
                 model: Box::new(multiclass_classifier(make_mamba_v3(), nc)),
+            });
+            algos.push(NamedModel {
+                name: "MambaV3Exp-mc",
+                model: Box::new(multiclass_classifier(make_mamba_v3exp(), nc)),
+            });
+            algos.push(NamedModel {
+                name: "MambaV3Mimo-mc",
+                model: Box::new(multiclass_classifier(make_mamba_v3mimo(), nc)),
             });
             algos.push(NamedModel {
                 name: "MambaBD-mc",

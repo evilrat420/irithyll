@@ -3,7 +3,7 @@ members = [".", "irithyll-python", "irithyll-core", "irithyll-cli"]
 
 [package]
 name = "irithyll"
-version = "9.9.9"
+version = "10.0.0"
 edition = "2021"
 rust-version = "1.75"
 description = "Streaming ML in Rust -- gradient boosted trees, neural architectures (TTT/KAN/MoE/Mamba/SNN), AutoML, kernel methods, and composable pipelines"
@@ -24,7 +24,7 @@ serde_json = { version = "1.0", optional = true }
 bincode = { version = "2", features = ["serde"], optional = true }
 thiserror = "2.0"
 tracing = "0.1"
-irithyll-core = { path = "irithyll-core", version = "0.9.2", features = ["std", "serde"] }
+irithyll-core = { path = "irithyll-core", version = "1.0.0", features = ["std", "serde"] }
 
 # Optional acceleration dependencies (activated via feature flags)
 rayon = { version = "1.10", optional = true }
@@ -38,6 +38,7 @@ prost = { version = "0.13", optional = true }
 
 [dev-dependencies]
 proptest = "1.5"
+rand = { version = "0.8", features = ["small_rng"] }
 approx = "0.5"
 criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1", features = ["full"] }
@@ -54,10 +55,14 @@ arrow = ["dep:arrow"]
 parquet = ["dep:parquet", "arrow"]
 onnx = ["dep:prost"]
 neural-leaves = []
+# Knowledge distillation for WelfordRace (AM-15). Default OFF.
+# Enable only after post-restart telemetry confirms winner flipping between
+# 2+ configs that capture genuinely different market regimes.
+distill = []
 full = ["serde-json", "serde-bincode", "kmeans-binning", "parallel", "arrow", "parquet", "onnx", "neural-leaves", "simd", "simd-avx2"]
 
 [package.metadata.docs.rs]
-all-features = true
+features = ["full"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [[bench]]
@@ -111,3 +116,107 @@ harness = false
 [[bench]]
 name = "real_world_bench"
 harness = false
+
+[[bench]]
+name = "log_linear_bench"
+harness = false
+
+[[bench]]
+name = "moa_generators_bench"
+harness = false
+
+[[bench]]
+name = "delta_family_gauntlet"
+harness = false
+
+# ── Examples ────────────────────────────────────────────────────────────────
+# Subdirectory examples require explicit registration (Cargo auto-discovery
+# only finds examples/*.rs, not examples/**/*.rs).
+
+[[example]]
+name = "hello_streaming"
+path = "examples/01_quickstart/hello_streaming.rs"
+
+[[example]]
+name = "basic_regression"
+path = "examples/01_quickstart/basic_regression.rs"
+
+[[example]]
+name = "pipeline_composition"
+path = "examples/02_essentials/pipeline_composition.rs"
+
+[[example]]
+name = "drift_detection"
+path = "examples/02_essentials/drift_detection.rs"
+
+[[example]]
+name = "classification"
+path = "examples/02_essentials/classification.rs"
+
+[[example]]
+name = "rls_confidence"
+path = "examples/02_essentials/rls_confidence.rs"
+
+[[example]]
+name = "streaming_metrics"
+path = "examples/02_essentials/streaming_metrics.rs"
+
+[[example]]
+name = "async_ingestion"
+path = "examples/02_essentials/async_ingestion.rs"
+
+[[example]]
+name = "kan_regression"
+path = "examples/03_neural/kan_regression.rs"
+
+[[example]]
+name = "streaming_kan"
+path = "examples/03_neural/streaming_kan.rs"
+
+[[example]]
+name = "mamba3_temporal"
+path = "examples/03_neural/mamba3_temporal.rs"
+
+[[example]]
+name = "slstm_regression"
+path = "examples/03_neural/slstm_regression.rs"
+
+[[example]]
+name = "streaming_ttt"
+path = "examples/03_neural/streaming_ttt.rs"
+
+[[example]]
+name = "rwkv7_attention"
+path = "examples/03_neural/rwkv7_attention.rs"
+
+[[example]]
+name = "neural_moe"
+path = "examples/03_neural/neural_moe.rs"
+
+[[example]]
+name = "factory_racing"
+path = "examples/04_advanced/factory_racing.rs"
+
+[[example]]
+name = "custom_loss"
+path = "examples/04_advanced/custom_loss.rs"
+
+[[example]]
+name = "model_checkpointing"
+path = "examples/04_advanced/model_checkpointing.rs"
+
+[[example]]
+name = "projected_learner"
+path = "examples/04_advanced/projected_learner.rs"
+
+[[example]]
+name = "ccipca_reduction"
+path = "examples/04_advanced/ccipca_reduction.rs"
+
+[[example]]
+name = "krls_nonlinear"
+path = "examples/04_advanced/krls_nonlinear.rs"
+
+[[example]]
+name = "automl"
+path = "examples/04_advanced/automl.rs"

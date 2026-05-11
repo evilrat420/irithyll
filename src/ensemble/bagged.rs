@@ -308,7 +308,23 @@ impl<L: Loss + Clone> StreamingLearner for BaggedSGBT<L> {
         BaggedSGBT::reset(self);
     }
 
-    /// Aggregate diagnostics from the first bag as representative signal.
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn replacement_count(&self) -> u64 {
+        <Self as crate::learner::Structural>::replacement_count(self)
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        <Self as crate::learner::Tunable>::adjust_config(self, lr_multiplier, lambda_delta);
+    }
+}
+
+impl<L: Loss + Clone> crate::learner::Tunable for BaggedSGBT<L> {
     fn diagnostics_array(&self) -> [f64; 5] {
         use crate::automl::DiagnosticSource;
         if let Some(first) = self.bags.first() {
@@ -329,12 +345,6 @@ impl<L: Loss + Clone> StreamingLearner for BaggedSGBT<L> {
         }
     }
 
-    /// Sum of replacement counts across all bags.
-    fn replacement_count(&self) -> u64 {
-        self.bags.iter().map(|b| b.total_replacements()).sum()
-    }
-
-    /// Forward learning rate / lambda adjustments to all bags.
     fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
         for bag in &mut self.bags {
             let new_lr = bag.config().learning_rate * lr_multiplier;
@@ -342,6 +352,16 @@ impl<L: Loss + Clone> StreamingLearner for BaggedSGBT<L> {
             let new_lambda = bag.config().lambda + lambda_delta;
             bag.set_lambda(new_lambda);
         }
+    }
+}
+
+impl<L: Loss + Clone> crate::learner::Structural for BaggedSGBT<L> {
+    fn apply_structural_change(&mut self, _depth_delta: i32, _steps_delta: i32) {
+        // BaggedSGBT does not support structural changes mid-stream.
+    }
+
+    fn replacement_count(&self) -> u64 {
+        self.bags.iter().map(|b| b.total_replacements()).sum()
     }
 }
 

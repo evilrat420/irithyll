@@ -78,6 +78,7 @@ use crate::sample::{Observation, SampleRef};
 /// - [`Hard`](GatingMode::Hard): only the `top_k` experts with highest gating
 ///   probability receive the sample. Reduces cost when K is large.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum GatingMode {
     /// All experts receive every sample, weighted by gating probability.
     Soft,

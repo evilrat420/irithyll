@@ -14,6 +14,7 @@ use alloc::string::String;
 
 /// Errors that can occur when parsing or validating a packed ensemble binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum FormatError {
     /// Magic bytes do not match `"IRIT"` (`0x54495249` LE).
     BadMagic,
@@ -59,6 +60,7 @@ impl core::fmt::Display for FormatError {
 /// Requires the `alloc` feature for `String` fields.
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum ConfigError {
     /// A parameter value is outside its valid range.
     ///
@@ -146,6 +148,7 @@ impl std::error::Error for ConfigError {}
 /// Requires the `alloc` feature for `String` fields.
 #[cfg(feature = "alloc")]
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum IrithyllError {
     /// Configuration validation failed.
     InvalidConfig(ConfigError),

@@ -52,6 +52,7 @@ use crate::learner::StreamingLearner;
 /// let lasso = Regularization::Lasso(0.001);
 /// let elastic = Regularization::ElasticNet { l1: 0.0005, l2: 0.0005 };
 /// ```
+#[non_exhaustive]
 pub enum Regularization {
     /// No regularization -- vanilla SGD.
     None,
@@ -360,18 +361,29 @@ impl StreamingLearner for StreamingLinearModel {
         self.samples_seen = 0;
     }
 
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        <Self as crate::learner::Tunable>::adjust_config(self, lr_multiplier, lambda_delta);
+    }
+}
+
+impl crate::learner::Tunable for StreamingLinearModel {
     fn diagnostics_array(&self) -> [f64; 5] {
         [
-            0.0,                                    // residual_alignment
-            0.0,                                    // reg_sensitivity
-            0.0,                                    // depth_sufficiency
-            self.weights.len() as f64,              // effective_dof
-            1.0 / (1.0 + self.samples_seen as f64), // uncertainty
+            0.0,
+            0.0,
+            0.0,
+            self.weights.len() as f64,
+            1.0 / (1.0 + self.samples_seen as f64),
         ]
     }
 
     fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
-        // Scale the learning rate. Clamp to a reasonable floor.
         self.learning_rate = (self.learning_rate * lr_multiplier).max(1e-12);
     }
 }

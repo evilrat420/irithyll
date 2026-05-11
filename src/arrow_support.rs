@@ -24,6 +24,7 @@ use arrow::datatypes::DataType;
 /// # Errors
 /// Returns error if `target_col` is not found or is not Float64.
 #[cfg(feature = "arrow")]
+#[cfg_attr(docsrs, doc(cfg(feature = "arrow")))]
 pub fn train_from_record_batch<L: crate::loss::Loss>(
     model: &mut crate::ensemble::SGBT<L>,
     batch: &RecordBatch,
@@ -103,6 +104,7 @@ pub fn train_from_record_batch<L: crate::loss::Loss>(
 /// All Float64 columns are treated as features (in schema order).
 /// Non-Float64 columns are silently skipped.
 #[cfg(feature = "arrow")]
+#[cfg_attr(docsrs, doc(cfg(feature = "arrow")))]
 pub fn predict_from_record_batch<L: crate::loss::Loss>(
     model: &crate::ensemble::SGBT<L>,
     batch: &RecordBatch,
@@ -146,6 +148,7 @@ pub fn predict_from_record_batch<L: crate::loss::Loss>(
 /// # Errors
 /// Returns error if `target_col` is not found or is not Float64.
 #[cfg(feature = "arrow")]
+#[cfg_attr(docsrs, doc(cfg(feature = "arrow")))]
 pub fn record_batch_to_samples(
     batch: &RecordBatch,
     target_col: &str,
@@ -214,6 +217,7 @@ pub fn record_batch_to_samples(
 /// # Errors
 /// Returns error if the file cannot be opened or read.
 #[cfg(feature = "parquet")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parquet")))]
 pub fn read_parquet_batches(path: &std::path::Path) -> crate::error::Result<Vec<RecordBatch>> {
     let file = std::fs::File::open(path).map_err(|e| {
         crate::error::IrithyllError::Serialization(format!(
@@ -264,6 +268,7 @@ pub fn read_parquet_batches(path: &std::path::Path) -> crate::error::Result<Vec<
 /// # Errors
 /// Returns error if the file cannot be read or if the target column is invalid.
 #[cfg(feature = "parquet")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parquet")))]
 pub fn train_from_parquet<L: crate::loss::Loss>(
     model: &mut crate::ensemble::SGBT<L>,
     path: &std::path::Path,

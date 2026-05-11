@@ -1,4 +1,4 @@
-//! Throughput benchmarks for v2.0.0 baseline.
+//! Throughput benchmarks.
 //!
 //! Measures sustained samples/sec across different configurations.
 //! Run before and after performance changes to verify improvements.

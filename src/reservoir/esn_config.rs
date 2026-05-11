@@ -4,6 +4,7 @@
 //! builder pattern via [`ESNConfig::builder`] for ergonomic construction
 //! with validation.
 
+use crate::common::PlasticityConfig;
 use crate::error::{ConfigError, IrithyllError, Result};
 
 /// Configuration for [`EchoStateNetwork`](super::EchoStateNetwork).
@@ -68,12 +69,13 @@ pub struct ESNConfig {
     /// Auto-set: if `None` and `n_reservoir > 64`, defaults to
     /// `min(n_reservoir / 3, 64)` to keep readout tractable.
     pub readout_dim: Option<usize>,
-    /// Enable plasticity maintenance via neuron regeneration (default: false).
+    /// Optional plasticity configuration for neuron regeneration (default: None).
     ///
-    /// When enabled, tracks per-reservoir-unit output energy and periodically
+    /// When `Some`, tracks per-reservoir-unit output energy and periodically
     /// reinitializes dead units to maintain learning capacity over long
-    /// streams (Dohare et al., Nature 2024).
-    pub plasticity: bool,
+    /// streams (Dohare et al., Nature 2024). Use [`PlasticityConfig::default()`]
+    /// for paper-recommended defaults.
+    pub plasticity: Option<PlasticityConfig>,
 }
 
 impl Default for ESNConfig {
@@ -90,7 +92,7 @@ impl Default for ESNConfig {
             warmup: 50,
             passthrough_input: true,
             readout_dim: None,
-            plasticity: false,
+            plasticity: None,
         }
     }
 }
@@ -186,12 +188,13 @@ impl ESNConfigBuilder {
         self
     }
 
-    /// Enable or disable plasticity maintenance (default: false).
+    /// Set the plasticity configuration (default: None = disabled).
     ///
-    /// When enabled, tracks per-reservoir-unit output energy and periodically
+    /// When `Some`, tracks per-reservoir-unit output energy and periodically
     /// reinitializes dead units to maintain learning capacity over long
-    /// streams (Dohare et al., Nature 2024).
-    pub fn plasticity(mut self, p: bool) -> Self {
+    /// streams (Dohare et al., Nature 2024). Use [`PlasticityConfig::default()`]
+    /// for paper-recommended defaults.
+    pub fn plasticity(mut self, p: Option<PlasticityConfig>) -> Self {
         self.config.plasticity = p;
         self
     }

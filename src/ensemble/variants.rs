@@ -14,6 +14,7 @@
 /// incoming instance. The default is [`Standard`](SGBTVariant::Standard),
 /// which processes every instance exactly once.
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum SGBTVariant {
     /// Standard SGBT: train each tree on every instance exactly once.
     #[default]

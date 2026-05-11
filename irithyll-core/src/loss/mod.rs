@@ -24,6 +24,7 @@ pub mod squared;
 /// during serialization.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
 pub enum LossType {
     /// Squared error loss (regression).
     Squared,

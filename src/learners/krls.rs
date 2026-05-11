@@ -479,21 +479,30 @@ impl StreamingLearner for KRLS {
         self.samples_seen = 0;
     }
 
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as crate::learner::Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        <Self as crate::learner::Tunable>::adjust_config(self, lr_multiplier, lambda_delta);
+    }
+}
+
+impl crate::learner::Tunable for KRLS {
     fn diagnostics_array(&self) -> [f64; 5] {
         let budget = self.budget.max(1) as f64;
         [
-            0.0,                                   // residual_alignment
-            1.0 - self.forgetting_factor,          // reg_sensitivity
-            0.0,                                   // depth_sufficiency
-            self.dictionary.len() as f64,          // effective_dof
-            self.dictionary.len() as f64 / budget, // uncertainty
+            0.0,
+            1.0 - self.forgetting_factor,
+            0.0,
+            self.dictionary.len() as f64,
+            self.dictionary.len() as f64 / budget,
         ]
     }
 
     fn adjust_config(&mut self, lr_multiplier: f64, _lambda_delta: f64) {
-        // Scale the forgetting factor toward/away from 1.0.
-        // lr_multiplier > 1 => more aggressive forgetting (smaller factor).
-        // Clamp to (0, 1].
         self.forgetting_factor = (self.forgetting_factor * lr_multiplier).clamp(1e-6, 1.0);
     }
 }

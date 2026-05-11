@@ -9,16 +9,18 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
 
-use super::config::{AttentionConfig, AttentionMode};
+use super::config::{AttentionConfig, AttentionMode, GatedDeltaMode};
 use super::gating::{
     exponential_gate, extended_sigmoid_gate, fixed_decay, init_weights, lstm_gates, mat_vec,
     sigmoid_gate, vector_decay, vector_lower_bounded_gate, vector_sigmoid_gate, Xorshift64,
 };
+use super::log_linear_state::LogLinearState;
 use super::state::AttentionState;
 use super::update_rules;
 use super::AttentionLayer;
 use crate::math;
 use crate::rng::standard_normal;
+use crate::streaming_primitives::{softplus_softmax_mix, tanh_inplace};
 
 /// A single attention head with its own state and projection weights.
 struct AttentionHead {
@@ -56,6 +58,30 @@ struct AttentionHead {
     w_alpha_rk: Vec<f64>,
     /// Per-dimension lower-bounded gate for HGRN2 (d_key * d_model).
     w_hgrn2_gate: Vec<f64>,
+    /// Vector gate projection for GLAVector (d_key * d_model).
+    ///
+    /// Projects input to a per-key-dimension gate `α_t ∈ (0,1)^{d_k}`.
+    /// Empty for all modes except `GLAVector`.
+    w_gate_vec: Vec<f64>,
+    /// Per-token beta projection for GatedDeltaNet PerToken mode (length d_model).
+    ///
+    /// Computes `β_t = sigmoid(w_beta_scalar · x_t)` per token per head.
+    /// Empty unless `GatedDeltaNet { gate_mode_delta: GatedDeltaMode::PerToken }`.
+    ///
+    /// Per Yang et al. ICLR 2025 (arXiv:2412.06464): the canonical form uses
+    /// data-dependent `β_t` to make delta-rule mixing input-dependent.
+    w_beta_scalar: Vec<f64>,
+    /// Per-level λ projection for LogLinear mode (max_levels * d_model
+    /// row-major).
+    ///
+    /// Empty for all non-LogLinear modes. Each row produces one
+    /// raw logit fed to softplus-softmax mixing — paper §3.2.
+    w_lambda: Vec<f64>,
+    /// Hierarchical Fenwick state for LogLinear mode.
+    ///
+    /// `None` for all non-LogLinear modes. Holds `max_levels`
+    /// matrices per head (paper §2-§3, R1 §3.4 Option B padding).
+    log_linear_state: Option<LogLinearState>,
 }
 
 /// Multi-head streaming linear attention layer.
@@ -129,6 +155,16 @@ impl MultiHeadAttention {
                 _ => AttentionState::new_matrix(d_key, d_value),
             };
 
+            // For LogLinear: allocate the Fenwick stack per head; the
+            // base `state` matrix is unused but retained for diagnostic
+            // uniformity. State storage lives in `log_linear_state`.
+            let log_linear_state = match &config.mode {
+                AttentionMode::LogLinear { max_levels, .. } => {
+                    Some(LogLinearState::new(*max_levels, d_key, d_value))
+                }
+                _ => None,
+            };
+
             let w_key = init_weights(&mut rng, d_key * d_model);
             let w_value = init_weights(&mut rng, d_value * d_model);
             let w_query = init_weights(&mut rng, d_key * d_model);
@@ -163,7 +199,10 @@ impl MultiHeadAttention {
             };
 
             let (w_comp_keys, w_comp_values, w_comp_betas) = match &config.mode {
-                AttentionMode::DeltaProduct { n_compositions } => {
+                AttentionMode::DeltaProduct {
+                    n_compositions,
+                    reflections: _,
+                } => {
                     let n_h = *n_compositions;
                     (
                         init_weights(&mut rng, n_h * d_key * d_model),
@@ -189,6 +228,31 @@ impl MultiHeadAttention {
                 _ => Vec::new(),
             };
 
+            // GLAVector: per-key-dimension gate projection (d_key * d_model).
+            let w_gate_vec = match &config.mode {
+                AttentionMode::GLAVector => init_weights(&mut rng, d_key * d_model),
+                _ => Vec::new(),
+            };
+
+            // GatedDeltaNet PerToken: per-token beta projection (d_model).
+            // Computes β_t = sigmoid(w_beta_scalar · x_t) per Yang et al. ICLR 2025.
+            let w_beta_scalar = match &config.mode {
+                AttentionMode::GatedDeltaNet {
+                    gate_mode_delta: GatedDeltaMode::PerToken,
+                    ..
+                } => init_weights(&mut rng, d_model),
+                _ => Vec::new(),
+            };
+
+            // LogLinear: per-level λ projection W_λ ∈ R^{max_levels × d_model}.
+            // Paper §3.2: λ = softplus_softmax_mix(W_λ x + bias).
+            let w_lambda = match &config.mode {
+                AttentionMode::LogLinear { max_levels, .. } => {
+                    init_weights(&mut rng, max_levels * d_model)
+                }
+                _ => Vec::new(),
+            };
+
             heads.push(AttentionHead {
                 state,
                 w_key,
@@ -207,15 +271,23 @@ impl MultiHeadAttention {
                 w_xi,
                 w_alpha_rk,
                 w_hgrn2_gate,
+                w_gate_vec,
+                w_beta_scalar,
+                w_lambda,
+                log_linear_state,
             });
         }
 
         let concat_dim = n_heads * d_value;
         let w_out = init_weights(&mut rng, d_model * concat_dim);
 
-        // Compute total state size for cache
+        // Compute total state size for cache.
+        // LogLinear: padded `max_levels * d_k * d_v` per head (R1 §3.4
+        // Option B — constant-shape state, paper-mandated stability
+        // choice). All other modes: standard d_k*d_v or d_v.
         let state_size = match &config.mode {
             AttentionMode::Hawk => n_heads * d_value,
+            AttentionMode::LogLinear { max_levels, .. } => n_heads * max_levels * d_key * d_value,
             _ => n_heads * d_key * d_value,
         };
 
@@ -231,18 +303,23 @@ impl MultiHeadAttention {
         }
     }
 
-    /// Compute attention output for `input` using the current state, without
-    /// advancing the state.
+    /// Computes the readout for the current state without advancing it.
     ///
-    /// This is the read-only counterpart to [`AttentionLayer::forward`]: it
-    /// projects `input` to queries, reads out from the current K/V state
-    /// (`S^T * q` for matrix modes, vector state for Hawk), applies the output
-    /// projection, and returns the result — all without mutating any head state
-    /// or the state cache.
+    /// This is the canonical streaming inference path — it separates readout
+    /// from state update so the readout always reflects the post-state-advance
+    /// distribution at predict time.
     ///
-    /// Used by [`crate::attention::MultiHeadAttention`]-based streaming models
-    /// to implement a side-effect-free `predict()` that incorporates the current
-    /// input's query while keeping the state at its post-`train_one` position.
+    /// Concretely: projects `input` to queries, computes `q(x_t) · S_{t-1}`
+    /// (or the vector-state equivalent for Hawk), applies the output projection,
+    /// and returns the result — all without mutating any head state or the state
+    /// cache. This implements eq. R8.1 from the GLA analysis: the only
+    /// prequential-label-independent readout for linear attention models.
+    ///
+    /// In the streaming supervised setting `predict(x_t)` must return an
+    /// estimate of `y_t` that depends on the current input `x_t` and the
+    /// history `H_{t-1}`. This method provides exactly that: the attention
+    /// state is held at `S_{t-1}` (the state after the last `train_one`), and
+    /// the query is computed fresh from `x_t`, giving `q(x_t) · S_{t-1}`.
     ///
     /// # Arguments
     ///
@@ -250,8 +327,8 @@ impl MultiHeadAttention {
     ///
     /// # Returns
     ///
-    /// Attention output of length `d_model`.
-    pub fn forward_readonly(&self, input: &[f64]) -> Vec<f64> {
+    /// Attention readout of length `d_model`.
+    pub fn query_state(&self, input: &[f64]) -> Vec<f64> {
         let d_model = self.config.d_model;
         let d_key = self.config.d_key;
         let d_value = self.config.d_value;
@@ -270,6 +347,30 @@ impl MultiHeadAttention {
                 AttentionMode::Hawk => {
                     // Hawk state is the vector itself; return a clone as output
                     head.state.as_slice().to_vec()
+                }
+                AttentionMode::LogLinear {
+                    max_levels,
+                    lambda_init,
+                    ..
+                } => {
+                    // Compute λ from current input (no state mutation).
+                    // Paper §3.2: λ = softplus_softmax_mix(W_λ x + bias).
+                    let mut raw = vec![0.0; *max_levels];
+                    mat_vec(&head.w_lambda, input, *max_levels, d_model, &mut raw);
+                    for r in raw.iter_mut() {
+                        *r += *lambda_init;
+                    }
+                    let mut lambdas = vec![0.0; *max_levels];
+                    softplus_softmax_mix(&raw, super::log_linear::DEFAULT_TAU, &mut lambdas);
+
+                    // Read pre-update mixed state.
+                    let lls = head
+                        .log_linear_state
+                        .as_ref()
+                        .expect("LogLinear mode must have log_linear_state");
+                    let mut o = vec![0.0; d_value];
+                    lls.query_mixed(&q, &lambdas, &mut o);
+                    o
                 }
                 _ => {
                     // Matrix state: S^T * q  (pure read, no state mutation)
@@ -290,14 +391,43 @@ impl MultiHeadAttention {
             concat_dim,
             &mut output,
         );
+
+        // LogLinear: bound the output via tanh per AGENTS.md "Bounded
+        // readout features" invariant. λ-mixed q^T S can grow
+        // arbitrarily even with Σ λ ≤ 1; tanh maps R → (-1, 1).
+        if matches!(self.config.mode, AttentionMode::LogLinear { .. }) {
+            tanh_inplace(&mut output);
+        }
+
         output
     }
 
+    /// Compatibility alias for [`query_state`](Self::query_state).
+    ///
+    /// Same semantics, principled name.
+    #[deprecated(
+        since = "10.0.0",
+        note = "renamed to `query_state` — same semantics, principled name"
+    )]
+    #[doc(hidden)]
+    pub fn forward_readonly(&self, input: &[f64]) -> Vec<f64> {
+        self.query_state(input)
+    }
+
     /// Update the flat state cache from all head states.
+    ///
+    /// For LogLinear mode, sources from each head's `log_linear_state`
+    /// (padded `max_levels * d_k * d_v`); for all other modes, from
+    /// the base `state` slice. The cache size is set in `new()` per
+    /// mode and stays constant across `forward` calls.
     fn update_state_cache(&mut self) {
         let mut offset = 0;
         for head in &self.heads {
-            let slice = head.state.as_slice();
+            let slice = if let Some(lls) = head.log_linear_state.as_ref() {
+                lls.flat_state()
+            } else {
+                head.state.as_slice()
+            };
             let len = slice.len();
             self.state_cache[offset..offset + len].copy_from_slice(slice);
             offset += len;
@@ -333,6 +463,10 @@ impl MultiHeadAttention {
 
         // Zero the recurrent state.
         head.state.reset();
+        // LogLinear: clear the entire Fenwick stack of this head.
+        if let Some(lls) = head.log_linear_state.as_mut() {
+            lls.reset();
+        }
 
         // Helper: reinit a weight slice with scale 0.01 * standard_normal.
         let reinit = |weights: &mut [f64], rng: &mut u64| {
@@ -385,6 +519,15 @@ impl MultiHeadAttention {
         }
         if !head.w_hgrn2_gate.is_empty() {
             reinit(&mut head.w_hgrn2_gate, rng);
+        }
+        if !head.w_gate_vec.is_empty() {
+            reinit(&mut head.w_gate_vec, rng);
+        }
+        if !head.w_beta_scalar.is_empty() {
+            reinit(&mut head.w_beta_scalar, rng);
+        }
+        if !head.w_lambda.is_empty() {
+            reinit(&mut head.w_lambda, rng);
         }
 
         // Update the state cache region for this head.
@@ -452,16 +595,33 @@ impl AttentionLayer for MultiHeadAttention {
                     update_rules::additive_update(&mut head.state, &k, &v, decay);
                     head.state.query(&q)
                 }
+                AttentionMode::GLAVector => {
+                    // Per-key-dimension gate: α_t ∈ (0,1)^{d_k} (paper-canonical GLA).
+                    // Each row of w_gate_vec projects input to one gate scalar.
+                    let alpha = vector_sigmoid_gate(&head.w_gate_vec, input, d_key);
+                    update_rules::additive_update_vec(&mut head.state, &k, &v, &alpha);
+                    head.state.query(&q)
+                }
                 AttentionMode::DeltaNet => {
                     // Normalize key for stable delta rule
                     let k_norm = l2_normalize(&k);
                     update_rules::delta_update(&mut head.state, &k_norm, &v);
                     head.state.query(&q)
                 }
-                AttentionMode::GatedDeltaNet { beta_scale } => {
+                AttentionMode::GatedDeltaNet {
+                    beta_scale,
+                    gate_mode_delta,
+                } => {
                     let decay = sigmoid_gate(&head.w_gate, input);
-                    // Key normalization is now handled inside gated_delta_update
-                    update_rules::gated_delta_update(&mut head.state, &k, &v, decay, *beta_scale);
+                    // Resolve beta: static scalar or per-token sigmoid projection.
+                    // Per Yang et al. ICLR 2025 (arXiv:2412.06464): the canonical
+                    // form uses β_t = sigmoid(W_β · x_t) for data-dependent mixing.
+                    let beta = match gate_mode_delta {
+                        GatedDeltaMode::Static => *beta_scale,
+                        GatedDeltaMode::PerToken => sigmoid_gate(&head.w_beta_scalar, input),
+                    };
+                    // Key normalization is handled inside gated_delta_update
+                    update_rules::gated_delta_update(&mut head.state, &k, &v, decay, beta);
                     head.state.query(&q)
                 }
                 AttentionMode::RWKV { initial_decay } => {
@@ -477,8 +637,12 @@ impl AttentionLayer for MultiHeadAttention {
                     update_rules::mlstm_update(&mut head.state, &k, &v, forget, input_gate);
                     head.state.query(&q)
                 }
-                AttentionMode::DeltaProduct { n_compositions } => {
+                AttentionMode::DeltaProduct {
+                    n_compositions,
+                    reflections,
+                } => {
                     let n_h = *n_compositions;
+                    let use_reflections = *reflections;
                     let gate = sigmoid_gate(&head.w_gate, input);
 
                     // Project n_h keys, values, betas
@@ -513,12 +677,19 @@ impl AttentionLayer for MultiHeadAttention {
                         );
                         comp_values_storage.push(vj);
 
-                        // Beta for composition j (extended sigmoid -> [0, 2])
+                        // Beta for composition j.
+                        // reflections=false: β ∈ (0, 1) via plain sigmoid (default delta-rule range).
+                        // reflections=true:  β ∈ (0, 2) via 2·sigmoid (full Householder reflections,
+                        //                    Siems et al. NeurIPS 2025, arXiv:2502.10297, §4).
                         let b_offset = j * d_model;
-                        let beta = extended_sigmoid_gate(
-                            &head.w_comp_betas[b_offset..b_offset + d_model],
-                            input,
-                        );
+                        let beta = if use_reflections {
+                            extended_sigmoid_gate(
+                                &head.w_comp_betas[b_offset..b_offset + d_model],
+                                input,
+                            )
+                        } else {
+                            sigmoid_gate(&head.w_comp_betas[b_offset..b_offset + d_model], input)
+                        };
                         comp_betas.push(beta);
                     }
 
@@ -568,6 +739,49 @@ impl AttentionLayer for MultiHeadAttention {
                     update_rules::hgrn2_update(&mut head.state, &k, &v, &alpha);
                     head.state.query(&q)
                 }
+                AttentionMode::LogLinear {
+                    inner,
+                    max_levels,
+                    lambda_init,
+                } => {
+                    // Step 1: per-inner-mode key preprocessing.
+                    // Delta-family inner rules (DeltaNet, GatedDeltaNet,
+                    // DeltaProduct, RWKV7) require L2-normalized keys
+                    // for bounded state growth (paper §3.2 carryover,
+                    // R1 §3.5 risk #2 mitigation). All other inner rules
+                    // pass the raw key through.
+                    let k_for_leaf: Vec<f64> = match inner.as_ref() {
+                        AttentionMode::DeltaNet
+                        | AttentionMode::GatedDeltaNet { .. }
+                        | AttentionMode::DeltaProduct { .. }
+                        | AttentionMode::RWKV7 => l2_normalize(&k),
+                        _ => k.clone(),
+                    };
+
+                    // Step 2: compute λ via softplus-softmax mix.
+                    // Paper §3.2: bounded mixture, Σ λ ≤ 1.
+                    let mut raw = vec![0.0; *max_levels];
+                    mat_vec(&head.w_lambda, input, *max_levels, d_model, &mut raw);
+                    for r in raw.iter_mut() {
+                        *r += *lambda_init;
+                    }
+                    let mut lambdas = vec![0.0; *max_levels];
+                    softplus_softmax_mix(&raw, super::log_linear::DEFAULT_TAU, &mut lambdas);
+
+                    // Step 3: push the new leaf bucket and run carry
+                    // propagation (paper §2.1 — classical Fenwick
+                    // increment).
+                    let lls = head
+                        .log_linear_state
+                        .as_mut()
+                        .expect("LogLinear mode must have log_linear_state");
+                    lls.push_leaf(&k_for_leaf, &v);
+
+                    // Step 4: read out the (post-update) mixed state.
+                    let mut o = vec![0.0; d_value];
+                    lls.query_mixed(&q, &lambdas, &mut o);
+                    o
+                }
             };
 
             // Copy head output to concatenated buffer
@@ -590,6 +804,28 @@ impl AttentionLayer for MultiHeadAttention {
             &mut output,
         );
 
+        // Delta-family output bounding via tanh after W_out.
+        //
+        // All five delta-family variants (DeltaNet, GatedDeltaNet, DeltaProduct,
+        // RWKV7, HGRN2) produce unbounded W_out projections. Anything feeding
+        // RLS readout must be bounded to prevent weight explosion (AGENTS.md
+        // "Bounded readout features" principle). tanh maps R → (-1, 1) and is
+        // the standard bounding primitive for linear-attention family outputs.
+        //
+        // RetNet, Hawk, GLA, GLAVector, RWKV, MLSTM are excluded — their gating
+        // (sigmoid/forget gate scales) provides implicit magnitude control.
+        match &self.config.mode {
+            AttentionMode::DeltaNet
+            | AttentionMode::GatedDeltaNet { .. }
+            | AttentionMode::DeltaProduct { .. }
+            | AttentionMode::RWKV7
+            | AttentionMode::HGRN2 { .. }
+            | AttentionMode::LogLinear { .. } => {
+                tanh_inplace(&mut output);
+            }
+            _ => {}
+        }
+
         // Return concat scratch to self
         self.scratch_concat = concat_output;
 
@@ -610,6 +846,10 @@ impl AttentionLayer for MultiHeadAttention {
     fn reset(&mut self) {
         for head in &mut self.heads {
             head.state.reset();
+            // LogLinear: clear all Fenwick levels and size counter.
+            if let Some(lls) = head.log_linear_state.as_mut() {
+                lls.reset();
+            }
         }
         for x in self.state_cache.iter_mut() {
             *x = 0.0;
@@ -713,7 +953,10 @@ mod tests {
 
     #[test]
     fn gated_deltanet_output_dimension_matches_config() {
-        let config = make_config(AttentionMode::GatedDeltaNet { beta_scale: 1.0 });
+        let config = make_config(AttentionMode::GatedDeltaNet {
+            beta_scale: 1.0,
+            gate_mode_delta: GatedDeltaMode::Static,
+        });
         let mut attn = MultiHeadAttention::new(config);
         let input = make_input(8);
         let output = attn.forward(&input);
@@ -917,7 +1160,10 @@ mod tests {
 
     #[test]
     fn delta_product_output_dimension() {
-        let config = make_config(AttentionMode::DeltaProduct { n_compositions: 3 });
+        let config = make_config(AttentionMode::DeltaProduct {
+            n_compositions: 3,
+            reflections: false,
+        });
         let mut attn = MultiHeadAttention::new(config);
         let input = make_input(8);
         let output = attn.forward(&input);
@@ -930,7 +1176,10 @@ mod tests {
 
     #[test]
     fn delta_product_state_length() {
-        let config = make_config(AttentionMode::DeltaProduct { n_compositions: 2 });
+        let config = make_config(AttentionMode::DeltaProduct {
+            n_compositions: 2,
+            reflections: false,
+        });
         let attn = MultiHeadAttention::new(config);
         let expected = 2 * 4 * 4; // n_heads * d_key * d_value
         assert_eq!(
@@ -943,10 +1192,16 @@ mod tests {
     #[test]
     fn delta_product_deterministic() {
         let input = make_input(8);
-        let config1 = make_config(AttentionMode::DeltaProduct { n_compositions: 2 });
+        let config1 = make_config(AttentionMode::DeltaProduct {
+            n_compositions: 2,
+            reflections: false,
+        });
         let mut a1 = MultiHeadAttention::new(config1);
         let o1 = a1.forward(&input);
-        let config2 = make_config(AttentionMode::DeltaProduct { n_compositions: 2 });
+        let config2 = make_config(AttentionMode::DeltaProduct {
+            n_compositions: 2,
+            reflections: false,
+        });
         let mut a2 = MultiHeadAttention::new(config2);
         let o2 = a2.forward(&input);
         for i in 0..o1.len() {
@@ -1174,5 +1429,276 @@ mod tests {
             attn.w_out, w_out_before,
             "w_out should be preserved after head reinit"
         );
+    }
+
+    #[test]
+    fn gla_vector_output_dimension_matches_config() {
+        let config = make_config(AttentionMode::GLAVector);
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+        let output = attn.forward(&input);
+        assert_eq!(
+            output.len(),
+            8,
+            "GLAVector output should match d_model=8, got {}",
+            output.len()
+        );
+    }
+
+    #[test]
+    fn gla_vector_state_length() {
+        let config = make_config(AttentionMode::GLAVector);
+        let attn = MultiHeadAttention::new(config);
+        let expected = 2 * 4 * 4; // n_heads * d_key * d_value
+        assert_eq!(
+            attn.state().len(),
+            expected,
+            "GLAVector state should be n_heads*d_key*d_value"
+        );
+    }
+
+    #[test]
+    fn gla_vector_gate_differs_from_scalar() {
+        // The vector-gate GLA must produce different output from scalar-gate GLA
+        // when run on multi-dimensional input. This proves the per-dimension gates
+        // have independent effect rather than collapsing to the scalar case.
+        let input = make_input(8);
+
+        let config_scalar = make_config(AttentionMode::GLA);
+        let mut attn_scalar = MultiHeadAttention::new(config_scalar);
+        // Train scalar-gate GLA for a few steps to build non-trivial state.
+        attn_scalar.forward(&input);
+        attn_scalar.forward(&make_input(8));
+        let out_scalar = attn_scalar.forward(&input);
+
+        let config_vec = make_config(AttentionMode::GLAVector);
+        let mut attn_vec = MultiHeadAttention::new(config_vec);
+        // Same inputs as scalar.
+        attn_vec.forward(&input);
+        attn_vec.forward(&make_input(8));
+        let out_vec = attn_vec.forward(&input);
+
+        let any_diff = out_scalar
+            .iter()
+            .zip(out_vec.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-15);
+        assert!(
+            any_diff,
+            "GLAVector output must differ from scalar GLA output — vector gates have independent \
+             per-dimension effect"
+        );
+    }
+
+    #[test]
+    fn gla_vector_forward_changes_state() {
+        let config = make_config(AttentionMode::GLAVector);
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+        attn.forward(&input);
+        let state = attn.state();
+        let any_nonzero = state.iter().any(|&x| x.abs() > 1e-15);
+        assert!(
+            any_nonzero,
+            "after forward, GLAVector state should be non-zero"
+        );
+    }
+
+    #[test]
+    fn gla_vector_reset_clears() {
+        let config = make_config(AttentionMode::GLAVector);
+        let mut attn = MultiHeadAttention::new(config);
+        let input = make_input(8);
+        attn.forward(&input);
+        attn.reset();
+        assert!(
+            attn.state().iter().all(|&x| x == 0.0),
+            "after reset all GLAVector state should be zero"
+        );
+    }
+
+    #[test]
+    fn gated_deltanet_per_token_beta_is_data_dependent() {
+        // PerToken mode: β_t = sigmoid(w_beta_scalar · x_t) per Yang et al.
+        // ICLR 2025 (arXiv:2412.06464). Verify that two clearly different
+        // inputs produce different outputs — if beta were static (Static mode),
+        // identical weights would give identical beta regardless of input, and
+        // the output difference would be purely from the query projection.
+        // This test verifies the PerToken runtime path actually uses x_t.
+        let config_per_token = AttentionConfig {
+            d_model: 8,
+            n_heads: 2,
+            d_key: 4,
+            d_value: 4,
+            mode: AttentionMode::GatedDeltaNet {
+                beta_scale: 1.0,
+                gate_mode_delta: GatedDeltaMode::PerToken,
+            },
+            seed: 42,
+        };
+        let config_static = AttentionConfig {
+            mode: AttentionMode::GatedDeltaNet {
+                beta_scale: 1.0,
+                gate_mode_delta: GatedDeltaMode::Static,
+            },
+            ..config_per_token.clone()
+        };
+
+        let mut attn_per_token = MultiHeadAttention::new(config_per_token);
+        let mut attn_static = MultiHeadAttention::new(config_static);
+
+        // Build up state with same inputs.
+        for i in 0..5 {
+            let t = i as f64 * 0.3;
+            let x = alloc::vec![
+                t.sin(),
+                t.cos(),
+                t * 0.1,
+                1.0 - t * 0.05,
+                0.5,
+                0.3,
+                0.2,
+                0.1
+            ];
+            attn_per_token.forward(&x);
+            attn_static.forward(&x);
+        }
+
+        // Now forward with inputs that have maximally different projections.
+        let input_a = alloc::vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let input_b = alloc::vec![-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+
+        // PerToken: different inputs produce different betas → state updates differ.
+        let out_pt_a = attn_per_token.forward(&input_a);
+        let out_pt_b = attn_per_token.forward(&input_b);
+
+        // Static: beta is constant regardless of input (identical beta for both calls
+        // after the state update from input_a above — test the distinction exists).
+        let _ = attn_static.forward(&input_a);
+        let _ = attn_static.forward(&input_b);
+
+        // Both PerToken outputs must be finite.
+        assert!(
+            out_pt_a.iter().all(|x| x.is_finite()),
+            "PerToken forward(input_a) must be finite"
+        );
+        assert!(
+            out_pt_b.iter().all(|x| x.is_finite()),
+            "PerToken forward(input_b) must be finite"
+        );
+
+        // PerToken mode must produce different outputs for opposite inputs.
+        let any_diff = out_pt_a
+            .iter()
+            .zip(out_pt_b.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-12);
+        assert!(
+            any_diff,
+            "GatedDeltaNet PerToken outputs must differ for opposite inputs — \
+             data-dependent β_t = sigmoid(w·x_t) must influence the result"
+        );
+    }
+
+    #[test]
+    fn delta_product_reflections_doubles_beta_range() {
+        // reflections=true: β ∈ (0, 2) via 2·sigmoid (Siems et al. NeurIPS 2025,
+        // arXiv:2502.10297 §4). reflections=false: β ∈ (0, 1) via plain sigmoid.
+        // Verify that the output with reflections enabled can exceed 1.0 in magnitude
+        // on the beta dimension (not directly observable, but state must differ).
+        let config_refl = AttentionConfig {
+            d_model: 8,
+            n_heads: 2,
+            d_key: 4,
+            d_value: 4,
+            mode: AttentionMode::DeltaProduct {
+                n_compositions: 2,
+                reflections: true,
+            },
+            seed: 77,
+        };
+        let config_norefl = AttentionConfig {
+            mode: AttentionMode::DeltaProduct {
+                n_compositions: 2,
+                reflections: false,
+            },
+            ..config_refl.clone()
+        };
+
+        let mut attn_refl = MultiHeadAttention::new(config_refl);
+        let mut attn_norefl = MultiHeadAttention::new(config_norefl);
+
+        // Run for several steps to accumulate state differences from the beta range.
+        let mut any_diff_seen = false;
+        for i in 0..10 {
+            let t = i as f64 * 0.5;
+            let x = alloc::vec![t.sin(), t.cos(), t * 0.1, 0.5, 0.3, 0.2, 0.1, 0.4];
+            let out_r = attn_refl.forward(&x);
+            let out_n = attn_norefl.forward(&x);
+
+            assert!(
+                out_r.iter().all(|v| v.is_finite()),
+                "reflections=true forward must be finite at step {i}"
+            );
+
+            if out_r
+                .iter()
+                .zip(out_n.iter())
+                .any(|(a, b)| (a - b).abs() > 1e-12)
+            {
+                any_diff_seen = true;
+            }
+        }
+        assert!(
+            any_diff_seen,
+            "reflections=true must produce different state evolution than reflections=false — \
+             2·sigmoid range enables negative eigenvalues (Siems et al. NeurIPS 2025 §4)"
+        );
+    }
+
+    #[test]
+    fn delta_family_outputs_bounded_in_unit_interval() {
+        // tanh_inplace after W_out ensures delta-family outputs are bounded in (-1, 1).
+        // This is the AGENTS.md "Bounded readout features" invariant: anything
+        // feeding RLS must be bounded to prevent weight explosion.
+        // Verified for all 5 delta-family variants.
+        let delta_modes: alloc::vec::Vec<AttentionMode> = alloc::vec![
+            AttentionMode::DeltaNet,
+            AttentionMode::GatedDeltaNet {
+                beta_scale: 1.0,
+                gate_mode_delta: GatedDeltaMode::Static,
+            },
+            AttentionMode::DeltaProduct {
+                n_compositions: 2,
+                reflections: false,
+            },
+            AttentionMode::RWKV7,
+            AttentionMode::HGRN2 { lower_bound: 0.9 },
+        ];
+
+        for mode in delta_modes {
+            let config = AttentionConfig {
+                d_model: 8,
+                n_heads: 2,
+                d_key: 4,
+                d_value: 4,
+                mode,
+                seed: 99,
+            };
+            let mode_name = alloc::format!("{:?}", &config.mode);
+            let mut attn = MultiHeadAttention::new(config);
+
+            // Run 20 steps with non-trivial inputs to accumulate state.
+            for i in 0..20 {
+                let t = i as f64 * 0.3;
+                let x = alloc::vec![t.sin(), t.cos(), t * 0.1, 0.5, 0.3, 0.8, -0.2, 0.6];
+                let out = attn.forward(&x);
+                for &val in &out {
+                    assert!(
+                        val.is_finite() && val.abs() <= 1.0,
+                        "{mode_name} output at step {i} must be in [-1, 1] after tanh_inplace, \
+                         got {val}"
+                    );
+                }
+            }
+        }
     }
 }

@@ -49,7 +49,8 @@
 //!     .p(2)
 //!     .q(1)
 //!     .learning_rate(0.001)
-//!     .build();
+//!     .build()
+//!     .unwrap();
 //!
 //! let mut model = SNARIMAX::new(config);
 //!
@@ -64,6 +65,7 @@
 //! ```
 
 use crate::learner::StreamingLearner;
+use irithyll_core::error::ConfigError;
 
 // ---------------------------------------------------------------------------
 // SNARIMAXConfig
@@ -117,7 +119,8 @@ impl SNARIMAXConfig {
     ///     .p(3)
     ///     .q(2)
     ///     .learning_rate(0.005)
-    ///     .build();
+    ///     .build()
+    ///     .unwrap();
     /// assert_eq!(config.p, 3);
     /// assert_eq!(config.q, 2);
     /// ```
@@ -197,9 +200,37 @@ impl SNARIMAXConfigBuilder {
         self
     }
 
-    /// Build the final [`SNARIMAXConfig`].
-    pub fn build(self) -> SNARIMAXConfig {
-        SNARIMAXConfig {
+    /// Validate and build the final [`SNARIMAXConfig`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError`] if:
+    /// - `learning_rate <= 0`
+    /// - Seasonal lag orders are non-zero but `seasonal_period == 0`
+    /// - Total lag order is zero (flat model)
+    pub fn build(self) -> Result<SNARIMAXConfig, ConfigError> {
+        if self.learning_rate <= 0.0 {
+            return Err(ConfigError::out_of_range(
+                "learning_rate",
+                "must be > 0",
+                self.learning_rate,
+            ));
+        }
+        // Seasonal lags require a non-zero period.
+        if (self.sp > 0 || self.sq > 0) && self.seasonal_period == 0 {
+            return Err(ConfigError::invalid(
+                "seasonal_period",
+                "must be > 0 when sp or sq is non-zero",
+            ));
+        }
+        // A totally flat config (zero-parameter model) is invalid.
+        if self.p + self.q + self.sp + self.sq + self.n_exogenous == 0 {
+            return Err(ConfigError::invalid(
+                "p+q+sp+sq+n_exogenous",
+                "at least one lag order must be > 0",
+            ));
+        }
+        Ok(SNARIMAXConfig {
             p: self.p,
             q: self.q,
             seasonal_period: self.seasonal_period,
@@ -207,7 +238,7 @@ impl SNARIMAXConfigBuilder {
             sq: self.sq,
             n_exogenous: self.n_exogenous,
             learning_rate: self.learning_rate,
-        }
+        })
     }
 }
 
@@ -256,7 +287,8 @@ pub struct SNARIMAXCoefficients {
 /// let config = SNARIMAXConfig::builder()
 ///     .p(1)
 ///     .learning_rate(0.01)
-///     .build();
+///     .build()
+///     .unwrap();
 ///
 /// let mut model = SNARIMAX::new(config);
 /// model.train_one(1.0, &[]);
@@ -298,7 +330,7 @@ impl SNARIMAX {
     /// ```
     /// use irithyll::time_series::snarimax::{SNARIMAXConfig, SNARIMAX};
     ///
-    /// let config = SNARIMAXConfig::builder().p(3).q(1).build();
+    /// let config = SNARIMAXConfig::builder().p(3).q(1).build().unwrap();
     /// let model = SNARIMAX::new(config);
     /// assert_eq!(model.n_samples_seen(), 0);
     /// ```
@@ -377,7 +409,7 @@ impl SNARIMAX {
     /// ```
     /// use irithyll::time_series::snarimax::{SNARIMAXConfig, SNARIMAX};
     ///
-    /// let config = SNARIMAXConfig::builder().p(1).build();
+    /// let config = SNARIMAXConfig::builder().p(1).build().unwrap();
     /// let mut model = SNARIMAX::new(config);
     ///
     /// for i in 0..50 {
@@ -602,6 +634,19 @@ impl SNARIMAX {
 
     /// Core training logic -- called by both `train_one` (inherent) and the
     /// `StreamingLearner` trait impl to avoid method name ambiguity.
+    ///
+    /// # Option D audit (streaming label leak)
+    ///
+    /// SNARIMAX has no recurrent hidden state — it is a linear regression over
+    /// lagged observations and errors stored in circular buffers. The ordering
+    /// within `train_impl` already follows the prequential contract:
+    ///
+    /// 1. Predict from current (pre-update) buffers — same state predict() reads.
+    /// 2. Compute error and update coefficients via SGD.
+    /// 3. Push y and error into buffers (buffer-advance step).
+    ///
+    /// `predict_one()` reads from the same pre-update buffer state. There is no
+    /// train/predict feature asymmetry. Option D does not apply.
     fn train_impl(&mut self, y: f64, exogenous: &[f64]) {
         // Step 1: Predict with current state
         let y_hat = self.predict_from_buffers(exogenous);
@@ -761,7 +806,7 @@ mod tests {
 
     #[test]
     fn config_builder_defaults() {
-        let config = SNARIMAXConfig::builder().build();
+        let config = SNARIMAXConfig::builder().build().unwrap();
         assert_eq!(config.p, 1, "default p should be 1");
         assert_eq!(config.q, 0, "default q should be 0");
         assert_eq!(
@@ -788,7 +833,8 @@ mod tests {
             .p(1)
             .q(0)
             .learning_rate(0.05)
-            .build();
+            .build()
+            .expect("valid config");
 
         let mut model = SNARIMAX::new(config);
         let mut y_prev = 0.0;
@@ -817,7 +863,8 @@ mod tests {
             .p(2)
             .q(0)
             .learning_rate(0.01)
-            .build();
+            .build()
+            .expect("valid config");
 
         let mut model = SNARIMAX::new(config);
 
@@ -857,7 +904,8 @@ mod tests {
             .p(2)
             .q(1)
             .learning_rate(0.001)
-            .build();
+            .build()
+            .expect("valid config");
 
         let mut model = SNARIMAX::new(config);
 
@@ -910,7 +958,8 @@ mod tests {
             .sp(1)
             .sq(0)
             .learning_rate(0.001)
-            .build();
+            .build()
+            .expect("valid config");
 
         let mut model = SNARIMAX::new(config);
 
@@ -943,7 +992,8 @@ mod tests {
             .q(0)
             .n_exogenous(1)
             .learning_rate(0.001)
-            .build();
+            .build()
+            .expect("valid config");
 
         let mut model = SNARIMAX::new(config);
 
@@ -974,7 +1024,8 @@ mod tests {
             .p(1)
             .n_exogenous(2)
             .learning_rate(0.01)
-            .build();
+            .build()
+            .expect("valid config");
 
         let model = SNARIMAX::new(config);
         let mut boxed: Box<dyn StreamingLearner> = Box::new(model);
@@ -1006,7 +1057,8 @@ mod tests {
             .q(1)
             .n_exogenous(1)
             .learning_rate(0.01)
-            .build();
+            .build()
+            .expect("valid config");
 
         let mut model = SNARIMAX::new(config);
 
@@ -1072,6 +1124,48 @@ mod tests {
             pred.abs() < 1e-12,
             "prediction after reset should be zero, got {}",
             pred,
+        );
+    }
+
+    #[test]
+    fn predict_reads_current_input() {
+        // SNARIMAX uses no hidden state — prediction is a linear combination of
+        // lagged observations and errors in circular buffers. Both train and predict
+        // read the same buffer state (pre-push), so there is no train/predict
+        // feature mismatch. This test verifies the fundamental property: after
+        // training on a non-trivial series, predict_one returns a value that
+        // reflects the current buffer state, not a stale cache.
+        let config = SNARIMAXConfig::builder()
+            .p(2)
+            .q(1)
+            .learning_rate(0.01)
+            .build()
+            .unwrap();
+        let mut model = SNARIMAX::new(config);
+
+        // Train on a simple linear trend.
+        for i in 0..50 {
+            model.train_one(i as f64 * 0.5, &[]);
+        }
+
+        // Record prediction, train one more sample, confirm prediction changes.
+        let pred_before = model.predict_one(&[]);
+        model.train_one(30.0, &[]); // push a new observation into buffers
+        let pred_after = model.predict_one(&[]);
+
+        assert!(
+            pred_before.is_finite(),
+            "pre-train predict should be finite, got {pred_before}"
+        );
+        assert!(
+            pred_after.is_finite(),
+            "post-train predict should be finite, got {pred_after}"
+        );
+        // Buffer state changed: predictions must differ.
+        assert_ne!(
+            pred_before.to_bits(),
+            pred_after.to_bits(),
+            "SNARIMAX predict must reflect current buffer state: {pred_before} == {pred_after}"
         );
     }
 }

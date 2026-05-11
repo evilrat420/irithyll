@@ -25,6 +25,7 @@ use crate::sample::Observation;
 /// All strategies evaluate every sample; the distinction is whether the model
 /// is trained on it afterward.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum HoldoutStrategy {
     /// Every sample is used for both test and train (equivalent to prequential).
     None,

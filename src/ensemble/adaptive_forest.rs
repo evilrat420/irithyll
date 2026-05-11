@@ -124,21 +124,41 @@ impl ARFConfigBuilder {
     }
 
     /// Build the configuration, validating all parameters.
-    pub fn build(self) -> Result<ARFConfig, String> {
+    pub fn build(self) -> Result<ARFConfig, irithyll_core::error::ConfigError> {
+        use irithyll_core::error::ConfigError;
         if self.n_trees == 0 {
-            return Err("n_trees must be >= 1".into());
+            return Err(ConfigError::out_of_range(
+                "n_trees",
+                "must be >= 1",
+                self.n_trees,
+            ));
         }
         if self.lambda <= 0.0 || !self.lambda.is_finite() {
-            return Err("lambda must be positive and finite".into());
+            return Err(ConfigError::invalid(
+                "lambda",
+                "must be positive and finite",
+            ));
         }
         if self.feature_fraction < 0.0 || self.feature_fraction > 1.0 {
-            return Err("feature_fraction must be in [0.0, 1.0]".into());
+            return Err(ConfigError::out_of_range(
+                "feature_fraction",
+                "must be in [0.0, 1.0]",
+                self.feature_fraction,
+            ));
         }
         if self.drift_delta <= 0.0 || self.drift_delta >= 1.0 {
-            return Err("drift_delta must be in (0, 1)".into());
+            return Err(ConfigError::out_of_range(
+                "drift_delta",
+                "must be in (0, 1)",
+                self.drift_delta,
+            ));
         }
         if self.warning_delta <= 0.0 || self.warning_delta >= 1.0 {
-            return Err("warning_delta must be in (0, 1)".into());
+            return Err(ConfigError::out_of_range(
+                "warning_delta",
+                "must be in (0, 1)",
+                self.warning_delta,
+            ));
         }
         Ok(ARFConfig {
             n_trees: self.n_trees,
@@ -406,6 +426,17 @@ impl StreamingLearner for AdaptiveRandomForest {
             member.n_correct = 0;
             member.n_evaluated = 0;
         }
+    }
+
+    #[allow(deprecated)]
+    fn replacement_count(&self) -> u64 {
+        <Self as crate::learner::Structural>::replacement_count(self)
+    }
+}
+
+impl crate::learner::Structural for AdaptiveRandomForest {
+    fn apply_structural_change(&mut self, _depth_delta: i32, _steps_delta: i32) {
+        // AdaptiveRandomForest does not support mid-stream depth/step changes.
     }
 
     fn replacement_count(&self) -> u64 {

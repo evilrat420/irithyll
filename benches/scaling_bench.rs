@@ -1,4 +1,4 @@
-//! Scaling benchmarks for v2.0.0 baseline.
+//! Scaling benchmarks.
 //!
 //! Measures how latency scales with n_steps, n_features, max_depth, and n_bins.
 //! Each dimension is varied independently to isolate its contribution.

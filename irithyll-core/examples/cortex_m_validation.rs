@@ -18,15 +18,20 @@
 //!     -kernel target/thumbv6m-none-eabi/release/examples/cortex_m_validation
 //! ```
 
-#![no_std]
-#![no_main]
+#![cfg_attr(target_arch = "arm", no_std)]
+#![cfg_attr(target_arch = "arm", no_main)]
 
+#[cfg(target_arch = "arm")]
 use cortex_m_rt::entry;
+#[cfg(target_arch = "arm")]
 use cortex_m_semihosting::hprintln;
+#[cfg(target_arch = "arm")]
 use panic_halt as _;
 
+#[cfg(target_arch = "arm")]
 use irithyll_core::{EnsembleView, FormatError, QuantizedEnsembleView};
 
+#[cfg(target_arch = "arm")]
 #[entry]
 fn main() -> ! {
     hprintln!("irithyll-core Cortex-M0+ validation test");
@@ -277,3 +282,7 @@ fn main() -> ! {
     cortex_m_semihosting::debug::exit(cortex_m_semihosting::debug::EXIT_SUCCESS);
     loop {}
 }
+
+// Stub for non-ARM hosts (x86 CI, cargo check --all-targets).
+#[cfg(not(target_arch = "arm"))]
+fn main() {}

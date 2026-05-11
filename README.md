@@ -14,256 +14,19 @@
 [![MSRV](https://img.shields.io/badge/MSRV-1.75-blue.svg)](https://blog.rust-lang.org/2023/12/28/Rust-1.75.0.html)
 [![GitHub stars](https://img.shields.io/github/stars/evilrat420/irithyll?style=social)](https://github.com/evilrat420/irithyll)
 
-**Streaming machine learning in Rust** -- gradient boosted trees, neural streaming architectures (reservoir computing, state space models, spiking networks), kernel methods, linear models, and composable pipelines, all learning one sample at a time.
+**Streaming machine learning in Rust.** Gradient-boosted trees, neural streaming architectures, kernel methods, and linear models all behind a single `StreamingLearner` trait. One sample at a time. O(1) memory.
 
-```rust
-use irithyll::{pipe, normalizer, sgbt, StreamingLearner};
+---
 
-let mut model = pipe(normalizer()).learner(sgbt(50, 0.01));
-model.train(&[100.0, 0.5], 42.0);
-let prediction = model.predict(&[100.0, 0.5]);
-```
+## What it is
 
-## Workspace
+irithyll is a streaming ML library for the case where data arrives in order and never stops. There is no training set. There is no batch loop. Every sample updates the model and is then released without buffering or replay. Trees, state-space models, kernels, attention, and spiking networks all expose the same two-method interface: `train_one(features, target, weight)` and `predict(features) -> f64`. A `Box<dyn StreamingLearner>` is a fully typed model.
 
-irithyll is structured as a Cargo workspace with three crates:
+The library is structured as two crates that share a vocabulary but not their constraints. The full crate (`irithyll`) handles training, async ingestion, drift detection, and AutoML across every model family. The packed crate (`irithyll-core`) is `#![no_std]` and serves two roles: it carries the streaming model implementations that don't need `std` -- Mamba-3 (V3Exp / V3Mimo), Log-Linear Attention, SpikeNet, drift detectors, and the shared streaming primitives -- which train one sample at a time on-device, and it ships a 12-byte packed format that turns a trained tree into branch-free zero-allocation inference. Train on the cloud or on the microcontroller; export to packed for the tightest inference loops. The boundary is hard and tested against `thumbv6m-none-eabi`.
 
-| Crate | Description | `no_std` | Allocator |
-|-------|-------------|----------|-----------|
-| **`irithyll`** | Training, streaming algorithms, pipelines, I/O, async | No | std |
-| **`irithyll-core`** | Packed inference engine (12-byte nodes, branch-free traversal) | Yes | Zero-alloc |
-| **`irithyll-python`** | PyO3 Python bindings for `irithyll` | No | std |
+It is a deliberate library. Every threshold derives from a paper. Every neural readout is bounded before it touches the linear head. Every config field round-trips through a builder that validates rather than accepts. Where the literature gives an option, the option becomes a feature flag, not a default.
 
-`irithyll-core` cross-compiles for bare-metal targets (verified: `cargo check --target thumbv6m-none-eabi`) and has zero dependencies.
-
-## Why irithyll?
-
-- **30+ streaming algorithms** under one unified [`StreamingLearner`](https://docs.rs/irithyll/latest/irithyll/trait.StreamingLearner.html) trait
-- **One sample at a time** -- O(1) memory per model, no batches, no windows, no retraining
-- **Embedded deployment** -- train with `irithyll`, export to packed binary, infer with `irithyll-core` on bare metal
-- **Composable pipelines** -- chain preprocessors and learners with a builder API
-- **Concept drift adaptation** -- automatic model replacement when the data distribution shifts
-- **Confidence intervals** -- prediction uncertainty from RLS and conformal methods
-- **Production-grade** -- async streaming, SIMD acceleration, Arrow/Parquet I/O, ONNX export
-- **Neural streaming architectures** -- reservoir computing, SSMs, SNNs, TTT, KAN, streaming attention (7 modes)
-- **Neural MoE** -- polymorphic experts with top-k routing and load balancing
-- **Streaming AutoML** -- tournament racing, complexity-adjusted elimination, drift re-racing
-- **Principled adaptation** -- honest_sigma, adaptive tree replacement, proactive pruning, soft routing
-- **Pure Rust** -- zero unsafe code in the `irithyll` crate by default. SIMD acceleration available behind the `simd-avx2` feature flag in `irithyll-core`. Deterministic, serializable, 2,500+ tests
-
-## Algorithms
-
-Every algorithm implements `StreamingLearner` -- train and predict with the same two-method interface.
-
-| Algorithm | Type | Use Case | Per-Sample Cost |
-|-----------|------|----------|-----------------|
-| [`SGBT`](https://docs.rs/irithyll/latest/irithyll/struct.SGBT.html) | Gradient boosted trees | General regression/classification | O(n_steps * depth) |
-| [`AdaptiveSGBT`](https://docs.rs/irithyll/latest/irithyll/struct.AdaptiveSGBT.html) | SGBT + LR scheduling | Decaying/cycling learning rates | O(n_steps * depth) |
-| [`MulticlassSGBT`](https://docs.rs/irithyll/latest/irithyll/struct.MulticlassSGBT.html) | One-vs-rest SGBT | Multi-class classification | O(classes * n_steps * depth) |
-| [`MultiTargetSGBT`](https://docs.rs/irithyll/latest/irithyll/struct.MultiTargetSGBT.html) | Independent SGBTs | Multi-output regression | O(targets * n_steps * depth) |
-| [`DistributionalSGBT`](https://docs.rs/irithyll/latest/irithyll/struct.DistributionalSGBT.html) | Mean + variance SGBT | Prediction uncertainty | O(2 * n_steps * depth) |
-| [`KRLS`](https://docs.rs/irithyll/latest/irithyll/struct.KRLS.html) | Kernel recursive LS | Nonlinear regression (sin, exp, ...) | O(budget^2) |
-| [`RecursiveLeastSquares`](https://docs.rs/irithyll/latest/irithyll/struct.RecursiveLeastSquares.html) | RLS with confidence | Linear regression + uncertainty | O(d^2) |
-| [`StreamingLinearModel`](https://docs.rs/irithyll/latest/irithyll/struct.StreamingLinearModel.html) | SGD linear model | Fast linear baseline | O(d) |
-| [`StreamingPolynomialRegression`](https://docs.rs/irithyll/latest/irithyll/struct.StreamingPolynomialRegression.html) | Polynomial SGD | Polynomial curve fitting | O(d * degree) |
-| [`GaussianNB`](https://docs.rs/irithyll/latest/irithyll/struct.GaussianNB.html) | Naive Bayes | Text/categorical classification | O(d * classes) |
-| [`MondrianForest`](https://docs.rs/irithyll/latest/irithyll/struct.MondrianForest.html) | Random forest variant | Streaming ensemble regression | O(n_trees * depth) |
-| [`LocallyWeightedRegression`](https://docs.rs/irithyll/latest/irithyll/struct.LocallyWeightedRegression.html) | Memory-based | Locally varying relationships | O(window) |
-
-**Preprocessing** (implements `StreamingPreprocessor`):
-
-| Preprocessor | Description |
-|-------------|-------------|
-| [`IncrementalNormalizer`](https://docs.rs/irithyll/latest/irithyll/struct.IncrementalNormalizer.html) | Welford's online standardization |
-| [`OnlineFeatureSelector`](https://docs.rs/irithyll/latest/irithyll/struct.OnlineFeatureSelector.html) | Streaming mutual-information feature selection |
-| [`CCIPCA`](https://docs.rs/irithyll/latest/irithyll/struct.CCIPCA.html) | O(kd) streaming PCA without covariance matrices |
-
-## Composable Pipelines
-
-Models snap together like building blocks:
-
-```rust
-use irithyll::*;
-
-// Preprocessing → model pipeline
-let mut pipeline = pipe(normalizer()).learner(sgbt(50, 0.01));
-
-// Neural model with online projection
-let factory = Factory::projected_mamba(8, 4);
-
-// Mixture of experts over neural models
-let mut moe = NeuralMoE::builder()
-    .expert(Box::new(mamba(8, 16)))
-    .expert_with_warmup(Box::new(streaming_ttt(8, 0.01)), 50)
-    .top_k(2)
-    .build();
-```
-
-<details>
-<summary><strong>Neural Streaming Architectures (15+)</strong></summary>
-
-All neural models implement `StreamingLearner` — train and predict one sample at a time, compose in pipelines, no batching required.
-
-### Reservoir Computing
-
-| Model | Architecture | Key Strength |
-|-------|-------------|--------------|
-| [`NextGenRC`](https://docs.rs/irithyll/latest/irithyll/reservoir/struct.NextGenRC.html) | Time-delay + polynomial features + RLS readout | No random matrices. Trains in <10 samples. |
-| [`EchoStateNetwork`](https://docs.rs/irithyll/latest/irithyll/reservoir/struct.EchoStateNetwork.html) | Cycle/ring reservoir (O(N) weights) + RLS readout | Deterministic, JL projection for large reservoirs. |
-| [`ESNPreprocessor`](https://docs.rs/irithyll/latest/irithyll/reservoir/struct.ESNPreprocessor.html) | ESN as pipeline preprocessor | Feeds temporal features to any downstream learner. |
-
-### State Space Models (SSM / Mamba)
-
-| Model | Architecture | Key Strength |
-|-------|-------------|--------------|
-| [`StreamingMamba`](https://docs.rs/irithyll/latest/irithyll/ssm/struct.StreamingMamba.html) | Selective SSM (Mamba V1): input-dependent B, C, Delta; ZOH discretization | Per-channel state energy readout, S4D-Inv init. |
-| [`StreamingMambaV3`](https://docs.rs/irithyll/latest/irithyll/ssm/struct.StreamingMambaV3.html) | Mamba2 / SSM-Duality architecture | Structured state space duality, improved scaling. |
-| [`BDLRUMamba`](https://docs.rs/irithyll/latest/irithyll/ssm/struct.BDLRUMamba.html) | Block-diagonal LRU state matrix | Hardware-efficient, selective forgetting per block. |
-| [`MambaPreprocessor`](https://docs.rs/irithyll/latest/irithyll/ssm/struct.MambaPreprocessor.html) | SSM as pipeline preprocessor | Temporal features feeding SGBT or other learners. |
-
-### Spiking Neural Networks (SNN / e-prop)
-
-| Model | Architecture | Key Strength |
-|-------|-------------|--------------|
-| [`SpikeNet`](https://docs.rs/irithyll/latest/irithyll/snn/struct.SpikeNet.html) | LIF neurons + e-prop learning rule, delta spike encoding | Event-driven sparse computation. |
-| [`SpikeNetFixed`](https://docs.rs/irithyll/latest/irithyll/irithyll_core/snn/struct.SpikeNetFixed.html) | Q1.14 integer arithmetic throughout, `no_std` | 64 neurons in 22KB — fits Cortex-M0+ 32KB SRAM. |
-
-### Test-Time Training (TTT)
-
-| Model | Architecture | Key Strength |
-|-------|-------------|--------------|
-| [`StreamingTTT`](https://docs.rs/irithyll/latest/irithyll/ttt/struct.StreamingTTT.html) | Fast weights updated by gradient descent on reconstruction per sample. Titans momentum + weight decay. | Outperforms RLS on regime-shift benchmarks (9%). |
-
-### Kolmogorov-Arnold Networks (KAN)
-
-| Model | Architecture | Key Strength |
-|-------|-------------|--------------|
-| [`StreamingKAN`](https://docs.rs/irithyll/latest/irithyll/kan/struct.StreamingKAN.html) | B-spline edge activations, Adagrad per-coefficient LR, sparse updates (4 coeffs/sample) | Outperforms RLS on Friedman benchmark (12%). |
-| [`T-KAN`](https://docs.rs/irithyll/latest/irithyll/kan/struct.TKAN.html) | Temporal KAN with recurrent B-spline state | Sequential modeling with adaptive spline memory. |
-
-### Online Learning Extensions
-
-| Model | Architecture | Key Strength |
-|-------|-------------|--------------|
-| [`StreamingAGMP`](https://docs.rs/irithyll/latest/irithyll/struct.StreamingAGMP.html) | Adaptive Gradient Meta-Predictor | Second-order online gradient adaptation. |
-| [`mGRADE`](https://docs.rs/irithyll/latest/irithyll/struct.StreamingMGrade.html) | Modulated Gradient Recurrent Architecture | Recurrent gradient modulation for non-stationary streams. |
-| [`HGRN2`](https://docs.rs/irithyll/latest/irithyll/struct.StreamingHGRN2.html) | Hierarchical Gated Recurrent Network (attention variant) | Multi-scale gating for long-range temporal dependencies. |
-| [`sLSTM`](https://docs.rs/irithyll/latest/irithyll/struct.StreamingLSTM.html) | Exponential-gated LSTM (xLSTM scalar variant) | Stabilized recurrence, numerically robust gating. |
-| [`NeuralMoE`](https://docs.rs/irithyll/latest/irithyll/moe/struct.NeuralMoE.html) | Polymorphic MoE: any `StreamingLearner` as expert, top-k routing | Mix ESN, Mamba, SpikeNet, SGBT in one ensemble. |
-
-### Streaming Linear Attention (7 modes)
-
-| Mode | Based On |
-|------|----------|
-| GLA | Gated Linear Attention (Yang et al. 2024) |
-| DeltaNet | Delta rule attention (Yang et al. 2024) |
-| RWKV | Time-mixing with exponential decay (Peng et al. 2024) |
-| Hawk | Gated recurrence + 1D depthwise convolution (De et al. 2024) |
-| RetNet | Multi-scale exponential decay (Sun et al. 2023) |
-| mLSTM | Matrix LSTM with exponential gating (Beck et al. 2024) |
-| Linear | Standard linear attention baseline |
-
-All neural models also have preprocessor variants (`ESNPreprocessor`, `MambaPreprocessor`, `SpikePreprocessor`) that implement `StreamingPreprocessor` for pipeline composition.
-
-</details>
-
-### When to Use Each Model
-
-**Production tier** -- pure streaming from sample 1:
-
-| Model | Use Case |
-|-------|----------|
-| `SGBT` / `DistributionalSGBT` | Tabular data, concept drift, streaming analytics. Default choice. Graduated sibling interpolation for continuous output. |
-| `StreamingTTT` | Non-stationary data with regime shifts. Single-sample fast weight adaptation outperforms RLS on switching dynamics. |
-| `StreamingKAN` | Compositional nonlinear regression. Adagrad-scaled B-spline updates, outperforms RLS on nonlinear targets. |
-| `EchoStateNetwork` | Temporal regression and classification. Cycle reservoir + RLS readout. JL readout projection for large reservoirs. |
-| `StreamingMamba` | Temporal feature extraction with selective memory. S4D-Inv initialization, per-channel state energy readout. |
-| `NeuralMoE` | Heterogeneous data with regime shifts. Learned gating routes samples to specialized experts. |
-| `RecursiveLeastSquares` | Linear baseline with confidence intervals. Exact online OLS via Sherman-Morrison. |
-| `NextGenRC` | Nonlinear time series without reservoir overhead. Polynomial feature maps replace random projections. |
-| `AutoTuner` | Unknown data distribution or prototyping. Tournament racing across model families. |
-| `ProjectedLearner` | High-dimensional or noisy inputs. PAST-based online subspace tracking with supervised projection gradient. |
-
-**Specialized** -- correct streaming implementation, niche deployment targets:
-
-| Model | Use Case |
-|-------|----------|
-| `SpikeNet` | Event-driven sparse data, neuromorphic edge deployment. Integer-only variant fits in 22KB on Cortex-M0+. |
-| `StreamingAttention` | Streaming linear attention (7 modes). Specialized sequential tasks where full-sequence attention is too expensive. |
-
-**Note on classification:** For binary/multiclass classification, wrap any model with `binary_classifier()` or `multiclass_classifier()`. Uses bipolar {-1, +1} targets internally for proper MSE-based discrimination.
-
-## Principled Streaming Adaptation
-
-Principled streaming adaptation in gradient boosted ensembles:
-
-| Feature | Description |
-|---------|-------------|
-| `honest_sigma` | Tree contribution variance — instant epistemic uncertainty from ensemble disagreement. Zero hyperparameters, reacts in one sample. |
-| `adaptive_mts` | Sigma-modulated tree replacement speed. High uncertainty → faster cycling. Low uncertainty → more accumulation. |
-| `proactive_prune` | Percentile-based worst-tree replacement. Maintains plasticity (Dohare+2024 Nature). |
-| `soft_routing` | Per-node auto-bandwidth soft decision trees. Continuous weighted blends, no step discontinuities. |
-
-## Streaming AutoML
-
-Online hyperparameter optimization via champion-challenger tournament racing.
-
-| Component | Description |
-|-----------|-------------|
-| [`AutoTuner`](https://docs.rs/irithyll/latest/irithyll/automl/struct.AutoTuner.html) | Tournament successive halving with champion-challenger racing. Implements `StreamingLearner`. |
-| [`Factory`](https://docs.rs/irithyll/latest/irithyll/automl/struct.Factory.html) | Unified model factory. `Factory::sgbt()`, `Factory::esn()`, `Factory::mamba()`, `Factory::ttt()`, `Factory::kan()`, `Factory::projected_mamba()`, `.with_projection()`. |
-| Complexity-adjusted elimination | MDL-inspired penalty: `score = error + complexity/n_seen`. Favors simple models on sparse data, relaxes with evidence. |
-| Drift-triggered re-racing | ADWIN detects champion error drift, aborts tournament, starts fresh with expanded bracket. |
-| Warmup-aware racing | Neural models with cold-start phases are protected from premature elimination. |
-| Statistical early stopping | Welford z-test kills clearly-bad candidates before round budget expires. |
-
-```rust
-use irithyll::{auto_tune, automl::Factory, StreamingLearner};
-
-// One-liner: auto-tune SGBT
-let mut tuner = auto_tune(Factory::sgbt(5));
-
-// Multi-factory: race trees vs neural architectures
-let mut tuner = AutoTuner::builder()
-    .add_factory(Factory::sgbt(5))
-    .add_factory(Factory::esn())
-    .add_factory(Factory::mamba(5))
-    .use_drift_rerace(true)
-    .build();
-
-tuner.train(&[1.0, 2.0, 3.0, 4.0, 5.0], 10.0);
-let pred = tuner.predict(&[1.0, 2.0, 3.0, 4.0, 5.0]);
-```
-
-Based on Wu et al. (2021) ChaCha, Qi et al. (2023) Discounted TS, Yamanishi (2018) MDL.
-
-## Neural Mixture of Experts
-
-Polymorphic MoE where each expert can be **any** `StreamingLearner` -- mix ESN, Mamba, SpikeNet, SGBT, and attention models in one ensemble.
-
-| Component | Description |
-|-----------|-------------|
-| [`NeuralMoE`](https://docs.rs/irithyll/latest/irithyll/moe/struct.NeuralMoE.html) | Polymorphic MoE with top-k sparse routing. Implements `StreamingLearner`. |
-| Linear softmax router | Learned online via SGD on cross-entropy against best expert. |
-| Load balancing | Per-expert routing bias prevents collapse (DeepSeek-v3 style). |
-| Dead expert reset | EWMA utilization tracking; experts below threshold are auto-reset. |
-
-```rust
-use irithyll::{sgbt, esn, spikenet, moe::NeuralMoE, StreamingLearner};
-
-let mut moe = NeuralMoE::builder()
-    .expert(sgbt(50, 0.01))
-    .expert(sgbt(100, 0.005))
-    .expert_with_warmup(esn(50, 0.9), 50)
-    .expert_with_warmup(spikenet(32), 20)
-    .top_k(2)
-    .build();
-
-moe.train(&[1.0, 2.0, 3.0], 4.0);
-let pred = moe.predict(&[1.0, 2.0, 3.0]);
-```
-
-Based on Jacobs et al. (1991), Shazeer et al. (2017), Wang et al. (2024), Aspis et al. (2025).
+The library serves four cases primarily: edge inference at sample rate, online forecasting under concept drift, embedded learning where the dataset would never fit in RAM, and research benches where a new streaming architecture lands beside `SGBT` and is held to the same throughput and accuracy floor.
 
 ## Quick Start
 
@@ -271,476 +34,237 @@ Based on Jacobs et al. (1991), Shazeer et al. (2017), Wang et al. (2024), Aspis 
 cargo add irithyll
 ```
 
-### Factory Functions
+Four snippets, in order of how a streaming pipeline grows.
 
-The fastest way to get started -- one-liner construction for every algorithm:
-
-```rust
-use irithyll::{sgbt, rls, krls, gaussian_nb, mondrian, linear, StreamingLearner};
-
-let mut trees  = sgbt(50, 0.01);        // 50 boosting steps, lr=0.01
-let mut kernel = krls(1.0, 100, 1e-4);  // RBF gamma=1.0, budget=100
-let mut bayes  = gaussian_nb();          // Gaussian Naive Bayes
-let mut forest = mondrian(10);           // 10 Mondrian trees
-let mut lin    = linear(0.01);           // SGD linear model, lr=0.01
-let mut rls_m  = rls(0.99);             // RLS, forgetting factor=0.99
-
-// All share the same interface
-trees.train(&[1.0, 2.0], 3.0);
-let pred = trees.predict(&[1.0, 2.0]);
-```
-
-### Neural Architectures
-
-Reservoir computing, state space models, and spiking networks -- same `StreamingLearner` interface:
+**The smallest useful thing -- normalize, boost, predict.**
 
 ```rust
-use irithyll::*;
+use irithyll::{pipe, normalizer, sgbt, StreamingLearner};
 
-// NG-RC: time-delay + polynomial features
-let mut model = ngrc(2, 1, 2);
-model.train(&[1.0], 2.0);
-let pred = model.predict(&[1.0]);
-
-// Echo State Network
-let mut model = esn(100, 0.9);
-
-// SSM as feature extractor -> gradient boosted trees
-let mut model = pipe(mamba_preprocessor(5, 16)).learner(sgbt(50, 0.01));
-
-// Spiking neural network
-let mut model = spikenet(64);
-model.train(&[0.5, -0.3], 1.0);
-let pred = model.predict(&[0.5, -0.3]);
+let mut model = pipe(normalizer()).learner(sgbt(50, 0.01));
+model.train(&[100.0, 0.5, 42.0], 3.14);
+let pred = model.predict(&[100.0, 0.5, 42.0]);
 ```
 
-### Composable Pipelines
-
-Chain preprocessors and learners with zero boilerplate:
+**Race three model families against each other -- let the data choose.**
 
 ```rust
-use irithyll::{pipe, normalizer, sgbt, ccipca, StreamingLearner};
+use irithyll::{automl::{AutoTuner, Factory}, StreamingLearner};
 
-// Normalize → reduce to 5 components → gradient boosted trees
-let mut model = pipe(normalizer())
-    .pipe(ccipca(5))
-    .learner(sgbt(50, 0.01));
+let mut tuner = AutoTuner::builder()
+    .add_factory(Factory::sgbt(5))
+    .add_factory(Factory::mamba(5))
+    .add_factory(Factory::esn())
+    .use_drift_rerace(true)
+    .build();
 
-model.train(&[100.0, 0.001, 50_000.0, 0.5, 1e-6, 42.0, 7.7, 0.3], 3.14);
-let pred = model.predict(&[100.0, 0.001, 50_000.0, 0.5, 1e-6, 42.0, 7.7, 0.3]);
+tuner.train(&[1.0, 2.0, 3.0], 6.0);
+let pred = tuner.predict(&[1.0, 2.0, 3.0]);
 ```
 
-### Kernel Methods (KRLS)
-
-Learn nonlinear functions with automatic dictionary sparsification:
+**Mix architectures inside a single mixture-of-experts -- heterogeneous experts welcome.**
 
 ```rust
-use irithyll::{krls, StreamingLearner};
+use irithyll::{moe::NeuralMoE, sgbt, esn, StreamingLearner};
 
-let mut model = krls(1.0, 100, 1e-4);  // RBF kernel, budget=100
-
-for i in 0..500 {
-    let x = i as f64 * 0.01;
-    model.train(&[x], x.sin());
-}
-
-let pred = model.predict(&[1.5708]);  // sin(pi/2) ~ 1.0
+let mut moe = NeuralMoE::builder()
+    .expert(sgbt(50, 0.01))
+    .expert_with_warmup(esn(100, 0.9), 50)
+    .top_k(2)
+    .build();
 ```
 
-### Prediction Intervals (RLS)
-
-Get calibrated confidence intervals that narrow as data arrives:
+**Turn any regressor into a classifier -- `binary_classifier` and `multiclass_classifier` wrap a `StreamingLearner` with bipolar one-vs-rest heads.**
 
 ```rust
-use irithyll::{rls, StreamingLearner, RecursiveLeastSquares};
+use irithyll::{sgbt, binary_classifier, StreamingLearner};
 
-let mut model = rls(0.99);
-
-for i in 0..1000 {
-    let x = i as f64 * 0.01;
-    model.train(&[x], 2.0 * x + 1.0);
-}
-
-let (pred, lo, hi) = model.predict_interval(&[5.0], 1.96);
-// 95% CI: prediction is between lo and hi
+let mut clf = binary_classifier(sgbt(50, 0.05));
+clf.train(&[1.5, -0.3, 2.1], 1.0);            // labels are 0.0 / 1.0
+let prob_positive = clf.predict(&[1.5, -0.3, 2.1]);
 ```
 
-### Full Builder Pattern
+Composition is the point. Anything that implements `StreamingLearner` slots into a pipeline, an MoE expert, an AutoML candidate, a projection wrapper, or a classification head. The trait is the contract; the rest is LEGO.
 
-For complete control over SGBT hyperparameters:
+For the longer ergonomics story -- pipeline composition, AutoML tournaments, drift wiring, embedded deployment -- see [`docs/USAGE.md`](docs/USAGE.md).
+
+## Design Principles
+
+The library has opinions. They are stable across releases and they shape every model.
+
+**One sample at a time, streaming throughout.** Streaming-only models remain streaming. Architectures originally designed for offline training (TTT, KAN, Mamba) are reimplemented with online updates that converge sample-by-sample. Training happens in a single pass through data with no replay.
+
+**O(1) memory per model.** State size is a function of the model, not the data seen. A model trained on a billion samples occupies the same memory as one trained on a thousand. Drift detectors are bounded ring buffers; histograms have fixed bin counts; subspace trackers carry rank-`k` projections.
+
+**Bounded readouts before linear heads.** Every neural model feeding a recursive least squares head bounds its features first with `tanh`, `sigmoid`, L2-normalization, or clamping. This prevents feature explosion in the RLS head and is required for all new neural architectures.
+
+**Constants from theory, self-calibration otherwise.** Bernstein bounds for promotion tests, the Hoeffding inequality for split decisions, the PAST update for streaming PCA. Where a paper provides a constant, the constant cites the paper. Where theory is silent, online statistics self-calibrate rather than relying on magic numbers.
+
+**Validation by builder.** Every public `Config` carries a `Builder` returning `Result<_, ConfigError>`. Bounds are checked before construction; impossible configurations cannot be created.
+
+**Safe Rust in the training surface.** `irithyll` has `#![forbid(unsafe_code)]` at its root, ensuring all training-side code is safe. `irithyll-core` uses localized `unsafe` for zero-copy view parsing of the packed binary format and AVX2 SIMD intrinsics (behind the `simd-avx2` feature), each with documented preconditions.
+
+## Workspace
+
+| Crate | What it does | `no_std` |
+|-------|--------------|----------|
+| **`irithyll`** | Training, streaming algorithms, pipelines, async I/O, AutoML | No |
+| **`irithyll-core`** | `no_std` streaming training + packed inference -- Mamba-3, LLA, SNN, drift detectors, primitives, 12-byte tree format | Yes |
+| **`irithyll-python`** | PyO3 bindings for `AutoTuner`, `ProjectedLearner`, and factory variants | No |
+
+`irithyll-core` cross-compiles for bare-metal targets including `thumbv6m-none-eabi` (Cortex-M0+), `thumbv7m-none-eabi` (M3), and `thumbv7em-none-eabi` (M4). All are tested in CI. Its only dependency is `libm` for soft-float math; everything else (SIMD, parallel, serde) is opt-in. Train with the full crate, export to packed format, run inference on the microcontroller with identical predictions.
+
+## Models and Architecture
+
+irithyll's model lineup spans four tiers. Production models are the ones you reach for first: streaming gradient-boosted trees with drift-driven tree replacement, recursive least squares with confidence intervals, kernel RLS, Mondrian forests, and classical baselines. The neural tier includes selective state-space models, test-time-trained recurrent networks, Kolmogorov-Arnold networks, spiking networks, and a streaming linear-attention layer exposing twelve distinct attention modes (RetNet, Hawk/Griffin, GLA, GLAVector, DeltaNet, GatedDeltaNet, RWKV, RWKV-7, mLSTM, DeltaProduct, HGRN2, log-linear). Specialized tools cover conformal prediction, anomaly detection, online projection learning, packed inference, and TreeSHAP. Ensembles compose all of the above.
+
+Every algorithm implements [`StreamingLearner`](https://docs.rs/irithyll/latest/irithyll/trait.StreamingLearner.html). Every neural model is online-trainable end-to-end. All readouts are bounded; every feature feeding a recursive least squares head is squashed, normalized, or clamped to maintain numerical stability under streaming conditions.
+
+| Tier | What it contains |
+|------|------------------|
+| **Production** | SGBT family (`SGBT`, `DistributionalSGBT`, `BaggedSGBT`, `MulticlassSGBT`, `ParallelSGBT`), `RecursiveLeastSquares`, `KRLS`, Mondrian forests, Hoeffding trees, Gaussian Naive Bayes, linear / polynomial models |
+| **Neural** | Mamba family (V1 / V3 / Mamba-3), Echo State Networks, Next-Gen Reservoir Computing, `StreamingTTT`, `StreamingKAN` / T-KAN, AGMP, mGRADE, HGRN2, sLSTM, SpikeNet (e-prop + surrogate gradients), `StreamingAttentionModel` (12 modes) |
+| **Specialized** | Packed inference (`irithyll-core`), conformal prediction with PID control, anomaly detection, `ProjectedLearner` (online subspace tracking via PAST), TreeSHAP |
+| **Ensemble** | `NeuralMoE` (heterogeneous experts, top-k routing, drift-aware), streaming AutoML (`AutoTuner`, tournament racing, drift re-racing, complexity-adjusted elimination) |
+
+Classification works on top of regression: `binary_classifier(model)` and `multiclass_classifier(model, k)` wrap any `StreamingLearner` with bipolar one-vs-rest heads.
+
+For per-model architecture, paper citations, when-to-use guidance, math summaries, and config references, see [`MODELS.md`](MODELS.md).
+
+## Tools and CLI
+
+The `irithyll` command-line interface provides interactive training, evaluation, and inspection of streaming models on CSV data. The TUI (terminal user interface) offers live dashboards monitoring model state, drift events, and AutoML tournaments. Key commands:
+
+- `irithyll train <csv>` -- Train a model on a CSV file with live metrics.
+- `irithyll eval <csv>` -- Evaluate an existing model on held-out data.
+- `irithyll --tui` -- Launch the interactive dashboard (supports `--model-type` and `--bench` flags).
+- `irithyll --family <name> --bench <dataset>` -- Run built-in benchmarks (Friedman, Lorenz, Mackey-Glass, etc.).
+- `irithyll inspect <model>` -- Examine model state, feature importance, and configuration.
+- `irithyll export <model>` -- Export a trained model to packed binary format for embedded deployment.
+
+![irithyll TUI](https://raw.githubusercontent.com/evilrat420/irithyll/master/docs/images/tui.png)
+
+![irithyll TUI demo](https://raw.githubusercontent.com/evilrat420/irithyll/master/docs/images/tui.gif)
+
+Built-in benchmarks: `friedman`, `lorenz`, `mackey-glass`, `periodic`, `mqar`, `needle`. Supported families: `sgbt`, `mamba`, `ttt`, `kan`, `esn`, `ngrc`, `spike-net`. Per-feature importance is available for SGBT, KAN, and Linear models.
+
+## Drift Handling
+
+The world distribution shifts. Streaming models that don't notice lie. irithyll treats drift as a first-class signal, not a recovery story.
+
+Three detectors ship in `irithyll::drift`: **ADWIN** (Bifet & Gavaldà 2007) for adaptive windowing, **DDM** (Gama et al. 2004) for the warning-and-drift two-stage state machine, and **Page-Hinkley** for cumulative-deviation tests. They expose a single `update(error) -> DriftState` interface, plug into any model that takes a `Box<dyn DriftDetector>`, and respond to `adjust_config()` calls when AutoML wants to widen the learning rate during a re-race.
+
+Inside SGBT, drift drives **tree replacement**. Each boosting stage carries a detector watching its standardized residual. When drift fires, that stage's tree is replaced with a fresh alternate that warms up in parallel before promotion. The ensemble keeps predicting throughout without rebuild pause.
+
+Inside AutoML, drift drives **re-racing**. The `AutoTuner` re-evaluates challenger configurations against the champion when the residual distribution shifts, with the comparison gated by an empirical Bernstein promotion test (`bernstein_promotion_test` in `automl::racing`). The champion never flips on noise.
+
+## Bare-Metal Deployment
+
+The packed inference path is a deliberate boundary. Train with the full crate, export to a 12-byte-per-node binary representation, deserialize on a microcontroller in pure `#![no_std]` without an allocator, and predict.
 
 ```rust
-use irithyll::{SGBTConfig, SGBT, Sample};
-
-let config = SGBTConfig::builder()
-    .n_steps(100)
-    .learning_rate(0.0125)
-    .max_depth(6)
-    .n_bins(64)
-    .lambda(1.0)
-    .grace_period(200)
-    .feature_names(vec!["temperature".into(), "humidity".into()])
-    .build()
-    .expect("valid config");
-
-let mut model = SGBT::new(config);
-
-for i in 0..500 {
-    let x = i as f64 * 0.01;
-    model.train_one(&Sample::new(vec![x], 2.0 * x + 1.0));
-}
-
-// TreeSHAP explanations
-let shap = model.explain(&[3.0]);
-if let Some(named) = model.explain_named(&[3.0]) {
-    for (name, value) in &named.values {
-        println!("{}: {:.4}", name, value);
-    }
-}
-```
-
-### Concept Drift Detection
-
-Automatic adaptation when the data distribution shifts:
-
-```rust
-use irithyll::{SGBTConfig, SGBT, Sample};
-use irithyll::drift::adwin::Adwin;
-
-let config = SGBTConfig::builder()
-    .n_steps(50)
-    .learning_rate(0.1)
-    .drift_detector(Adwin::default())
-    .build()
-    .expect("valid config");
-
-let mut model = SGBT::new(config);
-// When drift is detected, trees are automatically replaced
-```
-
-### Async Streaming
-
-Tokio-native with bounded channels and concurrent prediction:
-
-```rust
-use irithyll::{SGBTConfig, Sample};
-use irithyll::stream::AsyncSGBT;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = SGBTConfig::builder()
-        .n_steps(30)
-        .learning_rate(0.1)
-        .build()?;
-
-    let mut runner = AsyncSGBT::new(config);
-    let sender = runner.sender();
-    let predictor = runner.predictor();
-
-    let handle = tokio::spawn(async move { runner.run().await });
-
-    for i in 0..500 {
-        let x = i as f64 * 0.01;
-        sender.send(Sample::new(vec![x], 2.0 * x)).await?;
-    }
-
-    let pred = predictor.predict(&[3.0]);
-    drop(sender);
-    handle.await??;
-    Ok(())
-}
-```
-
-### Python
-
-```python
-import numpy as np
-from irithyll_python import StreamingGBTConfig, StreamingGBT
-
-config = StreamingGBTConfig().n_steps(50).learning_rate(0.1)
-model = StreamingGBT(config)
-
-for i in range(500):
-    x = np.array([i * 0.01])
-    model.train_one(x, 2.0 * x[0] + 1.0)
-
-pred = model.predict(np.array([3.0]))
-shap = model.explain(np.array([3.0]))
-```
-
-## Packed Inference (`irithyll-core`)
-
-Train with the full `irithyll` crate, export to a compact binary, and run inference on embedded targets with zero allocation.
-
-### Node Format
-
-Each `PackedNode` is 12 bytes (5 nodes per 64-byte cache line):
-
-| Field | Size | Description |
-|-------|------|-------------|
-| `value` | 4B | Split threshold (internal) or prediction with learning rate baked in (leaf) |
-| `children` | 4B | Packed left/right child u16 indices |
-| `feature_flags` | 2B | Bit 15 = is_leaf, bits 14:0 = feature index |
-| `_reserved` | 2B | Padding for future use |
-
-### Export and Deploy
-
-```rust
-use irithyll::{SGBTConfig, SGBT, Sample};
+// On the host: train, then export to packed bytes.
+use irithyll::{SGBT, SGBTConfig, StreamingLearner};
 use irithyll::export_embedded::export_packed;
 
-// 1. Train on a host machine
-let config = SGBTConfig::builder()
-    .n_steps(50)
-    .learning_rate(0.01)
-    .max_depth(4)
-    .build()
-    .unwrap();
-let mut model = SGBT::new(config);
-for sample in training_data {
-    model.train_one(&sample);
-}
-
-// 2. Export to packed binary (learning rate baked into leaf values)
-let packed: Vec<u8> = export_packed(&model, n_features);
-std::fs::write("model.bin", &packed).unwrap();
+let mut model = SGBT::new(SGBTConfig::builder().n_steps(50).build().unwrap());
+// ... train on a stream ...
+let packed_bytes: Vec<u8> = export_packed(&model, /* n_features */ 4);
+// Write to flash, ship to device.
 ```
 
 ```rust
-// 3. Load on embedded target (no_std, zero-alloc)
+// On the device: zero-copy view over the bytes. No std, no allocation in predict.
+#![no_std]
 use irithyll_core::EnsembleView;
 
-// Zero-copy: borrows the buffer, no heap allocation
-let model_bytes: &[u8] = include_bytes!("model.bin");
-let view = EnsembleView::from_bytes(model_bytes).unwrap();
-
-let prediction: f32 = view.predict(&[1.0, 2.0, 3.0]);
+let view = EnsembleView::from_bytes(PACKED_BYTES).unwrap();
+let prediction: f32 = view.predict(&[0.5, 1.2, -0.3, 0.1]);
 ```
 
-### Performance
-
-Benchmarked on x86-64 (single core, 50 trees, max depth 4, 10 features):
-
-| Operation | Latency | Throughput |
-|-----------|---------|------------|
-| Packed single predict (`irithyll-core`) | **66 ns** | 15.2M pred/s |
-| Packed batch predict (x4 interleave) | -- | **5.3M pred/s** |
-| Training-time predict (`irithyll` SoA) | 533 ns | 1.9M pred/s |
-
-The 8x speedup comes from the 12-byte AoS node layout (vs training-time SoA vectors), branch-free child selection (compiles to `cmov` on x86), and f32 arithmetic with pre-baked learning rate.
-
-## The SGBT Algorithm
-
-The core gradient boosting engine is based on [Gunasekara et al., 2024](https://doi.org/10.1007/s10994-024-06517-y). The ensemble maintains `n_steps` boosting stages, each owning a streaming Hoeffding tree and a drift detector. For each sample *(x, y)*:
-
-1. Compute the ensemble prediction *F(x) = base + lr * sum(tree_s(x))*
-2. For each boosting step, compute gradient/hessian of the loss at the residual
-3. Update the tree's histogram accumulators and evaluate splits via Hoeffding bound
-4. Feed the standardized error to the drift detector
-5. If drift is detected, replace the tree with a fresh alternate
-
-Beyond the paper, irithyll adds EWMA leaf decay, lazy O(1) histogram decay, proactive tree replacement, and EFDT-style split re-evaluation for long-running non-stationary systems.
-
-## Architecture
-
-```
-irithyll/                 Workspace root
-  src/
-    ensemble/             SGBT variants, config, multi-class/target, parallel, adaptive, distributional
-    learners/             KRLS, RLS, Gaussian NB, Mondrian forests, linear/polynomial models
-    pipeline/             Composable preprocessor + learner chains (StreamingPreprocessor trait)
-    preprocessing/        IncrementalNormalizer, OnlineFeatureSelector, CCIPCA
-    tree/                 Hoeffding-bound streaming decision trees
-    histogram/            Streaming histogram binning (uniform, quantile, k-means)
-    drift/                Concept drift detectors (Page-Hinkley, ADWIN, DDM)
-    loss/                 Differentiable loss functions (squared, logistic, softmax, Huber)
-    explain/              TreeSHAP, StreamingShap, importance drift monitoring
-    stream/               Async tokio-based training runner and predictor handles
-    metrics/              Online regression/classification metrics, conformal intervals, EWMA
-    anomaly/              Half-space trees for streaming anomaly detection
-    automl/               Champion-challenger racing, config space, model factories, reward normalization
-    moe/                  Neural Mixture of Experts (polymorphic experts, top-k routing, load balancing)
-    ttt/                  Test-Time Training layers (fast weights, self-supervised reconstruction, Titans)
-    kan/                  Kolmogorov-Arnold Networks (B-spline edge activations, sparse SGD)
-    reservoir/            NG-RC (time-delay polynomial) and ESN (cycle reservoir) + preprocessors
-    ssm/                  StreamingMamba (selective SSM) + MambaPreprocessor
-    snn/                  SpikeNet (f64 wrapper), SpikePreprocessor
-    serde_support/        Model checkpoint/restore (JSON, bincode)
-    export_embedded.rs    SGBT -> packed binary export for irithyll-core
-
-  irithyll-core/          #![no_std] training engine + zero-alloc inference
-    packed.rs             12-byte PackedNode, EnsembleHeader, TreeEntry
-    traverse.rs           Branch-free tree traversal (single + x4 batch)
-    view.rs               EnsembleView<'a> -- zero-copy inference from &[u8]
-    quantize.rs           f64 -> f32 quantization utilities
-    error.rs              FormatError (no_std compatible)
-    reservoir/            NG-RC delay buffer, polynomial features, cycle reservoir, PRNG (alloc)
-    ssm/                  Selective SSM: diagonal state, ZOH discretization, projections (alloc)
-    snn/                  SpikeNetFixed: Q1.14 LIF neurons, e-prop, delta encoding (alloc)
-
-  irithyll-python/        PyO3 Python bindings
-```
-
-## Configuration
-
-| Parameter                | Default                    | Description                                   |
-|--------------------------|----------------------------|-----------------------------------------------|
-| `n_steps`                | 100                        | Number of boosting steps (trees in ensemble)   |
-| `learning_rate`          | 0.0125                     | Shrinkage factor applied to each tree output   |
-| `feature_subsample_rate` | 0.75                       | Fraction of features sampled per tree          |
-| `max_depth`              | 6                          | Maximum depth of each streaming tree           |
-| `n_bins`                 | 64                         | Number of histogram bins per feature           |
-| `lambda`                 | 1.0                        | L2 regularization on leaf weights              |
-| `gamma`                  | 0.0                        | Minimum gain required to make a split          |
-| `grace_period`           | 200                        | Minimum samples before evaluating splits       |
-| `delta`                  | 1e-7                       | Hoeffding bound confidence parameter           |
-| `drift_detector`         | PageHinkley(0.005, 50.0)   | Drift detection algorithm for tree replacement |
-| `variant`                | Standard                   | Computational variant (Standard, Skip, MI)     |
-| `leaf_half_life`         | None (disabled)            | EWMA decay half-life for leaf statistics       |
-| `max_tree_samples`       | None (disabled)            | Proactive tree replacement threshold           |
-| `split_reeval_interval`  | None (disabled)            | Re-evaluation interval for max-depth leaves    |
+Validation happens once in `from_bytes` (magic bytes, child-index bounds, feature-index bounds); after that, prediction is pure pointer arithmetic. Five nodes fit per 64-byte cache line, learning rate is baked into leaf values at export time, and an 8-byte int16-quantized variant (`export_packed_i16` + `QuantizedEnsembleView`) eliminates floats from the inference hot loop entirely. The crate's only dependency is `libm`. CI cross-compiles for all three Cortex-M targets on every commit.
 
 ## Feature Flags
 
-These flags apply to the `irithyll` crate. `irithyll-core` has no required features (it is `no_std` with zero dependencies by default; an optional `std` feature is available).
+`irithyll-core`'s default build is pure `no_std` with no allocator and no `std`, just `libm` for soft-float math. Opt-in features (`alloc`, `std`, `serde`, `simd`, `simd-avx2`, `parallel`) extend it as needed. The device-side inference path on the previous page runs in the strictest mode. Neural streaming modules in the main crate compile unconditionally without flags.
 
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `serde-json` | Yes | JSON model serialization |
-| `serde-bincode` | No | Compact binary serialization (bincode) |
+| `serde-bincode` | No | Compact binary serialization |
 | `parallel` | No | Rayon-based parallel tree training (`ParallelSGBT`) |
-| `simd` | No | AVX2 histogram acceleration |
+| `simd` | No | Generic SIMD acceleration |
+| `simd-avx2` | No | AVX2 histogram + neural ops (x86_64 only) |
 | `kmeans-binning` | No | K-means histogram binning strategy |
-| `arrow` | No | Apache Arrow RecordBatch integration |
+| `arrow` | No | Apache Arrow `RecordBatch` integration |
 | `parquet` | No | Parquet file I/O |
 | `onnx` | No | ONNX model export |
 | `neural-leaves` | No | Experimental MLP leaf models |
-| `full` | No | Enable all features |
+| `full` | No | Everything above |
 
-Neural streaming modules (`reservoir`, `ssm`, `snn`) compile unconditionally -- no feature flag required.
-
-## Examples
-
-Run any example with `cargo run --example <name>`:
-
-| Example | Description |
-|---------|-------------|
-| `basic_regression` | Linear regression with RMSE tracking |
-| `classification` | Binary classification with logistic loss |
-| `async_ingestion` | Tokio-native async training with concurrent prediction |
-| `custom_loss` | Implementing a custom loss function |
-| `drift_detection` | Abrupt concept drift with recovery analysis |
-| `model_checkpointing` | Save/restore models with prediction verification |
-| `streaming_metrics` | Prequential evaluation with windowed metrics |
-| `krls_nonlinear` | Kernel regression on sin(x) with ALD sparsification |
-| `ccipca_reduction` | Streaming PCA dimensionality reduction |
-| `rls_confidence` | RLS prediction intervals narrowing over time |
-| `pipeline_composition` | Normalizer + SGBT composable pipeline |
-
-## Documentation
-
-- [**API Reference**](https://docs.rs/irithyll) -- full docs on docs.rs (all features enabled)
-- [**Rustdoc (GitHub Pages)**](https://evilrat420.github.io/irithyll/) -- latest from master
-- [**Responsible Use**](RESPONSIBLE_USE.md) -- ethical use policy and research applications
-- [**Contributing**](CONTRIBUTING.md) -- how to contribute, code standards, community values
-
-## Minimum Supported Rust Version
-
-The MSRV is **1.75**. This is checked in CI and will only be raised in minor version bumps.
 
 ## References
 
-Papers with direct code counterparts. See [REFERENCES.md](REFERENCES.md) for the full bibliography including related work.
+The implementations cite their sources. The list below is the load-bearing core of papers whose math directly shapes models in irithyll. The complete bibliography (foundations, related work, surveys) lives in [`REFERENCES.md`](REFERENCES.md).
 
-**Core algorithms:**
+**Streaming Boosting and Trees**
 
-> Gunasekara, N., Pfahringer, B., Gomes, H. M., & Bifet, A. (2024). *Gradient boosted trees for evolving data streams.* Machine Learning, 113, 3325-3352. → `SGBT`
+- Gunasekara, Pfahringer, Gomes, Bifet (2024). *Gradient boosted trees for evolving data streams.* Machine Learning, 113, 3325-3352.
+- Domingos, Hulten (2000). *Mining high-speed data streams.* KDD 2000. -- Hoeffding bound for online splits.
+- Bifet, Gavaldà (2007). *Learning from time-changing data with adaptive windowing.* SIAM SDM 2007. -- ADWIN.
+- Lundberg et al. (2020). *From local explanations to global understanding with explainable AI for trees.* Nature Machine Intelligence, 2, 56-67. -- TreeSHAP.
 
-> Lundberg, S. M., et al. (2020). *From local explanations to global understanding with explainable AI for trees.* Nature Machine Intelligence, 2, 56-67. → `TreeSHAP`
+**State-Space Models and Recurrent Networks**
 
-> Weng, J., Zhang, Y., & Hwang, W.-S. (2003). *Candid covariance-free incremental principal component analysis.* IEEE TPAMI, 25(8), 1034-1040. → `CCIPCA`
+- Gu, Dao (2023). *Mamba: Linear-time sequence modeling with selective state spaces.* arXiv:2312.00752.
+- Dao, Gu (2024). *Transformers are SSMs: Generalized models and efficient algorithms through structured state space duality.* arXiv:2405.21060.
+- Gu, Gupta, Goel, Ré (2022). *On the parameterization and initialization of diagonal state space models.* NeurIPS 2022. -- S4D-Inv.
+- Beck et al. (2024). *xLSTM: Extended long short-term memory.* NeurIPS 2024. -- mLSTM / sLSTM.
 
-> Dohare, S., et al. (2024). *Loss of plasticity in deep continual learning.* Nature, 632, 768-774. → proactive pruning, `ContinualLearner`
+**Streaming Linear Attention**
 
-> Kirkpatrick, J., et al. (2017). *Overcoming catastrophic forgetting in neural networks.* PNAS, 114(13), 3521-3526. → `ContinualLearner` (EWC)
+- Yang, Wang, Shen, Panda, Kim (2023). *Gated linear attention transformers with hardware-efficient training.* arXiv:2312.06635. -- GLA.
+- Yang et al. (2024). *Gated Delta Networks: Improving Mamba2 with Delta Rule.* arXiv:2412.06464. -- DeltaNet / GatedDeltaNet.
+- Sun et al. (2023). *Retentive network: A successor to transformer for large language models.* arXiv:2307.08621. -- RetNet.
+- De et al. (2024). *Griffin: Mixing gated linear recurrences with local attention.* arXiv:2402.19427. -- Hawk.
+- Peng et al. (2024). *Eagle and Finch: RWKV with matrix-valued states and dynamic recurrence.* arXiv:2404.05892. -- RWKV.
 
-**Reservoir computing:**
+**Test-Time Training, KAN, Reservoir, Spiking**
 
-> Gauthier, D. J., Bollt, E., Griffith, A., & Barbosa, W. A. S. (2021). *Next generation reservoir computing.* Nature Communications, 12, 5564. → `NextGenRC`
+- Sun et al. (2024). *Learning to (Learn at Test Time): RNNs with expressive hidden states.* ICML 2025. -- StreamingTTT.
+- Behrouz, Zhong, Mirrokni (2025). *Titans: Learning to memorize at test time.* arXiv:2501.00663. -- momentum + weight-decay TTT.
+- Liu et al. (2024). *KAN: Kolmogorov-Arnold Networks.* ICLR 2025.
+- Hoang et al. (2026). *Ultrafast on-chip online learning via Kolmogorov-Arnold Networks.* arXiv:2602.02056. -- streaming convergence.
+- Gauthier, Bollt, Griffith, Barbosa (2021). *Next generation reservoir computing.* Nature Communications, 12, 5564.
+- Rodan, Tiňo (2010). *Minimum complexity echo state network.* IEEE TNN, 23(1).
+- Bellec et al. (2020). *A solution to the learning dilemma for recurrent networks of spiking neurons.* Nature Communications, 11, 3625. -- e-prop.
 
-> Rodan, A., & Tino, P. (2010). *Minimum complexity echo state network.* IEEE Transactions on Neural Networks, 23(1), 131-144. → `EchoStateNetwork`
+**Mixture-of-Experts and AutoML**
 
-> Martinuzzi, F. (2025). *Minimal deterministic echo state networks outperform random reservoirs in learning chaotic dynamics.* Chaos, 35. → `EchoStateNetwork`
+- Shazeer et al. (2017). *Outrageously large neural networks: The sparsely-gated mixture-of-experts layer.* ICLR 2017.
+- Aspis et al. (2025). *DriftMoE: Mixture of experts for streaming classification with concept drift.* ECMLPKDD 2025.
+- Wu, Iyer, Wang (2021). *ChaCha for online AutoML.* ICML 2021.
+- Qi et al. (2023). *Discounted Thompson Sampling for non-stationary bandits.* arXiv:2305.10718.
 
-**State space models:**
+**Continual Learning, Conformal, Projection**
 
-> Gu, A., & Dao, T. (2023). *Mamba: Linear-time sequence modeling with selective state spaces.* arXiv:2312.00752. → `StreamingMamba`
+- Dohare et al. (2024). *Loss of plasticity in deep continual learning.* Nature, 632, 768-774.
+- Kirkpatrick et al. (2017). *Overcoming catastrophic forgetting in neural networks.* PNAS, 114(13). -- EWC.
+- Angelopoulos, Candes, Tibshirani (2023). *Conformal PID control for time series prediction.* NeurIPS 2023.
+- Yang (1995). *Projection approximation subspace tracking.* IEEE TSP, 43(1). -- PAST.
 
-> Gu, A., Gupta, A., Goel, K., & Ré, C. (2022). *On the parameterization and initialization of diagonal state space models.* NeurIPS 2022. → S4D-Inv initialization in `StreamingMamba`
+## Further Reading
 
-> Dao, T., & Gu, A. (2024). *Transformers are SSMs: Generalized models and efficient algorithms through structured state space duality.* arXiv:2405.21060. → `StreamingMambaV3`
-
-**Spiking neural networks:**
-
-> Bellec, G., et al. (2020). *A solution to the learning dilemma for recurrent networks of spiking neurons.* Nature Communications, 11, 3625. → `SpikeNet` (e-prop)
-
-> Neftci, E. O., Mostafa, H., & Zenke, F. (2019). *Surrogate gradient learning in spiking neural networks.* IEEE Signal Processing Magazine, 36(6), 51-63. → `SpikeNet`
-
-**Test-time training:**
-
-> Sun, Y., et al. (2024). *Learning to (Learn at Test Time): RNNs with expressive hidden states.* ICML 2025. → `StreamingTTT`
-
-> Behrouz, A., Zhong, P., & Mirrokni, V. (2025). *Titans: Learning to memorize at test time.* arXiv:2501.00663. → `StreamingTTT` (momentum + weight decay)
-
-**Kolmogorov-Arnold Networks:**
-
-> Liu, Z., et al. (2024). *KAN: Kolmogorov-Arnold Networks.* ICLR 2025. → `StreamingKAN`
-
-> Hoang, T. T., et al. (2026). *Ultrafast on-chip online learning via Kolmogorov-Arnold Networks.* arXiv:2602.02056. → `StreamingKAN` (online convergence)
-
-**Streaming attention:**
-
-> Yang, S., et al. (2023). *Gated linear attention transformers with hardware-efficient training.* arXiv:2312.06635. → `StreamingAttention` (GLA mode)
-
-> Yang, S., et al. (2024). *Gated Delta Networks: Improving Mamba2 with Delta Rule.* arXiv:2412.06464. → `StreamingAttention` (DeltaNet mode)
-
-> Peng, B., et al. (2024). *Eagle and Finch: RWKV with matrix-valued states and dynamic recurrence.* arXiv:2404.05892. → `StreamingAttention` (RWKV mode)
-
-> Beck, M., et al. (2024). *xLSTM: Extended long short-term memory.* NeurIPS 2024. → `StreamingAttention` (mLSTM mode), `sLSTM`
-
-> Sun, Y., et al. (2023). *Retentive network: A successor to transformer for large language models.* arXiv:2307.08621. → `StreamingAttention` (RetNet mode)
-
-> De, S., Smith, S. L., et al. (2024). *Griffin: Mixing gated linear recurrences with local attention for efficient language models.* arXiv:2402.19427. → `StreamingAttention` (Hawk mode)
-
-**Neural MoE:**
-
-> Jacobs, R. A., Jordan, M. I., Nowlan, S. J., & Hinton, G. E. (1991). *Adaptive mixtures of local experts.* Neural Computation, 3(1), 79-87. → `NeuralMoE`
-
-> Shazeer, N., et al. (2017). *Outrageously large neural networks: The sparsely-gated mixture-of-experts layer.* ICLR 2017. → `NeuralMoE` (top-k routing)
-
-> Wang, B., et al. (2024). *Auxiliary-loss-free load balancing strategy for mixture-of-experts.* arXiv:2408.15664. → `NeuralMoE` (load balancing)
-
-> Aspis, M., et al. (2025). *DriftMoE: Mixture of experts for streaming classification with concept drift.* ECMLPKDD 2025. → `NeuralMoE`
-
-**AutoML:**
-
-> Wu, Q., Iyer, C., & Wang, C. (2021). *ChaCha for online AutoML.* ICML 2021. → `AutoTuner` (tournament racing)
-
-> Qi, Y., et al. (2023). *Discounted Thompson Sampling for non-stationary bandits.* arXiv:2305.10718. → `DiscountedThompsonSampling`
-
-> Yamanishi, K. (2018). *Stochastic complexity for online learning with finite-state models.* IEEE TIT. → complexity-adjusted elimination
-
-**Conformal prediction:**
-
-> Angelopoulos, A. N., Candes, E. J., & Tibshirani, R. J. (2023). *Conformal PID control for time series prediction.* NeurIPS 2023. → `ConformalPID`
-
-> Bhatnagar, A., Wang, H., Xiong, C., & Bai, Y. (2023). *Improved online conformal prediction via strongly adaptive online learning.* ICML 2023. → conformal module
-
-> Gupta, C., & Ramdas, A. (2023). *Online Platt scaling with calibeating.* ICML 2023. → `OnlinePlattScaling`
-
-**Projection learning:**
-
-> Yang, B. (1995). *Projection approximation subspace tracking.* IEEE TSP, 43(1), 95-107. → `SubspaceTracker` (PAST algorithm)
+| Document | Contents |
+|----------|----------|
+| [`MODELS.md`](MODELS.md) | Per-model architecture, paper citation, when-to-use, math summary, config reference |
+| [`docs/USAGE.md`](docs/USAGE.md) | Extended ergonomics -- pipelines, AutoML, MoE composition, embedded deployment |
+| [`BENCHMARKS.md`](BENCHMARKS.md) | Benchmark methodology, datasets, throughput numbers, Pareto plots |
+| [`REFERENCES.md`](REFERENCES.md) | Complete bibliography, organized by tier |
+| [`examples/`](examples/) | Runnable examples, organized `01_quickstart` → `02_essentials` → `03_neural` → `04_advanced` |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release history |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution guide and code standards |
+| [docs.rs](https://docs.rs/irithyll) | Full API reference |
 
 ## License
 
@@ -751,8 +275,6 @@ Licensed under either of
 
 at your option.
 
-### Contribution
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
 
-Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in this work by you, as defined in the Apache-2.0 license, shall be dual
-licensed as above, without any additional terms or conditions.
+**MSRV:** 1.75. Checked in CI; raised only in minor version bumps.

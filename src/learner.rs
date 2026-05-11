@@ -55,9 +55,10 @@ use crate::loss::squared::SquaredLoss;
 use crate::loss::Loss;
 use crate::sample::SampleRef;
 
-// Re-export the trait from irithyll-core so downstream code can use
-// `irithyll::learner::StreamingLearner` unchanged.
-pub use irithyll_core::learner::StreamingLearner;
+// Re-export the trait and capability traits from irithyll-core so downstream
+// code can use `irithyll::learner::StreamingLearner` unchanged and access the
+// new capability traits from the same module path.
+pub use irithyll_core::learner::{HasReadout, StreamingLearner, Structural, Tunable};
 
 // ---------------------------------------------------------------------------
 // SGBTLearner -- adapter wrapping SGBT<L> into StreamingLearner
@@ -193,6 +194,47 @@ impl<L: Loss> StreamingLearner for SGBTLearner<L> {
         self.inner.reset();
     }
 
+    #[allow(deprecated)]
+    fn diagnostics_array(&self) -> [f64; 5] {
+        <Self as Tunable>::diagnostics_array(self)
+    }
+
+    #[allow(deprecated)]
+    fn adjust_config(&mut self, lr_multiplier: f64, lambda_delta: f64) {
+        <Self as Tunable>::adjust_config(self, lr_multiplier, lambda_delta);
+    }
+
+    #[allow(deprecated)]
+    fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
+        <Self as Structural>::apply_structural_change(self, depth_delta, steps_delta);
+    }
+
+    #[allow(deprecated)]
+    fn replacement_count(&self) -> u64 {
+        <Self as Structural>::replacement_count(self)
+    }
+
+    #[allow(deprecated)]
+    fn check_proactive_prune(&mut self) -> bool {
+        <Self as Structural>::check_proactive_prune(self)
+    }
+
+    #[allow(deprecated)]
+    fn set_prune_half_life(&mut self, hl: usize) {
+        <Self as Structural>::set_prune_half_life(self, hl);
+    }
+
+    #[allow(deprecated)]
+    fn tree_structure(&self) -> Vec<(usize, usize, f64, f64, u64)> {
+        <Self as Structural>::tree_structure(self)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tunable impl -- exposes diagnostics and config-adjust to AutoML components
+// ---------------------------------------------------------------------------
+
+impl<L: Loss> Tunable for SGBTLearner<L> {
     fn diagnostics_array(&self) -> [f64; 5] {
         use crate::automl::DiagnosticSource;
         match self.inner.config_diagnostics() {
@@ -213,7 +255,13 @@ impl<L: Loss> StreamingLearner for SGBTLearner<L> {
         let current_lambda = self.inner.config().lambda;
         self.inner.set_lambda(current_lambda + lambda_delta);
     }
+}
 
+// ---------------------------------------------------------------------------
+// Structural impl -- exposes tree capacity management to AutoML components
+// ---------------------------------------------------------------------------
+
+impl<L: Loss> Structural for SGBTLearner<L> {
     fn apply_structural_change(&mut self, depth_delta: i32, steps_delta: i32) {
         if depth_delta != 0 {
             let current = self.inner.config().max_depth as i32;

@@ -39,6 +39,29 @@ pub fn additive_update(state: &mut AttentionState, k: &[f64], v: &[f64], decay: 
     state.add_outer_product(k, v);
 }
 
+/// Vector-gated additive update (GLAVector — paper-canonical GLA).
+///
+/// `S[i,:] = alpha[i] * S[i,:] + k[i] * v^T`
+///
+/// Each row of the state matrix decays by its own independent gate value
+/// `alpha[i] ∈ (0,1)`. This is the exact form from Yang et al. 2024 eq. 3:
+/// `S_t = Diag(α_t) · S_{t-1} + k_t^T v_t` with `α_t ∈ (0,1)^{d_k}`.
+///
+/// Compared to the scalar-gate `additive_update`, this gives the model
+/// per-key-dimension memory control: different key slots can forget at
+/// different rates within the same head.
+///
+/// # Arguments
+///
+/// * `state` -- matrix state of shape `d_k x d_v`
+/// * `k` -- key vector (length `d_k`)
+/// * `v` -- value vector (length `d_v`)
+/// * `alpha` -- per-row decay vector (length `d_k`, each in (0,1))
+pub fn additive_update_vec(state: &mut AttentionState, k: &[f64], v: &[f64], alpha: &[f64]) {
+    state.scale_per_row(alpha);
+    state.add_outer_product(k, v);
+}
+
 /// Delta rule update (DeltaNet).
 ///
 /// `S = S + (v - S^T k) * k^T`
@@ -967,5 +990,71 @@ mod tests {
             "row 1 decayed by 0.9: 10*0.9=9, got {}",
             state.get_matrix(1, 1)
         );
+    }
+
+    #[test]
+    fn additive_update_vec_from_zero_state() {
+        // From zero: per-row decay is a no-op; result equals k * v^T.
+        let mut state = AttentionState::new_matrix(2, 2);
+        let k = [1.0, 2.0];
+        let v = [3.0, 4.0];
+        let alpha = [0.9, 0.8]; // per-row decay, irrelevant from zero
+        additive_update_vec(&mut state, &k, &v, &alpha);
+        assert!(
+            (state.get_matrix(0, 0) - 3.0).abs() < 1e-12,
+            "S[0][0] should be 1*3=3, got {}",
+            state.get_matrix(0, 0)
+        );
+        assert!(
+            (state.get_matrix(1, 1) - 8.0).abs() < 1e-12,
+            "S[1][1] should be 2*4=8, got {}",
+            state.get_matrix(1, 1)
+        );
+    }
+
+    #[test]
+    fn additive_update_vec_per_row_decay() {
+        // Verifies rows decay independently — the key invariant of GLAVector.
+        let mut state = AttentionState::new_matrix(2, 2);
+        state.set_matrix(0, 0, 10.0);
+        state.set_matrix(1, 1, 20.0);
+        let k = [0.0, 0.0]; // no new write
+        let v = [0.0, 0.0];
+        let alpha = [0.5, 0.9]; // different decay per row
+        additive_update_vec(&mut state, &k, &v, &alpha);
+        assert!(
+            (state.get_matrix(0, 0) - 5.0).abs() < 1e-12,
+            "row 0 decayed by 0.5: 10*0.5=5, got {}",
+            state.get_matrix(0, 0)
+        );
+        assert!(
+            (state.get_matrix(1, 1) - 18.0).abs() < 1e-12,
+            "row 1 decayed by 0.9: 20*0.9=18, got {}",
+            state.get_matrix(1, 1)
+        );
+    }
+
+    #[test]
+    fn additive_update_vec_uniform_alpha_matches_scalar() {
+        // With uniform alpha, vec variant must match scalar additive_update.
+        let mut state1 = AttentionState::new_matrix(2, 2);
+        let mut state2 = AttentionState::new_matrix(2, 2);
+        let k = [1.0, 0.5];
+        let v = [2.0, 3.0];
+        let decay = 0.7;
+        let alpha = [decay, decay];
+        additive_update_vec(&mut state1, &k, &v, &alpha);
+        additive_update(&mut state2, &k, &v, decay);
+        let s1 = state1.as_slice();
+        let s2 = state2.as_slice();
+        for i in 0..s1.len() {
+            assert!(
+                (s1[i] - s2[i]).abs() < 1e-12,
+                "uniform alpha vec should match scalar at {}: {} vs {}",
+                i,
+                s1[i],
+                s2[i]
+            );
+        }
     }
 }
